@@ -690,6 +690,25 @@ static void checkPayloadHygiene(const std::string& payload) {
     }
 }
 
+// Exact shape of a recent_events entry: turn (integer) + verb (string), plus
+// subject (string) only when present — no other keys. Pins the numeric side
+// the string-value sweep can't see: an entity id leaking as a JSON number
+// (e.g. "subject": 4) would slip past checkPayloadHygiene.
+static void checkRecentEntryShape(const nlohmann::json& e) {
+    CHECK(e.is_object());
+    CHECK(e.contains("turn"));
+    CHECK(e["turn"].is_number_integer());  // the only numeric field
+    CHECK(e.contains("verb"));
+    CHECK(e["verb"].is_string());
+    if (e.contains("subject")) {
+        CHECK(e["subject"].is_string());  // name, never a numeric id
+        CHECK(e.size() == 3);
+    } else {
+        CHECK(e.size() == 2);
+    }
+    CHECK(!e.contains("object"));  // ids never travel, not even as numbers
+}
+
 static void testProseFacts() {
     using nlohmann::json;
 
@@ -819,9 +838,19 @@ static void testProseFacts() {
         CHECK(p["recent_events"].front()["verb"] == "moved");
     }
 
-    // --- hygiene sweep over every payload built this session ---
+    // --- hygiene sweep over every payload built this session, plus exact
+    // entry shape for every recent_events row (with- and without-subject
+    // entries both occur across turns 1..8) ---
     for (int64_t t = 1; t <= 8; ++t) {
-        checkPayloadHygiene(buildFacts(db, t).payload);
+        const TurnFacts f = buildFacts(db, t);
+        checkPayloadHygiene(f.payload);
+        // Bind the parsed payload to a named json first: iterating
+        // json::parse(...)["recent_events"] directly would range-for over a
+        // reference into a destroyed temporary (silently zero iterations).
+        const json p = json::parse(f.payload);
+        for (const auto& e : p["recent_events"]) {
+            checkRecentEntryShape(e);
+        }
     }
 
     // --- purity: buildFacts performs no writes. All ticks above are
