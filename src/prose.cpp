@@ -8,6 +8,7 @@
 // replaced with a meaningless noun the model could narrate.
 #include "prose.hpp"
 
+#include <cstdio>
 #include <cstdlib>
 #include <optional>
 #include <stdexcept>
@@ -116,7 +117,80 @@ HttpResponse curlTransport(const std::string& body) {
     return resp;
 }
 
+// --- validation gate (REQ-PROSE-13) -----------------------------------------
+
+// One diagnostic line per rejected response, naming the first failed clause
+// in a..e order. This wording is reused by later steps; keep it one line.
+std::nullopt_t failClause(char clause, const char* why) {
+    std::fprintf(stderr, "aiRender: response rejected, clause %c failed: %s\n",
+                 clause, why);
+    return std::nullopt;
+}
+
 }  // namespace
+
+std::optional<std::string> validateAiResponse(const HttpResponse& response,
+                                              const TurnFacts& facts) {
+    // Clause a, HTTP half: checkable before any parse. A transport error
+    // carries status 0, so it fails here too.
+    if (response.status != 200) {
+        return failClause('a', "HTTP status is not 200");
+    }
+
+    // Parse the body ONCE, exception-free (this function must never throw:
+    // tests call it directly, outside aiRender's try/catch). An unparseable
+    // body fails clause b — the spec's a-before-b listing is the DISPLAY
+    // decision order; clause a's stop_reason half is only readable from a
+    // successfully parsed body.
+    const json j = json::parse(response.body, /*cb=*/nullptr,
+                               /*allow_exceptions=*/false);
+    if (j.is_discarded() || !j.is_object()) {
+        return failClause('b', "body is not a JSON object");
+    }
+
+    // Clause a, stop_reason half.
+    if (!j.contains("stop_reason") || !j["stop_reason"].is_string() ||
+        j["stop_reason"].get<std::string>() != "end_turn") {
+        return failClause('a', "stop_reason is not \"end_turn\"");
+    }
+
+    // Clause b: FIRST content block has type "text" and non-empty text.
+    if (!j.contains("content") || !j["content"].is_array() ||
+        j["content"].empty()) {
+        return failClause('b', "no content blocks");
+    }
+    const json& block = j["content"][0];
+    if (!block.is_object() || !block.contains("type") ||
+        !block["type"].is_string() ||
+        block["type"].get<std::string>() != "text" ||
+        !block.contains("text") || !block["text"].is_string()) {
+        return failClause('b', "first content block is not a text block");
+    }
+    const std::string text = block["text"].get<std::string>();
+    if (text.empty()) {
+        return failClause('b', "text block is empty");
+    }
+
+    // Clause c: canon prose verbatim when the turn is room-describing.
+    if (facts.canonRequired &&
+        text.find(facts.canonText) == std::string::npos) {
+        return failClause('c', "canon room description not present verbatim");
+    }
+
+    // Clause d: every failed-event detail verbatim.
+    for (const std::string& detail : facts.failedDetails) {
+        if (text.find(detail) == std::string::npos) {
+            return failClause('d', "failed-event detail not present verbatim");
+        }
+    }
+
+    // Clause e: length cap.
+    if (text.size() > 1200) {
+        return failClause('e', "text exceeds 1200 characters");
+    }
+
+    return text;
+}
 
 TurnFacts buildFacts(Db& db, int64_t turn) {
     TurnFacts facts;

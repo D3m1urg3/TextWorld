@@ -920,6 +920,132 @@ static void testProseTransport() {
     }
 }
 
+// Canned 200 response in the Anthropic Messages shape: stop_reason plus one
+// text content block. Tests below perturb single fields off this baseline.
+static HttpResponse cannedResponse(const std::string& text,
+                                   const std::string& stopReason = "end_turn") {
+    nlohmann::json j;
+    j["stop_reason"] = stopReason;
+    j["content"] =
+        nlohmann::json::array({{{"type", "text"}, {"text", text}}});
+    HttpResponse r;
+    r.status = 200;
+    r.body = j.dump();
+    return r;
+}
+
+// --- validation gate (REQ-PROSE-13 a-e): pure function of (response,
+// anchors); hand-built TurnFacts anchors, no Db, no network. Each clause has
+// a dedicated failing response; failures return nullopt, never throw. ---
+static void testProseValidation() {
+    // Plain anchors: no canon required, no failed events.
+    TurnFacts plain;
+
+    // Room-describing anchors: canon must appear verbatim.
+    TurnFacts canonFacts;
+    canonFacts.canonRequired = true;
+    canonFacts.canonText = "An overgrown walled garden, hemmed in by ivy.";
+
+    // Failed-event anchors: every detail must appear verbatim.
+    TurnFacts failedFacts;
+    failedFacts.failedDetails = {"You can't go that way."};
+
+    // --- fully valid response → exactly the prose text ---
+    {
+        const auto out =
+            validateAiResponse(cannedResponse("The hall is quiet."), plain);
+        CHECK(out.has_value());
+        CHECK(*out == "The hall is quiet.");
+    }
+
+    // --- clause a: non-200 status (e.g. 529 overloaded) ---
+    {
+        HttpResponse r = cannedResponse("The hall is quiet.");
+        r.status = 529;
+        CHECK(!validateAiResponse(r, plain).has_value());
+    }
+
+    // --- clause a: 200 but stop_reason "max_tokens" (truncated output) ---
+    CHECK(!validateAiResponse(
+               cannedResponse("The hall is quiet.", "max_tokens"), plain)
+               .has_value());
+
+    // --- clause b: malformed JSON body ---
+    {
+        HttpResponse r;
+        r.status = 200;
+        r.body = "{\"stop_reason\": \"end_turn\", \"content\": [";
+        CHECK(!validateAiResponse(r, plain).has_value());
+    }
+
+    // --- clause b: empty text block ---
+    CHECK(!validateAiResponse(cannedResponse(""), plain).has_value());
+
+    // --- clause b: missing text block (empty content array) ---
+    {
+        HttpResponse r;
+        r.status = 200;
+        r.body = "{\"stop_reason\": \"end_turn\", \"content\": []}";
+        CHECK(!validateAiResponse(r, plain).has_value());
+    }
+
+    // --- clause b: FIRST block is not a text block ---
+    {
+        HttpResponse r;
+        r.status = 200;
+        r.body =
+            "{\"stop_reason\": \"end_turn\", \"content\": "
+            "[{\"type\": \"tool_use\"}, "
+            "{\"type\": \"text\", \"text\": \"Prose.\"}]}";
+        CHECK(!validateAiResponse(r, plain).has_value());
+    }
+
+    // --- clause c: canon required but absent from the text ---
+    CHECK(!validateAiResponse(cannedResponse("You wander into a garden."),
+                              canonFacts)
+               .has_value());
+
+    // --- clause c: canon paraphrased, not verbatim (one changed word) ---
+    CHECK(!validateAiResponse(
+               cannedResponse(
+                   "An overgrown walled garden, surrounded by ivy."),
+               canonFacts)
+               .has_value());
+
+    // --- clause c: canon verbatim inside surrounding prose → passes ---
+    {
+        const auto out = validateAiResponse(
+            cannedResponse("You step out. " + canonFacts.canonText +
+                           " Birds scatter."),
+            canonFacts);
+        CHECK(out.has_value());
+    }
+
+    // --- clause d: failed detail missing ---
+    CHECK(!validateAiResponse(cannedResponse("The wall stops you cold."),
+                              failedFacts)
+               .has_value());
+
+    // --- clause d: failed detail verbatim → passes ---
+    CHECK(validateAiResponse(
+              cannedResponse("You can't go that way. The wall is solid."),
+              failedFacts)
+              .has_value());
+
+    // --- clause e boundary: 1200 chars passes, 1201 fails ---
+    CHECK(validateAiResponse(cannedResponse(std::string(1200, 'x')), plain)
+              .has_value());
+    CHECK(!validateAiResponse(cannedResponse(std::string(1201, 'x')), plain)
+               .has_value());
+
+    // --- transport error (empty body) → nullopt without throwing ---
+    {
+        HttpResponse r;
+        r.transportError = true;
+        CHECK(!validateAiResponse(r, plain).has_value());
+    }
+}
+
 // --- persistence after play (REQ-PROTO-12 item 8, REQ-PROTO-10): a played
 // world survives a full close/reopen with turn counter, entity positions, and
 // the complete event transcript intact — and is still playable afterward. ---
@@ -1043,6 +1169,7 @@ int main() {
     testLoop();
     testProseFacts();
     testProseTransport();
+    testProseValidation();
     testPersistence();
     testPortability();
 

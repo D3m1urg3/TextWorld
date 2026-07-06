@@ -52,6 +52,21 @@ struct HttpResponse {
 };
 using HttpTransport = std::function<HttpResponse(const std::string& body)>;
 
+// Mechanical validation gate (REQ-PROSE-13): pure function of (response,
+// anchors) — no DB, no network, never throws. Returns the extracted prose iff
+// ALL clauses hold, std::nullopt otherwise:
+//   a. status == 200 AND response JSON stop_reason == "end_turn";
+//   b. body parses as JSON with a FIRST content block of type "text" whose
+//      text is non-empty;
+//   c. if facts.canonRequired: facts.canonText appears as an EXACT substring;
+//   d. EVERY facts.failedDetails entry appears as an EXACT substring;
+//   e. text length <= 1200 characters.
+// Consumes ONLY the anchor fields of TurnFacts (payload is ignored). On
+// failure it emits one stderr diagnostic line naming the first failed clause
+// in a..e order; nothing is ever appended to the returned prose.
+std::optional<std::string> validateAiResponse(const HttpResponse& response,
+                                              const TurnFacts& facts);
+
 // Render every event of `turn` as AI prose. Returns std::nullopt when AI
 // rendering is unavailable (caller falls back to the template renderer).
 std::optional<std::string> aiRender(Db& db, int64_t turn);
