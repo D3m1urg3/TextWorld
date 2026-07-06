@@ -8,9 +8,12 @@
 // replaced with a meaningless noun the model could narrate.
 #include "prose.hpp"
 
+#include <cstdlib>
 #include <optional>
 #include <stdexcept>
 #include <vector>
+
+#include <curl/curl.h>
 
 #include "json.hpp"
 
@@ -60,6 +63,57 @@ std::vector<std::string> portableNamesIn(Db& db, int64_t holder) {
     s.bind(1, holder);
     while (s.step()) items.push_back(s.colText(0));
     return items;
+}
+
+// --- production HTTP transport (REQ-PROSE-9, REQ-PROSE-10) -----------------
+
+// libcurl write callback: append the response bytes to a std::string.
+size_t appendToString(char* ptr, size_t size, size_t nmemb, void* userdata) {
+    static_cast<std::string*>(userdata)->append(ptr, size * nmemb);
+    return size * nmemb;
+}
+
+// One POST to the Anthropic Messages API. URL, headers, and timeout are
+// fixed here — they are properties of THIS transport, never seam parameters.
+// The API key is read from ANTHROPIC_API_KEY at call time and goes into the
+// x-api-key header ONLY: never into the payload, logs, or fixtures. Any curl
+// failure (timeout, connect failure, ...) → transportError; NO retries.
+HttpResponse curlTransport(const std::string& body) {
+    HttpResponse resp;
+
+    CURL* curl = curl_easy_init();
+    if (curl == nullptr) {
+        resp.transportError = true;
+        return resp;
+    }
+
+    const char* key = std::getenv("ANTHROPIC_API_KEY");
+    curl_slist* headers = nullptr;
+    headers = curl_slist_append(
+        headers, ("x-api-key: " + std::string(key != nullptr ? key : "")).c_str());
+    headers = curl_slist_append(headers, "anthropic-version: 2023-06-01");
+    headers = curl_slist_append(headers, "content-type: application/json");
+
+    curl_easy_setopt(curl, CURLOPT_URL, "https://api.anthropic.com/v1/messages");
+    curl_easy_setopt(curl, CURLOPT_POST, 1L);
+    curl_easy_setopt(curl, CURLOPT_POSTFIELDS, body.c_str());
+    curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE,
+                     static_cast<long>(body.size()));
+    curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
+    curl_easy_setopt(curl, CURLOPT_TIMEOUT, 8L);  // total budget, seconds
+    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, appendToString);
+    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &resp.body);
+
+    const CURLcode rc = curl_easy_perform(curl);
+    if (rc != CURLE_OK) {
+        resp.transportError = true;
+    } else {
+        curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &resp.status);
+    }
+
+    curl_slist_free_all(headers);
+    curl_easy_cleanup(curl);
+    return resp;
 }
 
 }  // namespace
@@ -166,8 +220,16 @@ TurnFacts buildFacts(Db& db, int64_t turn) {
     return facts;
 }
 
-std::optional<std::string> aiRender(Db& db, int64_t turn) {
-    (void)db;
-    (void)turn;
+std::optional<std::string> aiRender(Db& db, int64_t turn,
+                                    const HttpTransport& transport) {
+    // Request-body assembly is a later step; for now the facts payload rides
+    // as the body. Exactly ONE transport call — no retry loop, ever.
+    const TurnFacts facts = buildFacts(db, turn);
+    const HttpResponse resp = transport(facts.payload);
+    (void)resp;  // response validation is the next step
     return std::nullopt;
+}
+
+std::optional<std::string> aiRender(Db& db, int64_t turn) {
+    return aiRender(db, turn, curlTransport);
 }

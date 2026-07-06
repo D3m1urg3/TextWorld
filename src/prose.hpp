@@ -9,6 +9,7 @@
 #pragma once
 
 #include <cstdint>
+#include <functional>
 #include <optional>
 #include <string>
 #include <vector>
@@ -39,6 +40,24 @@ struct TurnFacts {
 // that is the destination.
 TurnFacts buildFacts(Db& db, int64_t turn);
 
+// Transport seam (REQ-PROSE-9, REQ-PROSE-10): the ONLY thing a transport
+// varies is the response. URL, headers (x-api-key, anthropic-version,
+// content-type), and timeout are fixed properties of the production
+// transport, not parameters — tests substitute fakes that return canned
+// HttpResponse values and never touch the network.
+struct HttpResponse {
+    bool transportError = false;  // timeout, connect failure, curl error
+    long status = 0;
+    std::string body;
+};
+using HttpTransport = std::function<HttpResponse(const std::string& body)>;
+
 // Render every event of `turn` as AI prose. Returns std::nullopt when AI
 // rendering is unavailable (caller falls back to the template renderer).
 std::optional<std::string> aiRender(Db& db, int64_t turn);
+
+// Test-visible overload: same contract, but the HTTP transport is injected.
+// The two-arg production version delegates here, binding the libcurl
+// transport. The transport is invoked exactly once per call — no retries.
+std::optional<std::string> aiRender(Db& db, int64_t turn,
+                                    const HttpTransport& transport);

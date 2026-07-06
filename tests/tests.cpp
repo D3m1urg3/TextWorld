@@ -864,6 +864,62 @@ static void testProseFacts() {
     }
 }
 
+// --- transport seam (REQ-PROSE-9, REQ-PROSE-10, REQ-PROSE-15): aiRender's
+// HTTP transport is injected; every transport in this suite is a fake lambda
+// returning a canned HttpResponse, so the default test run makes NO network
+// access — the libcurl production transport is never invoked here. ---
+static void testProseTransport() {
+    const TempDbFile worldPath("textworld_transport_tests.db");
+    Db db = openWorld(worldPath.string(), "seed/base.sql");
+
+    // One committed turn to render.
+    CHECK(runTurn(db, "wait").outcome == TurnOutcome::Ticked);
+
+    // --- transportError fake → nullopt, no crash, exactly ONE call ---
+    // The counter proves no retry loop hides behind a transport failure.
+    {
+        int calls = 0;
+        const HttpTransport failing = [&calls](const std::string& body) {
+            ++calls;
+            CHECK(!body.empty());  // the transport is handed a request body
+            HttpResponse r;
+            r.transportError = true;  // timeout / connect failure / curl error
+            return r;
+        };
+        CHECK(!aiRender(db, 1, failing).has_value());
+        CHECK(calls == 1);
+    }
+
+    // --- HTTP error status (non-2xx) → nullopt, still exactly one call ---
+    {
+        int calls = 0;
+        const HttpTransport overloaded = [&calls](const std::string&) {
+            ++calls;
+            HttpResponse r;
+            r.status = 529;
+            r.body = "{\"type\":\"error\"}";
+            return r;
+        };
+        CHECK(!aiRender(db, 1, overloaded).has_value());
+        CHECK(calls == 1);
+    }
+
+    // --- 200 with a body → still nullopt for now (response validation is a
+    // later step), and still exactly one call ---
+    {
+        int calls = 0;
+        const HttpTransport ok = [&calls](const std::string&) {
+            ++calls;
+            HttpResponse r;
+            r.status = 200;
+            r.body = "{\"content\":[{\"type\":\"text\",\"text\":\"Prose.\"}]}";
+            return r;
+        };
+        CHECK(!aiRender(db, 1, ok).has_value());
+        CHECK(calls == 1);
+    }
+}
+
 // --- persistence after play (REQ-PROTO-12 item 8, REQ-PROTO-10): a played
 // world survives a full close/reopen with turn counter, entity positions, and
 // the complete event transcript intact — and is still playable afterward. ---
@@ -986,6 +1042,7 @@ int main() {
     testRender();
     testLoop();
     testProseFacts();
+    testProseTransport();
     testPersistence();
     testPortability();
 
