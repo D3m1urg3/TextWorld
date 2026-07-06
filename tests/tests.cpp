@@ -1000,6 +1000,34 @@ static void testProseValidation() {
         CHECK(!validateAiResponse(r, plain).has_value());
     }
 
+    // --- never-throw on type-confused JSON: status-200 bodies whose fields
+    // hold the wrong TYPE (or whose root is not an object) return nullopt
+    // without aborting — pins the type guards against a future refactor
+    // reintroducing a throwing json access ---
+    {
+        HttpResponse r;
+        r.status = 200;
+
+        r.body = "{\"stop_reason\":5,\"content\":42}";  // numeric stop_reason
+        CHECK(!validateAiResponse(r, plain).has_value());
+
+        r.body = "{\"stop_reason\":\"end_turn\",\"content\":{}}";  // non-array content
+        CHECK(!validateAiResponse(r, plain).has_value());
+
+        // numeric text field
+        r.body = "{\"stop_reason\":\"end_turn\",\"content\":[{\"type\":\"text\",\"text\":123}]}";
+        CHECK(!validateAiResponse(r, plain).has_value());
+
+        r.body = "[1,2,3]";  // bare JSON array
+        CHECK(!validateAiResponse(r, plain).has_value());
+
+        r.body = "\"end_turn\"";  // bare JSON string
+        CHECK(!validateAiResponse(r, plain).has_value());
+
+        r.body = "null";  // bare JSON null
+        CHECK(!validateAiResponse(r, plain).has_value());
+    }
+
     // --- clause c: canon required but absent from the text ---
     CHECK(!validateAiResponse(cannedResponse("You wander into a garden."),
                               canonFacts)
