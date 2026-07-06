@@ -10,9 +10,14 @@
 #include "db.hpp"
 #include "loop.hpp"
 #include "mutations.hpp"
+#include "prose.hpp"
 #include "render.hpp"
 #include "systems.hpp"
 #include "world.hpp"
+
+// vendor/ is a PRIVATE include dir of twcore, so the tests reach the vendored
+// nlohmann/json by relative path.
+#include "../vendor/json.hpp"
 
 static int g_checks = 0;
 static int g_failures = 0;
@@ -644,6 +649,192 @@ static void testLoop() {
     }
 }
 
+// --- facts builder (REQ-PROSE-6, REQ-PROSE-7): pure (db, turn) → TurnFacts,
+// payload parseable JSON with exactly the REQ-PROSE-7 keys, name-resolved,
+// id-free, with validation anchors. No network anywhere. ---
+
+// Single text-value query helper.
+static std::string queryText(Db& db, const char* sql) {
+    Stmt s = db.prepare(sql);
+    CHECK(s.step());
+    return s.colText(0);
+}
+
+// Collect every string VALUE in a JSON tree (keys are the fixed payload
+// schema; values are what carries world data to the model).
+static void collectStrings(const nlohmann::json& j, std::vector<std::string>& out) {
+    if (j.is_string()) {
+        out.push_back(j.get<std::string>());
+    } else if (j.is_object() || j.is_array()) {
+        for (const auto& el : j) collectStrings(el, out);
+    }
+}
+
+// REQ-PROSE-6 hygiene: no entity/row id (no digit ever appears in a payload
+// string — turn numbers travel as JSON numbers), no file path, no table name,
+// and never the "something" placeholder.
+static void checkPayloadHygiene(const std::string& payload) {
+    CHECK(!contains(payload, "something"));
+
+    std::vector<std::string> values;
+    collectStrings(nlohmann::json::parse(payload), values);
+    CHECK(!values.empty());
+    for (const std::string& v : values) {
+        CHECK(v.find_first_of("0123456789") == std::string::npos);  // no ids
+        CHECK(!contains(v, "/"));    // no file paths
+        CHECK(!contains(v, ".db"));  // no file paths
+        for (const char* table :
+             {"entities", "location", "portable", "description", "meta"}) {
+            CHECK(!contains(v, table));  // no table names
+        }
+    }
+}
+
+static void testProseFacts() {
+    using nlohmann::json;
+
+    const TempDbFile worldPath("textworld_prose_tests.db");
+    Db db = openWorld(worldPath.string(), "seed/base.sql");
+
+    // Canon prose fetched independently, compared verbatim below.
+    const std::string hallProse =
+        queryText(db, "SELECT prose FROM description WHERE entity = 1");
+    const std::string gardenProse =
+        queryText(db, "SELECT prose FROM description WHERE entity = 2");
+
+    // --- turn 1: take lantern — plain turn, full payload shape ---
+    CHECK(runTurn(db, "take lantern").outcome == TurnOutcome::Ticked);
+    {
+        const TurnFacts f = buildFacts(db, 1);
+        const json p = json::parse(f.payload);
+
+        // Top-level keys are EXACTLY the REQ-PROSE-7 set.
+        CHECK(p.is_object());
+        CHECK(p.size() == 4);
+        CHECK(p.contains("events"));
+        CHECK(p.contains("room"));
+        CHECK(p.contains("inventory"));
+        CHECK(p.contains("recent_events"));
+
+        CHECK(p["events"].size() == 1);
+        CHECK(p["events"][0]["verb"] == "took");
+        CHECK(p["events"][0]["subject"] == "lantern");  // name, not id 4
+        CHECK(!p["events"][0].contains("detail"));      // NULL detail omitted
+        CHECK(!p["events"][0].contains("object"));      // ids never travel
+
+        // Room slice: name, canon_description, exits, items — nothing else.
+        CHECK(p["room"].size() == 4);
+        CHECK(p["room"]["name"] == "stone hall");
+        CHECK(p["room"]["canon_description"] == hallProse);
+        CHECK(p["room"]["exits"] == json::array({"north"}));
+        CHECK(p["room"]["items"].empty());  // the lantern is in hand now
+
+        CHECK(p["inventory"] == json::array({"lantern"}));
+        CHECK(p["recent_events"].empty());  // nothing precedes turn 1
+
+        // Anchors: plain turn — no canon required, no failures.
+        CHECK(!f.canonRequired);
+        CHECK(f.failedDetails.empty());
+    }
+
+    // --- turn 2: go north — 'moved' turn, room slice is the DESTINATION ---
+    CHECK(runTurn(db, "go north").outcome == TurnOutcome::Ticked);
+    {
+        const TurnFacts f = buildFacts(db, 2);
+        const json p = json::parse(f.payload);
+
+        CHECK(p["events"].size() == 1);
+        CHECK(p["events"][0]["verb"] == "moved");
+
+        CHECK(p["room"]["name"] == "garden");
+        CHECK(p["room"]["canon_description"] == gardenProse);  // verbatim
+        CHECK(p["room"]["exits"] == json::array({"south"}));
+        CHECK(p["room"]["items"] == json::array({"key"}));
+        CHECK(p["inventory"] == json::array({"lantern"}));
+
+        CHECK(p["recent_events"].size() == 1);
+        CHECK(p["recent_events"][0]["turn"] == 1);
+        CHECK(p["recent_events"][0]["verb"] == "took");
+        CHECK(p["recent_events"][0]["subject"] == "lantern");
+
+        // Anchors: room-describing turn carries the destination canon.
+        CHECK(f.canonRequired);
+        CHECK(f.canonText == gardenProse);
+        CHECK(f.failedDetails.empty());
+    }
+
+    // --- turn 3: look — room-describing; zero-id event omits subject ---
+    CHECK(runTurn(db, "look").outcome == TurnOutcome::Ticked);
+    {
+        const TurnFacts f = buildFacts(db, 3);
+        const json p = json::parse(f.payload);
+        CHECK(p["events"].size() == 1);
+        CHECK(p["events"][0]["verb"] == "looked");
+        CHECK(!p["events"][0].contains("subject"));  // subject=0 → omitted
+        CHECK(!p["events"][0].contains("object"));   // object=0 → omitted
+        CHECK(!p["events"][0].contains("detail"));   // NULL → omitted
+        CHECK(p["room"]["canon_description"] == gardenProse);
+        CHECK(f.canonRequired);
+        CHECK(f.canonText == gardenProse);
+        CHECK(f.failedDetails.empty());
+    }
+
+    // --- turn 4: inventory — 'looked' with detail is NOT room-describing ---
+    CHECK(runTurn(db, "inventory").outcome == TurnOutcome::Ticked);
+    {
+        const TurnFacts f = buildFacts(db, 4);
+        const json p = json::parse(f.payload);
+        CHECK(p["events"][0]["verb"] == "looked");
+        CHECK(p["events"][0]["detail"] == "inventory");
+        CHECK(!p["events"][0].contains("subject"));
+        CHECK(!f.canonRequired);
+        CHECK(f.failedDetails.empty());
+    }
+
+    // --- turn 5: wall bump — 'failed' anchor carries the detail verbatim ---
+    CHECK(runTurn(db, "go east").outcome == TurnOutcome::Ticked);
+    {
+        const TurnFacts f = buildFacts(db, 5);
+        const json p = json::parse(f.payload);
+        CHECK(p["events"][0]["verb"] == "failed");
+        CHECK(p["events"][0]["detail"] == "You can't go that way.");
+        CHECK(!p["events"][0].contains("subject"));
+        CHECK(!f.canonRequired);
+        CHECK(f.failedDetails.size() == 1);
+        CHECK(f.failedDetails[0] == "You can't go that way.");
+    }
+
+    // --- turns 6-8: waits, so turn 8 has 7 preceding events → cap at 6 ---
+    for (int i = 0; i < 3; ++i) {
+        CHECK(runTurn(db, "wait").outcome == TurnOutcome::Ticked);
+    }
+    {
+        const TurnFacts f = buildFacts(db, 8);
+        const json p = json::parse(f.payload);
+        CHECK(p["events"][0]["verb"] == "waited");
+        CHECK(p["recent_events"].size() == 6);  // capped
+        // Chronological window: the six turns preceding 8 are 2..7.
+        CHECK(p["recent_events"].front()["turn"] == 2);
+        CHECK(p["recent_events"].back()["turn"] == 7);
+        CHECK(p["recent_events"].front()["verb"] == "moved");
+    }
+
+    // --- hygiene sweep over every payload built this session ---
+    for (int64_t t = 1; t <= 8; ++t) {
+        checkPayloadHygiene(buildFacts(db, t).payload);
+    }
+
+    // --- purity: buildFacts performs no writes. All ticks above are
+    // committed, so the world file bytes are the full committed state;
+    // byte-identical before/after proves the builder touched nothing. ---
+    {
+        const std::string bytesBefore = readFileBytes(worldPath);
+        CHECK(!bytesBefore.empty());
+        for (int64_t t = 0; t <= 8; ++t) (void)buildFacts(db, t);
+        CHECK(readFileBytes(worldPath) == bytesBefore);
+    }
+}
+
 // --- persistence after play (REQ-PROTO-12 item 8, REQ-PROTO-10): a played
 // world survives a full close/reopen with turn counter, entity positions, and
 // the complete event transcript intact — and is still playable afterward. ---
@@ -765,6 +956,7 @@ int main() {
     testSystems();
     testRender();
     testLoop();
+    testProseFacts();
     testPersistence();
     testPortability();
 
