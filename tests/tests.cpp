@@ -1309,9 +1309,9 @@ static void testProseAiRender() {
     {
         cannedText = "You wander into some garden or other.";  // paraphrase
         const auto out = aiRender(db, 1, fake);
-        CHECK(!out.has_value());
-        const std::string shown = out ? *out : render(db, 1);
-        CHECK(shown == render(db, 1));
+        CHECK(!out.has_value());  // clause c rejects → aiRender returns nullopt
+        // End-to-end fallback byte-identity (dispatch shows the pure template
+        // render on this nullopt) is covered by the AI-off runTurn test below.
     }
 
     // --- purity (REQ-PROSE-5): aiRender with a fake transport leaves the
