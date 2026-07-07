@@ -66,6 +66,78 @@ std::vector<std::string> portableNamesIn(Db& db, int64_t holder) {
     return items;
 }
 
+// Join a list as "a, b, c" — character-identical to render.cpp's joinList.
+std::string joinList(const std::vector<std::string>& items) {
+    std::string out;
+    for (const std::string& item : items) {
+        if (!out.empty()) out += ", ";
+        out += item;
+    }
+    return out;
+}
+
+// --- deterministic appends (REQ-PROSE-14) -----------------------------------
+// The mechanical tail glued after validated AI prose, in render.cpp's EXACT
+// line formats (its roomBlock minus the canon line — the canon rides INSIDE
+// the AI prose, verbatim-checked by clause c — and its inventoryBlock).
+
+// "Exits: …" and "You see: …" lines for one room, formats identical to
+// render.cpp's roomBlock tail.
+std::string exitsAndItemsLines(Db& db, int64_t room) {
+    std::string out;
+
+    {
+        std::vector<std::string> dirs;
+        Stmt s = db.prepare(
+            "SELECT direction FROM exits WHERE room = ? ORDER BY direction");
+        s.bind(1, room);
+        while (s.step()) dirs.push_back(s.colText(0));
+        if (!dirs.empty()) out += "Exits: " + joinList(dirs) + ".\n";
+    }
+
+    {
+        const std::vector<std::string> items = portableNamesIn(db, room);
+        if (!items.empty()) out += "You see: " + joinList(items) + ".\n";
+    }
+
+    return out;
+}
+
+// Inventory line, format identical to render.cpp's inventoryBlock.
+std::string inventoryLine(Db& db, int64_t actor) {
+    const std::vector<std::string> items = portableNamesIn(db, actor);
+    if (items.empty()) return "You are carrying nothing.\n";
+    return "You are carrying: " + joinList(items) + ".\n";
+}
+
+// The full appended block for one turn, from this unit's OWN fresh SELECTs:
+// per room-describing event ('moved', or 'looked' with NULL detail), the
+// exits + visible-items lines for the actor's CURRENT room (post-commit
+// state, so for 'moved' that is the destination); per 'looked' event with
+// detail='inventory', the carrying line.
+std::string deterministicAppends(Db& db, int64_t turn) {
+    std::string out;
+
+    Stmt ev = db.prepare(
+        "SELECT actor, verb, detail, detail IS NULL "
+        "FROM events WHERE turn = ? ORDER BY id");
+    ev.bind(1, turn);
+    while (ev.step()) {
+        const int64_t actor = ev.colInt(0);
+        const std::string verb = ev.colText(1);
+        const std::string detail = ev.colText(2);
+        const bool detailIsNull = ev.colInt(3) != 0;
+
+        if (verb == "moved" || (verb == "looked" && detailIsNull)) {
+            out += exitsAndItemsLines(db, roomOf(db, actor));
+        } else if (verb == "looked" && detail == "inventory") {
+            out += inventoryLine(db, actor);
+        }
+    }
+
+    return out;
+}
+
 // --- narrator system prompt (REQ-PROSE-11) ----------------------------------
 
 // Stable constant, versioned by git — every REQ-PROSE-11 rule lives here:
@@ -335,14 +407,47 @@ TurnFacts buildFacts(Db& db, int64_t turn) {
     return facts;
 }
 
+bool aiNarrationEnabled() {
+    // Key set and non-empty; TEXTWORLD_AI kills the feature only when it is
+    // EXACTLY "0" — unset or any other value leaves narration on.
+    const char* key = std::getenv("ANTHROPIC_API_KEY");
+    if (key == nullptr || key[0] == '\0') return false;
+    const char* ai = std::getenv("TEXTWORLD_AI");
+    if (ai != nullptr && std::string(ai) == "0") return false;
+    return true;
+}
+
 std::optional<std::string> aiRender(Db& db, int64_t turn,
                                     const HttpTransport& transport) {
-    // Request-body assembly is a later step; for now the facts payload rides
-    // as the body. Exactly ONE transport call — no retry loop, ever.
-    const TurnFacts facts = buildFacts(db, turn);
-    const HttpResponse resp = transport(facts.payload);
-    (void)resp;  // response validation is the next step
-    return std::nullopt;
+    // REQ-PROSE-3: no AI-path failure may crash a turn. The whole pipeline
+    // sits inside try/catch; ANY failure yields one stderr diagnostic line
+    // (never player prose) and nullopt — the caller falls back to templates.
+    try {
+        // Exactly ONE transport call — no retry loop, ever.
+        const TurnFacts facts = buildFacts(db, turn);
+        const HttpResponse resp = transport(buildRequestBody(facts.payload));
+
+        // validateAiResponse never throws and emits its own diagnostic line
+        // (first failed clause) on rejection.
+        const std::optional<std::string> text = validateAiResponse(resp, facts);
+        if (!text) return std::nullopt;
+
+        // Validated AI prose + the deterministic tail (REQ-PROSE-14), in the
+        // template renderer's exact formats.
+        std::string out = *text;
+        out += "\n";
+        out += deterministicAppends(db, turn);
+        return out;
+    } catch (const std::exception& e) {
+        std::fprintf(stderr, "aiRender: failed, falling back to templates: %s\n",
+                     e.what());
+        return std::nullopt;
+    } catch (...) {
+        std::fprintf(stderr,
+                     "aiRender: failed, falling back to templates: "
+                     "unknown exception\n");
+        return std::nullopt;
+    }
 }
 
 std::optional<std::string> aiRender(Db& db, int64_t turn) {

@@ -74,6 +74,12 @@ std::string buildRequestBody(const std::string& factsPayload);
 std::optional<std::string> validateAiResponse(const HttpResponse& response,
                                               const TurnFacts& facts);
 
+// AI narration switch (REQ-PROSE-2): true iff ANTHROPIC_API_KEY is set and
+// non-empty AND TEXTWORLD_AI is unset or anything except exactly "0". The
+// caller checks this BEFORE aiRender, so a disabled run never builds a
+// request or touches a transport.
+bool aiNarrationEnabled();
+
 // Render every event of `turn` as AI prose. Returns std::nullopt when AI
 // rendering is unavailable (caller falls back to the template renderer).
 std::optional<std::string> aiRender(Db& db, int64_t turn);

@@ -6,11 +6,18 @@
 #include <string>
 
 #include "loop.hpp"
+#include "prose.hpp"
 #include "world.hpp"
 
 int main() {
     try {
         Db db = openWorld("world.db");
+
+        // One-line mode notice (REQ-PROSE-2): told once, before the first
+        // prompt, when AI narration is off. Silence means AI mode.
+        if (!aiNarrationEnabled()) {
+            std::fputs("AI narration off — template mode\n", stdout);
+        }
 
         // Courtesy render before the first prompt: where you are. Read-only —
         // no tick, no transaction, no event row (REQ-PROTO-5).

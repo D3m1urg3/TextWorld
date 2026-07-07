@@ -905,8 +905,8 @@ static void testProseTransport() {
         CHECK(calls == 1);
     }
 
-    // --- 200 with a body → still nullopt for now (response validation is a
-    // later step), and still exactly one call ---
+    // --- 200 with a body but NO stop_reason → rejected by the validation
+    // gate (clause a) → nullopt, and still exactly one call ---
     {
         int calls = 0;
         const HttpTransport ok = [&calls](const std::string&) {
@@ -919,7 +919,38 @@ static void testProseTransport() {
         CHECK(!aiRender(db, 1, ok).has_value());
         CHECK(calls == 1);
     }
+
+    // --- a transport that THROWS → aiRender's try/catch absorbs it
+    // (REQ-PROSE-3: no AI-path failure may crash a turn) → nullopt ---
+    {
+        const HttpTransport throwing = [](const std::string&) -> HttpResponse {
+            throw std::runtime_error("socket exploded");
+        };
+        CHECK(!aiRender(db, 1, throwing).has_value());
+    }
 }
+
+// Saves ANY env var on construction, restores it on destruction — unsetenv
+// if it was unset. Env-var discipline: every test that touches
+// ANTHROPIC_API_KEY / TEXTWORLD_AI holds one of these for the duration.
+struct ScopedEnvVar {
+    const char* name;
+    bool hadPrior;
+    std::string priorValue;
+
+    explicit ScopedEnvVar(const char* n) : name(n) {
+        const char* prior = std::getenv(name);
+        hadPrior = prior != nullptr;
+        if (hadPrior) priorValue = prior;
+    }
+    ~ScopedEnvVar() {
+        if (hadPrior) {
+            setenv(name, priorValue.c_str(), 1);
+        } else {
+            unsetenv(name);
+        }
+    }
+};
 
 // Saves TEXTWORLD_MODEL on construction, restores it on destruction —
 // unsetenv if it was unset. Env-var discipline: the suite must pass (and
@@ -1173,6 +1204,154 @@ static void testProseValidation() {
     }
 }
 
+// --- enable switch (REQ-PROSE-2): aiNarrationEnabled() truth table. Pure
+// env reads — no Db, no network. Both vars are guarded and restored. ---
+static void testProseNarrationEnabled() {
+    const ScopedEnvVar keyGuard("ANTHROPIC_API_KEY");
+    const ScopedEnvVar aiGuard("TEXTWORLD_AI");
+
+    // No key → off, regardless of TEXTWORLD_AI.
+    unsetenv("ANTHROPIC_API_KEY");
+    unsetenv("TEXTWORLD_AI");
+    CHECK(!aiNarrationEnabled());
+    setenv("TEXTWORLD_AI", "1", 1);
+    CHECK(!aiNarrationEnabled());
+
+    // Empty key counts as no key.
+    setenv("ANTHROPIC_API_KEY", "", 1);
+    unsetenv("TEXTWORLD_AI");
+    CHECK(!aiNarrationEnabled());
+
+    // Key present: on, unless TEXTWORLD_AI is EXACTLY "0".
+    setenv("ANTHROPIC_API_KEY", "test-key-never-used", 1);
+    unsetenv("TEXTWORLD_AI");
+    CHECK(aiNarrationEnabled());
+    setenv("TEXTWORLD_AI", "1", 1);
+    CHECK(aiNarrationEnabled());
+    setenv("TEXTWORLD_AI", "0", 1);
+    CHECK(!aiNarrationEnabled());  // the kill switch
+    setenv("TEXTWORLD_AI", "00", 1);
+    CHECK(aiNarrationEnabled());  // not exactly "0"
+    setenv("TEXTWORLD_AI", "off", 1);
+    CHECK(aiNarrationEnabled());  // not exactly "0"
+    setenv("TEXTWORLD_AI", "", 1);
+    CHECK(aiNarrationEnabled());  // not exactly "0"
+    // guards restore both vars here.
+}
+
+// --- aiRender end-to-end (REQ-PROSE-1, REQ-PROSE-5, REQ-PROSE-14) with fake
+// transports, plus the runTurn dispatch (template fallback). No network. ---
+static void testProseAiRender() {
+    const TempDbFile worldPath("textworld_airender_tests.db");
+    Db db = openWorld(worldPath.string(), "seed/base.sql");
+
+    const std::string gardenProse =
+        queryText(db, "SELECT prose FROM description WHERE entity = 2");
+
+    // A fake transport whose canned text is chosen per test; counts calls.
+    int calls = 0;
+    std::string cannedText;
+    const HttpTransport fake = [&](const std::string& body) {
+        ++calls;
+        // The transport receives the full REQUEST BODY (not the bare facts
+        // payload): a Messages API JSON with model/system/messages.
+        const nlohmann::json j = nlohmann::json::parse(body);
+        CHECK(j.contains("model"));
+        CHECK(j.contains("system"));
+        CHECK(j.contains("messages"));
+        return cannedResponse(cannedText);
+    };
+
+    // --- moved turn: AI prose + the template's OWN Exits/You-see tail ---
+    CHECK(runTurn(db, "go north").outcome == TurnOutcome::Ticked);  // turn 1
+    {
+        cannedText = "You step through the archway. " + gardenProse +
+                     " Cool air settles around you.";
+        calls = 0;
+        const auto out = aiRender(db, 1, fake);
+        CHECK(calls == 1);
+        CHECK(out.has_value());
+
+        // The appended tail must be CHARACTER-IDENTICAL to the tail of the
+        // template render for the same turn (everything from "Exits: " on).
+        const std::string tmpl = render(db, 1);
+        const size_t tailPos = tmpl.find("Exits: ");
+        CHECK(tailPos != std::string::npos);
+        const std::string tail = tmpl.substr(tailPos);
+        CHECK(contains(tail, "Exits: south.\n"));
+        CHECK(contains(tail, "You see: key.\n"));
+        CHECK(*out == cannedText + "\n" + tail);
+    }
+
+    // --- inventory turn, empty-handed: the exact carrying line appended ---
+    CHECK(runTurn(db, "inventory").outcome == TurnOutcome::Ticked);  // turn 2
+    {
+        cannedText = "You pat your pockets.";
+        const auto out = aiRender(db, 2, fake);
+        CHECK(out.has_value());
+        CHECK(render(db, 2) == "You are carrying nothing.\n");
+        CHECK(*out == cannedText + "\n" + render(db, 2));
+    }
+
+    // --- inventory turn, carrying the key: non-empty carrying line ---
+    CHECK(runTurn(db, "take key").outcome == TurnOutcome::Ticked);   // turn 3
+    CHECK(runTurn(db, "inventory").outcome == TurnOutcome::Ticked);  // turn 4
+    {
+        cannedText = "The key's weight is reassuring.";
+        const auto out = aiRender(db, 4, fake);
+        CHECK(out.has_value());
+        CHECK(render(db, 4) == "You are carrying: key.\n");
+        CHECK(*out == cannedText + "\n" + render(db, 4));
+    }
+
+    // --- refusal fake: canon missing on a room-describing turn → clause c
+    // rejects → nullopt → the dispatch's fallback is exactly the template ---
+    {
+        cannedText = "You wander into some garden or other.";  // paraphrase
+        const auto out = aiRender(db, 1, fake);
+        CHECK(!out.has_value());
+        const std::string shown = out ? *out : render(db, 1);
+        CHECK(shown == render(db, 1));
+    }
+
+    // --- purity (REQ-PROSE-5): aiRender with a fake transport leaves the
+    // world file BYTE-IDENTICAL (all turns above are committed) ---
+    {
+        const std::string bytesBefore = readFileBytes(worldPath);
+        CHECK(!bytesBefore.empty());
+        cannedText = "You step through the archway. " + gardenProse + " Quiet.";
+        (void)aiRender(db, 1, fake);
+        cannedText = "You pat your pockets.";
+        (void)aiRender(db, 2, fake);
+        CHECK(readFileBytes(worldPath) == bytesBefore);
+    }
+
+    // --- dispatch, AI off (no key): runTurn output BYTE-IDENTICAL to the
+    // template render — no transport exists to be touched ---
+    {
+        const ScopedEnvVar keyGuard("ANTHROPIC_API_KEY");
+        const ScopedEnvVar aiGuard("TEXTWORLD_AI");
+        unsetenv("ANTHROPIC_API_KEY");
+        unsetenv("TEXTWORLD_AI");
+
+        const TurnResult r = runTurn(db, "look");  // turn 5
+        CHECK(r.outcome == TurnOutcome::Ticked);
+        CHECK(queryInt(db, "SELECT value FROM meta WHERE key = 'turn'") == 5);
+        CHECK(r.output == render(db, 5));
+
+        // Kill switch through the production path: key present but
+        // TEXTWORLD_AI=0 → enabled() is false BEFORE any transport, so this
+        // never reaches the network either.
+        setenv("ANTHROPIC_API_KEY", "test-key-never-used", 1);
+        setenv("TEXTWORLD_AI", "0", 1);
+        const TurnResult w = runTurn(db, "wait");  // turn 6
+        CHECK(w.outcome == TurnOutcome::Ticked);
+        CHECK(w.output == "Time passes.\n");
+        CHECK(w.output == render(db, 6));
+        // guards restore both vars here.
+    }
+}
+
 // --- persistence after play (REQ-PROTO-12 item 8, REQ-PROTO-10): a played
 // world survives a full close/reopen with turn counter, entity positions, and
 // the complete event transcript intact — and is still playable afterward. ---
@@ -1285,6 +1464,17 @@ static void testPortability() {
 }
 
 int main() {
+    // Hermetic run: clear both AI env vars for the whole suite (guards
+    // restore the developer's values on exit). Otherwise a developer shell
+    // with ANTHROPIC_API_KEY set would send every runTurn-based test through
+    // the real curl transport — the default test run must make NO network
+    // access (REQ-PROSE-15). Tests that need the vars set their own values
+    // under their own guards.
+    const ScopedEnvVar keyGuard("ANTHROPIC_API_KEY");
+    const ScopedEnvVar aiGuard("TEXTWORLD_AI");
+    unsetenv("ANTHROPIC_API_KEY");
+    unsetenv("TEXTWORLD_AI");
+
     CHECK(1 + 1 == 2);
 
     testDb();
@@ -1298,6 +1488,8 @@ int main() {
     testProseTransport();
     testProseRequestBody();
     testProseValidation();
+    testProseNarrationEnabled();
+    testProseAiRender();
     testPersistence();
     testPortability();
 

@@ -8,6 +8,7 @@
 #include <stdexcept>
 
 #include "action.hpp"
+#include "prose.hpp"
 #include "render.hpp"
 #include "systems.hpp"
 
@@ -53,6 +54,14 @@ TurnResult runTurn(Db& db, const std::string& line) {
         return {TurnOutcome::EngineError, renderError(e.what())};
     }
 
+    // Narration dispatch (REQ-PROSE-1, REQ-PROSE-2): AI prose when enabled
+    // and delivered; the template renderer is the always-there fallback
+    // (REQ-PROSE-3). Tier-a and tier-c paths above never reach this.
+    if (aiNarrationEnabled()) {
+        if (auto prose = aiRender(db, currentTurn(db))) {
+            return {TurnOutcome::Ticked, *prose};
+        }
+    }
     return {TurnOutcome::Ticked, render(db, currentTurn(db))};
 }
 
