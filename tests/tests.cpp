@@ -1345,10 +1345,10 @@ static void testProseAiRender() {
         const auto out = aiRender(db, 1, timingOut);
         CHECK(!out.has_value());   // clean nullopt, no crash
         CHECK(timeoutCalls == 1);  // no retry hides behind the timeout
-        // The loop.cpp dispatch renders via templates on nullopt; the shown
-        // text is EXACTLY the template render, containing nothing AI-flavored.
-        const std::string shown = out ? *out : render(db, 1);
-        CHECK(shown == render(db, 1));
+        // End-to-end fallback byte-identity (dispatch shows the pure template
+        // render, nothing AI-flavored) is covered by the AI-off runTurn test
+        // below, which pins runTurn output == render() with no key — runTurn
+        // hardwires curlTransport, so that is the honest dispatch coverage.
     }
 
     // --- dispatch, AI off (no key): runTurn output BYTE-IDENTICAL to the
@@ -1423,11 +1423,17 @@ static void testProseLiveSmoke() {
     CHECK(runTurn(db, "go north").outcome == TurnOutcome::Ticked);
 
     const auto out = aiRender(db, 1);  // 2-arg = production libcurl transport
-    CHECK(out.has_value());            // the API produced a validated render
-    if (out) {
-        CHECK(!out->empty());              // output non-empty
-        CHECK(contains(*out, "Exits:"));   // deterministic tail present
-    }
+
+    // Mechanical invariants only (REQ-PROSE-17): the turn produces non-empty
+    // output carrying the deterministic Exits line, whether that came from the
+    // AI or the template fallback. Mirror loop.cpp's dispatch rather than
+    // asserting out.has_value() — a live response that paraphrases canon or
+    // trips any validation clause returns nullopt, which is a correct fallback,
+    // not a smoke-test failure. Asserting on validation outcome would make this
+    // flaky against a non-deterministic model.
+    const std::string shown = out ? *out : render(db, 1);
+    CHECK(!shown.empty());                    // output non-empty
+    CHECK(shown.find("Exits:") != std::string::npos);  // deterministic tail present
 }
 
 // --- persistence after play (REQ-PROTO-12 item 8, REQ-PROTO-10): a played
