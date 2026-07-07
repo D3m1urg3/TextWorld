@@ -52,6 +52,13 @@ struct HttpResponse {
 };
 using HttpTransport = std::function<HttpResponse(const std::string& body)>;
 
+// Anthropic Messages API request body (REQ-PROSE-8): model from
+// TEXTWORLD_MODEL if set and non-empty (else claude-opus-4-8), max_tokens
+// 1024, the REQ-PROSE-11 narrator system prompt, and exactly one user
+// message carrying the facts payload. No thinking, no stream, no prompt
+// caching keys — ever.
+std::string buildRequestBody(const std::string& factsPayload);
+
 // Mechanical validation gate (REQ-PROSE-13): pure function of (response,
 // anchors) — no DB, no network, never throws. Returns the extracted prose iff
 // ALL clauses hold, std::nullopt otherwise:

@@ -1,5 +1,6 @@
 // Micro test harness: CHECK(cond) records failures; main() reports a summary.
 #include <cstdio>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <sstream>
@@ -920,6 +921,104 @@ static void testProseTransport() {
     }
 }
 
+// Saves TEXTWORLD_MODEL on construction, restores it on destruction —
+// unsetenv if it was unset. Env-var discipline: the suite must pass (and
+// leave the environment untouched) regardless of the developer's shell env.
+struct ScopedModelEnv {
+    bool hadPrior;
+    std::string priorValue;
+
+    ScopedModelEnv() {
+        const char* prior = std::getenv("TEXTWORLD_MODEL");
+        hadPrior = prior != nullptr;
+        if (hadPrior) priorValue = prior;
+    }
+    ~ScopedModelEnv() {
+        if (hadPrior) {
+            setenv("TEXTWORLD_MODEL", priorValue.c_str(), 1);
+        } else {
+            unsetenv("TEXTWORLD_MODEL");
+        }
+    }
+};
+
+// --- request body (REQ-PROSE-8) + system prompt content (REQ-PROSE-11):
+// buildRequestBody is a pure string→string function (plus the TEXTWORLD_MODEL
+// env read), so it is asserted by parsing its output back as JSON. ---
+static void testProseRequestBody() {
+    const ScopedModelEnv guard;
+
+    // Payload with characters that must survive JSON re-embedding verbatim.
+    const std::string payload =
+        "{\"events\":[{\"verb\":\"failed\",\"detail\":\"You can't go that "
+        "way.\"}]}";
+
+    // --- defaults: model, max_tokens, message shape, forbidden keys ---
+    unsetenv("TEXTWORLD_MODEL");
+    {
+        const nlohmann::json j =
+            nlohmann::json::parse(buildRequestBody(payload));
+        CHECK(j["model"] == "claude-opus-4-8");
+        CHECK(j["max_tokens"] == 1024);
+
+        // REQ-PROSE-8 forbidden keys: no thinking, no streaming (and no
+        // stray top-level keys at all beyond the four we build).
+        CHECK(!j.contains("thinking"));
+        CHECK(!j.contains("stream"));
+        CHECK(j.size() == 4);  // model, max_tokens, system, messages
+
+        // Exactly one user message carrying the payload verbatim.
+        CHECK(j["messages"].is_array());
+        CHECK(j["messages"].size() == 1);
+        CHECK(j["messages"][0]["role"] == "user");
+        CHECK(j["messages"][0]["content"] == payload);
+
+        // --- system prompt: non-empty, contains each REQ-PROSE-11 rule ---
+        CHECK(j["system"].is_string());
+        const std::string sys = j["system"].get<std::string>();
+        CHECK(!sys.empty());
+        // Style anchor: second-person, present-tense narrator.
+        CHECK(sys.find("second person") != std::string::npos);
+        CHECK(sys.find("present tense") != std::string::npos);
+        // Narrate only the supplied events.
+        CHECK(sys.find("only the supplied events") != std::string::npos);
+        // Atmosphere permitted, but no noun absent from the facts.
+        CHECK(sys.find("noun") != std::string::npos);
+        CHECK(sys.find("absent from the facts") != std::string::npos);
+        // Never contradict a fact.
+        CHECK(sys.find("Never contradict a fact") != std::string::npos);
+        // Canon description verbatim; failed detail verbatim, no paraphrase.
+        CHECK(sys.find("canon_description") != std::string::npos);
+        CHECK(sys.find("verbatim") != std::string::npos);
+        CHECK(sys.find("paraphrase") != std::string::npos);
+        // Sentence budget.
+        CHECK(sys.find("1-4 sentences") != std::string::npos);
+        // Plain text, no markdown, no meta-commentary, final answer only.
+        CHECK(sys.find("plain text") != std::string::npos);
+        CHECK(sys.find("no markdown") != std::string::npos);
+        CHECK(sys.find("meta-commentary") != std::string::npos);
+        CHECK(sys.find("final answer") != std::string::npos);
+    }
+
+    // --- TEXTWORLD_MODEL set and non-empty → override honored ---
+    setenv("TEXTWORLD_MODEL", "claude-test-model", 1);
+    {
+        const nlohmann::json j =
+            nlohmann::json::parse(buildRequestBody(payload));
+        CHECK(j["model"] == "claude-test-model");
+        CHECK(j["max_tokens"] == 1024);  // override touches ONLY the model
+    }
+
+    // --- TEXTWORLD_MODEL set but empty → default, not "" ---
+    setenv("TEXTWORLD_MODEL", "", 1);
+    {
+        const nlohmann::json j =
+            nlohmann::json::parse(buildRequestBody(payload));
+        CHECK(j["model"] == "claude-opus-4-8");
+    }
+    // guard's destructor restores the caller's TEXTWORLD_MODEL here.
+}
+
 // Canned 200 response in the Anthropic Messages shape: stop_reason plus one
 // text content block. Tests below perturb single fields off this baseline.
 static HttpResponse cannedResponse(const std::string& text,
@@ -1197,6 +1296,7 @@ int main() {
     testLoop();
     testProseFacts();
     testProseTransport();
+    testProseRequestBody();
     testProseValidation();
     testPersistence();
     testPortability();

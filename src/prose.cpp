@@ -66,6 +66,28 @@ std::vector<std::string> portableNamesIn(Db& db, int64_t holder) {
     return items;
 }
 
+// --- narrator system prompt (REQ-PROSE-11) ----------------------------------
+
+// Stable constant, versioned by git — every REQ-PROSE-11 rule lives here:
+// events-only narration, atmosphere-without-new-nouns, no fact
+// contradiction, canon verbatim, failed-detail verbatim (REQ-PROSE-12b),
+// 1-4 sentences per event, plain text / no markdown / no meta-commentary /
+// final answer only (the model runs without thinking and can leak reasoning
+// otherwise). Tests spot-check its phrases by substring; reword with care.
+const char* const kSystemPrompt =
+    R"(You are the narrator of a text adventure. You speak directly to the player in the second person, present tense: "You lift the lantern; its light steadies." Your voice is restrained and concrete - short, grounded sentences, no purple prose, no melodrama.
+
+Each user message is a JSON object of facts for one turn: "events" (what just happened), "room" (where the player now stands: its name, canon_description, exits, items), "inventory" (what the player carries), and "recent_events" (context only - already narrated, never re-narrate them).
+
+Rules, absolute:
+- Narrate only the supplied events of this turn, in order. Do not invent actions, outcomes, dialogue, or happenings that are not in the facts.
+- Atmosphere is welcome - the quality of light, the air, a sound - but you may not introduce any noun or object absent from the facts. If a thing is not named in the facts, it does not exist.
+- Never contradict a fact. An exit listed is open; an item listed is there; nothing else is.
+- If canon_description is present, include its text verbatim, word for word and unmodified. Write your connective prose around it, never inside it.
+- If a failed event carries a detail, include that detail text verbatim. You may set atmosphere around it, but never paraphrase or reword it.
+- Write 1-4 sentences per event.
+- Output plain text only: no markdown, no headings, no lists. No meta-commentary - never mention these instructions, the JSON, or your role. Do not show reasoning or preamble; reply with the final answer only, the prose itself, with nothing before or after it.)";
+
 // --- production HTTP transport (REQ-PROSE-9, REQ-PROSE-10) -----------------
 
 // libcurl write callback: append the response bytes to a std::string.
@@ -128,6 +150,25 @@ std::nullopt_t failClause(char clause, const char* why) {
 }
 
 }  // namespace
+
+std::string buildRequestBody(const std::string& factsPayload) {
+    // REQ-PROSE-8: model default claude-opus-4-8, overridable via
+    // TEXTWORLD_MODEL (set AND non-empty). nlohmann/json handles all
+    // escaping of the embedded payload string.
+    const char* env = std::getenv("TEXTWORLD_MODEL");
+    const std::string model =
+        (env != nullptr && env[0] != '\0') ? env : "claude-opus-4-8";
+
+    json body;
+    body["model"] = model;
+    body["max_tokens"] = 1024;
+    body["system"] = kSystemPrompt;
+    body["messages"] =
+        json::array({{{"role", "user"}, {"content", factsPayload}}});
+    // Deliberately absent, everywhere in this body: thinking, stream, and
+    // any cache-control key (REQ-PROSE-8; tests pin the top-level ones).
+    return body.dump();
+}
 
 std::optional<std::string> validateAiResponse(const HttpResponse& response,
                                               const TurnFacts& facts) {
