@@ -1326,6 +1326,31 @@ static void testProseAiRender() {
         CHECK(readFileBytes(worldPath) == bytesBefore);
     }
 
+    // --- timeout path (REQ-PROSE-3, -9; AI Validation item 7): a
+    // transportError fake (an 8 s timeout / connect failure / curl error)
+    // yields nullopt without crashing and with no retry, and the dispatch's
+    // fallback shows the PURE template render — no AI-flavored content. This
+    // pins fallback output == template output BYTE-FOR-BYTE on a transport
+    // failure; testProseTransport already covers nullopt/one-call, this adds
+    // the missing "fallback == pure template" assertion. Turn 1 is a moved
+    // (room-describing) turn, so its template render carries the Exits tail. ---
+    {
+        int timeoutCalls = 0;
+        const HttpTransport timingOut = [&timeoutCalls](const std::string&) {
+            ++timeoutCalls;
+            HttpResponse r;
+            r.transportError = true;
+            return r;
+        };
+        const auto out = aiRender(db, 1, timingOut);
+        CHECK(!out.has_value());   // clean nullopt, no crash
+        CHECK(timeoutCalls == 1);  // no retry hides behind the timeout
+        // The loop.cpp dispatch renders via templates on nullopt; the shown
+        // text is EXACTLY the template render, containing nothing AI-flavored.
+        const std::string shown = out ? *out : render(db, 1);
+        CHECK(shown == render(db, 1));
+    }
+
     // --- dispatch, AI off (no key): runTurn output BYTE-IDENTICAL to the
     // template render — no transport exists to be touched ---
     {
@@ -1349,6 +1374,59 @@ static void testProseAiRender() {
         CHECK(w.output == "Time passes.\n");
         CHECK(w.output == render(db, 6));
         // guards restore both vars here.
+    }
+}
+
+// --- live end-to-end smoke (REQ-PROSE-17): the ONLY test that touches the
+// network, and ONLY when TEXTWORLD_AI_LIVE_TEST=1. It returns immediately
+// otherwise, so the default suite is a no-op here and (if CI is ever added)
+// the API is never hit there.
+//
+// ENV-UNSET ORDERING: main() runs a suite-wide hermetic unset of
+// ANTHROPIC_API_KEY (so every runTurn-based test stays offline). That unset
+// would clobber the real key this test needs. The clean fix: main() invokes
+// this function FIRST — before it constructs the ScopedEnvVar guards and
+// unsets the vars — while the developer's real environment is still intact.
+// This test reads TEXTWORLD_AI_LIVE_TEST and ANTHROPIC_API_KEY straight from
+// that live env and mutates no env var itself.
+//
+// It drives one real turn through the PRODUCTION transport (the 2-arg
+// aiRender, which binds the libcurl transport) against the seeded world and
+// asserts ONLY mechanical invariants — output non-empty, the Exits line
+// present — never anything about the prose content.
+static void testProseLiveSmoke() {
+    const char* live = std::getenv("TEXTWORLD_AI_LIVE_TEST");
+    if (live == nullptr || std::string(live) != "1") {
+        return;  // default run: no-op, no network access.
+    }
+
+    // Live run requested. Reaching the API needs a real key; without one
+    // there is nothing to exercise, so skip LOUDLY (a run-setup gap, not a
+    // code defect) rather than fail the suite.
+    const char* key = std::getenv("ANTHROPIC_API_KEY");
+    if (key == nullptr || key[0] == '\0') {
+        std::fprintf(stderr,
+                     "LIVE SMOKE SKIPPED: TEXTWORLD_AI_LIVE_TEST=1 but "
+                     "ANTHROPIC_API_KEY is unset/empty.\n");
+        return;
+    }
+
+    std::fprintf(stderr,
+                 "LIVE SMOKE: driving one real turn through the Anthropic "
+                 "API (this makes a network call)...\n");
+
+    const TempDbFile worldPath("textworld_live_smoke.db");
+    Db db = openWorld(worldPath.string(), "seed/base.sql");
+
+    // A moved turn (room-describing): canon rides verbatim inside the prose
+    // and the deterministic tail carries the Exits line.
+    CHECK(runTurn(db, "go north").outcome == TurnOutcome::Ticked);
+
+    const auto out = aiRender(db, 1);  // 2-arg = production libcurl transport
+    CHECK(out.has_value());            // the API produced a validated render
+    if (out) {
+        CHECK(!out->empty());              // output non-empty
+        CHECK(contains(*out, "Exits:"));   // deterministic tail present
     }
 }
 
@@ -1464,6 +1542,13 @@ static void testPortability() {
 }
 
 int main() {
+    // Live smoke FIRST, while the developer's real environment is still
+    // intact: it needs a real ANTHROPIC_API_KEY, and the hermetic unset below
+    // would otherwise clobber it (see testProseLiveSmoke's env-ordering note).
+    // No-op unless TEXTWORLD_AI_LIVE_TEST=1, so the default run is unaffected
+    // and makes no network access here (REQ-PROSE-17).
+    testProseLiveSmoke();
+
     // Hermetic run: clear both AI env vars for the whole suite (guards
     // restore the developer's values on exit). Otherwise a developer shell
     // with ANTHROPIC_API_KEY set would send every runTurn-based test through
