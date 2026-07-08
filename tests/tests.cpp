@@ -1492,6 +1492,49 @@ static void testNlResolveDispatch() {
     }
 }
 
+// --- tier-b passthrough (REQ-PROTO-6b via the boundary declaration): the
+// resolver's clause-c recognition must never pre-empt the engine's
+// applicability authority. Drives aiResolve + resolve directly (not runTurn). ---
+static void testNlResolveTierBPassthrough() {
+    const TempDbFile worldPath("textworld_nltierb_tests.db");
+    Db db = openWorld(worldPath.string(), "seed/base.sql");
+
+    // key (5) exists world-wide but sits in the garden (2), NOT the player's
+    // room (stone hall, 1). Clause c is recognition only, so aiResolve returns a
+    // valid Take with the id assigned mechanically — applicability is the
+    // engine's job, not the gate's. One transport call.
+    int calls = 0;
+    HttpTransport fake = [&](const std::string&) {
+        ++calls;
+        return cannedToolUse("take", "key");
+    };
+    auto action = aiResolve(db, "take the key", fake);
+    CHECK(action.has_value());
+    CHECK(action->verb == Verb::Take);
+    CHECK(action->subject == 5);
+    CHECK(calls == 1);
+
+    const int64_t eventsBefore = queryInt(db, "SELECT COUNT(*) FROM events");
+    const int64_t turnBefore =
+        queryInt(db, "SELECT value FROM meta WHERE key = 'turn'");
+
+    // Resolve it in a tick: the world ticks and the engine emits a 'failed'
+    // event — it neither retries nor re-calls the resolver.
+    tick(db, *action);
+
+    CHECK(queryInt(db, "SELECT value FROM meta WHERE key = 'turn'") ==
+          turnBefore + 1);
+    CHECK(queryInt(db, "SELECT COUNT(*) FROM events") == eventsBefore + 1);
+    CHECK(queryText(db, "SELECT verb FROM events ORDER BY id DESC LIMIT 1") ==
+          "failed");
+    CHECK(queryText(db, "SELECT detail FROM events ORDER BY id DESC LIMIT 1") ==
+          "You don't see that here.");
+    CHECK(calls == 1);  // resolve() never calls the resolver
+
+    // The key did not move — still in the garden.
+    CHECK(queryInt(db, "SELECT container FROM location WHERE entity = 5") == 2);
+}
+
 // Canned 200 response in the Anthropic Messages shape: stop_reason plus one
 // text content block. Tests below perturb single fields off this baseline.
 static HttpResponse cannedResponse(const std::string& text,
@@ -2026,6 +2069,7 @@ int main() {
     testNlResolveGate();
     testNlResolveAiResolve();
     testNlResolveDispatch();
+    testNlResolveTierBPassthrough();
     testProseValidation();
     testProseNarrationEnabled();
     testProseAiRender();

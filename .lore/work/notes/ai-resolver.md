@@ -40,7 +40,7 @@ Hard constraints held throughout:
 - [x] Step 6 — `aiResolve` orchestration + production transport (M · low)
   - [x] 6a orchestrator + tests · [x] 6b libcurl transport
 - [x] Step 7 — Loop dispatch + parser promotion (S · low)
-- [ ] Step 8 — Tier-b passthrough test (S · low)
+- [x] Step 8 — Tier-b passthrough test (S · low)
 - [ ] Step 9 — Live end-to-end smoke, gated (S code · HIGH token-risk)
 - [ ] Step 10 — Final validation against spec checklist (S · low)
 
@@ -166,3 +166,12 @@ Hard constraints held throughout:
   Existing `testLoop` passes unchanged (no key → disabled → parser path identical).
 - Gate: build clean; `./build/tests` → 1639 checks, 0 failures; `grep DISPOSABLE
   src/parser.cpp` empty.
+
+### Step 8 — Tier-b passthrough test (done)
+- `testNlResolveTierBPassthrough`: `take key` where key(5) exists world-wide but is
+  in the garden (2), not the player's room (1). aiResolve (fake transport) →
+  valid `Take` subject 5, calls==1 (clause c recognition only). Driving `*action`
+  through `tick()` → turn +1, one new `failed` event with detail
+  "You don't see that here.", calls still 1 (resolve never calls the resolver),
+  key unmoved (still container 2). Drives aiResolve + resolve directly, not runTurn.
+- Gate: build clean; `./build/tests` → 1656 checks, 0 failures.
