@@ -1226,6 +1226,144 @@ static void testNlResolveRequestBody() {
     // guard's destructor restores the caller's TEXTWORLD_MODEL here.
 }
 
+// Canned 200 tool_use response in the documented Anthropic shape (Step-5
+// fixture): stop_reason "tool_use" + one emit_action tool_use block. subject /
+// direction are included only when non-empty (bare verbs carry neither) — the
+// resolver analog of cannedResponse, built from documented structure, never a
+// network probe.
+static HttpResponse cannedToolUse(const std::string& verb,
+                                  const std::string& subject = "",
+                                  const std::string& direction = "") {
+    nlohmann::json input;
+    input["verb"] = verb;
+    if (!subject.empty()) input["subject"] = subject;
+    if (!direction.empty()) input["direction"] = direction;
+
+    nlohmann::json block;
+    block["type"] = "tool_use";
+    block["id"] = "toolu_test";
+    block["name"] = "emit_action";
+    block["input"] = std::move(input);
+
+    nlohmann::json j;
+    j["stop_reason"] = "tool_use";
+    j["content"] = nlohmann::json::array({std::move(block)});
+
+    HttpResponse r;
+    r.status = 200;
+    r.body = j.dump();
+    return r;
+}
+
+// --- validation & mapping gate (REQ-RESOLVE-13 a-e): pure function of
+// (response, db). Fixtures from cannedToolUse cover each clause plus the
+// no-tool-call / two-tool-call / out-of-set / unknown-subject paths. Uses the
+// seeded db for the clause-c lookup (lantern=4, key=5). No network; the gate is
+// called directly here (outside any try/catch), so a throw would crash — it
+// must never throw. ---
+static void testNlResolveGate() {
+    const TempDbFile worldPath("textworld_nlgate_tests.db");
+    Db db = openWorld(worldPath.string(), "seed/base.sql");
+
+    // Clause e: argument-free verbs map with subject 0, direction empty.
+    {
+        auto a = validateAndLower(cannedToolUse("look"), db);
+        CHECK(a.has_value());
+        CHECK(a->verb == Verb::Look);
+        CHECK(a->subject == 0);
+        CHECK(a->direction.empty());
+    }
+    CHECK(validateAndLower(cannedToolUse("inventory"), db)->verb == Verb::Inventory);
+    CHECK(validateAndLower(cannedToolUse("wait"), db)->verb == Verb::Wait);
+    CHECK(validateAndLower(cannedToolUse("quit"), db)->verb == Verb::Quit);
+    // A stray argument on an argument-free verb is ignored (clause e).
+    {
+        auto a = validateAndLower(cannedToolUse("look", "lantern", "north"), db);
+        CHECK(a.has_value());
+        CHECK(a->verb == Verb::Look);
+        CHECK(a->subject == 0);
+        CHECK(a->direction.empty());
+    }
+
+    // Clause c: take/drop resolve the subject to a non-zero id, assigned
+    // mechanically by lookupNoun.
+    {
+        auto a = validateAndLower(cannedToolUse("take", "lantern"), db);
+        CHECK(a.has_value());
+        CHECK(a->verb == Verb::Take);
+        CHECK(a->subject == 4);
+    }
+    {
+        auto a = validateAndLower(cannedToolUse("drop", "key"), db);
+        CHECK(a.has_value());
+        CHECK(a->verb == Verb::Drop);
+        CHECK(a->subject == 5);
+    }
+    // Clause c failures: unknown noun, and missing subject → nullopt.
+    CHECK(!validateAndLower(cannedToolUse("take", "zeppelin"), db));
+    CHECK(!validateAndLower(cannedToolUse("take"), db));
+
+    // Clause d: go carries the direction verbatim; missing/empty → nullopt.
+    {
+        auto a = validateAndLower(cannedToolUse("go", "", "north"), db);
+        CHECK(a.has_value());
+        CHECK(a->verb == Verb::Go);
+        CHECK(a->direction == "north");
+        CHECK(a->subject == 0);
+    }
+    CHECK(!validateAndLower(cannedToolUse("go"), db));
+
+    // Clause b: out-of-set verb → nullopt.
+    CHECK(!validateAndLower(cannedToolUse("frobnicate", "lantern"), db));
+
+    // Clause a: no tool call (0 emit_action blocks) → nullopt, cleanly.
+    {
+        nlohmann::json j;
+        j["stop_reason"] = "end_turn";
+        j["content"] = nlohmann::json::array(
+            {{{"type", "text"}, {"text", "I'm not sure what you mean."}}});
+        HttpResponse r;
+        r.status = 200;
+        r.body = j.dump();
+        CHECK(!validateAndLower(r, db));
+    }
+
+    // Clause a: two emit_action blocks (multi-intent leak) → nullopt.
+    {
+        nlohmann::json blk;
+        blk["type"] = "tool_use";
+        blk["id"] = "toolu_a";
+        blk["name"] = "emit_action";
+        blk["input"] = {{"verb", "look"}};
+        nlohmann::json j;
+        j["stop_reason"] = "tool_use";
+        j["content"] = nlohmann::json::array({blk, blk});
+        HttpResponse r;
+        r.status = 200;
+        r.body = j.dump();
+        CHECK(!validateAndLower(r, db));
+    }
+
+    // Clause a HTTP half: non-200 and malformed body → nullopt.
+    {
+        HttpResponse r;
+        r.status = 500;
+        r.body = cannedToolUse("take", "lantern").body;  // valid body, bad status
+        CHECK(!validateAndLower(r, db));
+    }
+    {
+        HttpResponse r;
+        r.status = 200;
+        r.body = "}{ not json";
+        CHECK(!validateAndLower(r, db));
+    }
+    {
+        HttpResponse r;  // transport error: status 0
+        r.transportError = true;
+        CHECK(!validateAndLower(r, db));
+    }
+}
+
 // Canned 200 response in the Anthropic Messages shape: stop_reason plus one
 // text content block. Tests below perturb single fields off this baseline.
 static HttpResponse cannedResponse(const std::string& text,
@@ -1757,6 +1895,7 @@ int main() {
     testProseTransport();
     testProseRequestBody();
     testNlResolveRequestBody();
+    testNlResolveGate();
     testProseValidation();
     testProseNarrationEnabled();
     testProseAiRender();

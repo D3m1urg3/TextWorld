@@ -9,12 +9,14 @@
 #include "nlresolve.hpp"
 
 #include <cstdint>
+#include <cstdio>
 #include <cstdlib>
 #include <optional>
 #include <string>
 #include <vector>
 
 #include "json.hpp"
+#include "lookup.hpp"
 
 namespace {
 
@@ -71,6 +73,29 @@ std::vector<std::string> portableNamesIn(Db& db, int64_t holder) {
     s.bind(1, holder);
     while (s.step()) items.push_back(s.colText(0));
     return items;
+}
+
+// --- validation gate helpers (REQ-RESOLVE-13) -------------------------------
+
+// One diagnostic line per rejected response, naming the first failed clause in
+// a..e order. Mirrors prose's failClause; std::nullopt_t converts to the
+// optional<Action> the gate returns.
+std::nullopt_t failClause(char clause, const char* why) {
+    std::fprintf(stderr, "aiResolve: response rejected, clause %c failed: %s\n",
+                 clause, why);
+    return std::nullopt;
+}
+
+// The seven ISA verbs, and nothing else (clause b). nullopt for any other word.
+std::optional<Verb> verbFromWord(const std::string& word) {
+    if (word == "look") return Verb::Look;
+    if (word == "go") return Verb::Go;
+    if (word == "take") return Verb::Take;
+    if (word == "drop") return Verb::Drop;
+    if (word == "inventory") return Verb::Inventory;
+    if (word == "wait") return Verb::Wait;
+    if (word == "quit") return Verb::Quit;
+    return std::nullopt;
 }
 
 }  // namespace
@@ -170,4 +195,99 @@ std::string buildResolveRequestBody(const std::string& contextPayload) {
     // Deliberately absent everywhere in this body: thinking, stream, and any
     // cache-control key (REQ-RESOLVE-9; the test pins the exact top-level set).
     return body.dump();
+}
+
+std::optional<Action> validateAndLower(const HttpResponse& response, Db& db) {
+    // Clause a, HTTP half: checkable before any parse. A transport error
+    // carries status 0, so it fails here too.
+    if (response.status != 200) {
+        return failClause('a', "HTTP status is not 200");
+    }
+
+    // Parse the body ONCE, exception-free — this function must never throw
+    // (aiResolve calls it inside try/catch, but tests call it directly).
+    const json j = json::parse(response.body, /*cb=*/nullptr,
+                               /*allow_exceptions=*/false);
+    if (j.is_discarded() || !j.is_object()) {
+        return failClause('a', "body is not a JSON object");
+    }
+    if (!j.contains("content") || !j["content"].is_array()) {
+        return failClause('a', "response has no content array");
+    }
+
+    // Clause a, block half: count the emit_action tool_use blocks. The Anthropic
+    // shape is content[] with objects {type:"tool_use", name:"emit_action",
+    // input:{...}} (Step-5 fixture); navigate it, don't assume position.
+    const json* emit = nullptr;
+    int emitCount = 0;
+    for (const json& block : j["content"]) {
+        if (block.is_object() && block.value("type", "") == "tool_use" &&
+            block.value("name", "") == "emit_action") {
+            ++emitCount;
+            emit = &block;
+        }
+    }
+    if (emitCount == 0) {
+        // The model made no tool call — unknown intent or multi-intent. This is
+        // the DESIGNED no-action path (REQ-RESOLVE-3), not a rejection: return
+        // nullopt cleanly, no diagnostic. The caller falls back to the parser.
+        return std::nullopt;
+    }
+    if (emitCount >= 2) {
+        return failClause('a', "more than one emit_action tool_use block");
+    }
+
+    // Exactly one emit_action block. Its input object carries verb / subject /
+    // direction.
+    if (!emit->contains("input") || !(*emit)["input"].is_object()) {
+        return failClause('b', "emit_action block has no input object");
+    }
+    const json& input = (*emit)["input"];
+
+    // Clause b: verb present, a string, and one of the seven ISA verbs.
+    if (!input.contains("verb") || !input["verb"].is_string()) {
+        return failClause('b', "verb missing or not a string");
+    }
+    const std::optional<Verb> verb =
+        verbFromWord(input["verb"].get<std::string>());
+    if (!verb) {
+        return failClause('b', "verb is not one of the seven ISA verbs");
+    }
+
+    Action action{*verb};
+    switch (*verb) {
+        case Verb::Take:
+        case Verb::Drop: {
+            // Clause c: subject present, and recognized world-wide. The id is
+            // assigned MECHANICALLY by lookupNoun, never read from the model.
+            // Recognition only — whether the item is in scope is the engine's
+            // tier-b job, not this gate's.
+            if (!input.contains("subject") || !input["subject"].is_string()) {
+                return failClause('c', "take/drop has no subject");
+            }
+            const int64_t entity =
+                lookupNoun(db, input["subject"].get<std::string>());
+            if (entity == 0) {
+                return failClause('c', "subject is not a noun anywhere in world");
+            }
+            action.subject = entity;
+            break;
+        }
+        case Verb::Go: {
+            // Clause d: direction present and non-empty.
+            if (!input.contains("direction") || !input["direction"].is_string() ||
+                input["direction"].get<std::string>().empty()) {
+                return failClause('d', "go has no direction");
+            }
+            action.direction = input["direction"].get<std::string>();
+            break;
+        }
+        case Verb::Look:
+        case Verb::Inventory:
+        case Verb::Wait:
+        case Verb::Quit:
+            // Clause e: argument-free — any stray subject/direction is ignored.
+            break;
+    }
+    return action;
 }

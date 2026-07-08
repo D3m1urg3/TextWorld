@@ -36,7 +36,7 @@ Hard constraints held throughout:
 - [x] Step 2 — New TU + scope-context builder (M · low)
 - [x] Step 3 — ISA system prompt (S · low)
 - [x] Step 4 — Request body + `emit_action` tool schema (M · low)
-- [ ] Step 5 — Validation & mapping gate (M · low)
+- [x] Step 5 — Validation & mapping gate (M · low)
 - [ ] Step 6 — `aiResolve` orchestration + production transport (M · low)
 - [ ] Step 7 — Loop dispatch + parser promotion (S · low)
 - [ ] Step 8 — Tier-b passthrough test (S · low)
@@ -107,3 +107,27 @@ Hard constraints held throughout:
   + empty→default, and the exact 6-key top-level set (stray-key guard, mirroring
   prose's `j.size()==4`).
 - Gate: build clean; `./build/tests` → 1592 checks, 0 failures.
+
+### Step 5 — Validation & mapping gate (done)
+- `validateAndLower(const HttpResponse&, Db&) → optional<Action>` in `nlresolve.cpp`,
+  the analog of `validateAiResponse`. Never throws (exception-free `json::parse`,
+  called outside try/catch in tests). Clauses:
+  - **a** HTTP 200 + exactly one `emit_action` tool_use block. Navigates `content[]`
+    counting `type=="tool_use" && name=="emit_action"`. **Design decision:** 0 blocks
+    → nullopt WITHOUT a diagnostic (the model correctly declined — the REQ-RESOLVE-3
+    no-action path; noisy "rejected" logs would mislead). ≥2 → clause-a failure +
+    diagnostic. Matches the plan's "no tool call → nullopt, cleanly".
+  - **b** verb ∈ seven ISA verbs (via `verbFromWord`).
+  - **c** take/drop: subject present + `lookupNoun` (hoisted, Step 1) → non-zero id;
+    id assigned mechanically, never from the model. Recognition, not applicability.
+  - **d** go: direction present + non-empty.
+  - **e** look/inventory/wait/quit: no argument consulted (stray args ignored).
+- `failClause` helper mirrors prose's ("aiResolve: response rejected, clause X…").
+- Test helper `cannedToolUse(verb, subject="", direction="")` emits the pinned
+  fixture shape (`stop_reason:"tool_use"`, one emit_action block; subject/direction
+  only when non-empty) — built from documented structure, NEVER a network probe.
+- `testNlResolveGate` (seeded db, lantern=4/key=5): each clause a–e + no-tool-call,
+  two-tool-call, out-of-set verb, unknown subject, non-200, malformed body, transport
+  error → correct Action/nullopt.
+- Included `lookup.hpp` in `nlresolve.cpp`; `<optional>` now used (clangd warning cleared).
+- Gate: build clean; `./build/tests` → 1622 checks, 0 failures.

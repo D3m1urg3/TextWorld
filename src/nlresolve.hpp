@@ -48,3 +48,21 @@ ResolveContext buildResolveContext(Db& db, const std::string& line);
 // renderer). system = kResolveSystemPrompt, one user message carrying the
 // context payload. No thinking, no stream, no prompt caching keys — ever.
 std::string buildResolveRequestBody(const std::string& contextPayload);
+
+// Validation + mapping gate (REQ-RESOLVE-13): pure function of (response, db) —
+// SELECTs only (the clause-c noun lookup), no network, NEVER throws. The
+// resolver's analog of validateAiResponse. Returns the lowered Action iff ALL
+// clauses hold, std::nullopt otherwise:
+//   a. status == 200 AND the body has EXACTLY ONE tool_use block for
+//      emit_action (0 blocks → clean no-action; >=2 → fail, one opcode/line);
+//   b. input.verb is exactly one of the seven ISA verbs;
+//   c. take/drop: input.subject present and lookupNoun() resolves it world-wide
+//      to a NON-ZERO id (recognition, NOT scope applicability) — the id is
+//      assigned mechanically here, never taken from the model;
+//   d. go: input.direction present and non-empty;
+//   e. look/inventory/wait/quit: no argument is consulted.
+// On a genuine 0-block "no tool call" it returns nullopt WITHOUT a diagnostic
+// (the model correctly declined; the caller falls back to the parser). On any
+// failed clause it emits one stderr diagnostic naming the first failed clause
+// in a..e order and returns nullopt. No entity id is ever read FROM the model.
+std::optional<Action> validateAndLower(const HttpResponse& response, Db& db);
