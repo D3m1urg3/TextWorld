@@ -38,6 +38,7 @@ Hard constraints held throughout:
 - [x] Step 4 — Request body + `emit_action` tool schema (M · low)
 - [x] Step 5 — Validation & mapping gate (M · low)
 - [ ] Step 6 — `aiResolve` orchestration + production transport (M · low)
+  - [x] 6a orchestrator + tests · [ ] 6b libcurl transport
 - [ ] Step 7 — Loop dispatch + parser promotion (S · low)
 - [ ] Step 8 — Tier-b passthrough test (S · low)
 - [ ] Step 9 — Live end-to-end smoke, gated (S code · HIGH token-risk)

@@ -66,3 +66,18 @@ std::string buildResolveRequestBody(const std::string& contextPayload);
 // failed clause it emits one stderr diagnostic naming the first failed clause
 // in a..e order and returns nullopt. No entity id is ever read FROM the model.
 std::optional<Action> validateAndLower(const HttpResponse& response, Db& db);
+
+// Resolve one input line to an Action via Claude tool-use (REQ-RESOLVE-1, -3).
+// Returns std::nullopt when resolution is unavailable or declines — the caller
+// falls back to the deterministic parser. The two-arg production version binds
+// the libcurl transport; the caller checks aiNarrationEnabled() BEFORE calling,
+// so a disabled run never constructs a transport.
+std::optional<Action> aiResolve(Db& db, const std::string& line);
+
+// Test-visible overload: same contract, but the HTTP transport is injected.
+// buildResolveContext -> buildResolveRequestBody -> ONE transport call ->
+// validateAndLower. The whole body sits in try/catch: ANY failure (including a
+// throwing transport) yields one stderr line and nullopt (REQ-RESOLVE-3). The
+// transport is invoked at most once per call — no retries (REQ-RESOLVE-10).
+std::optional<Action> aiResolve(Db& db, const std::string& line,
+                                const HttpTransport& transport);

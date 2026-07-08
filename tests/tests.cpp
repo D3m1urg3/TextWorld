@@ -1364,6 +1364,88 @@ static void testNlResolveGate() {
     }
 }
 
+// --- aiResolve orchestration (REQ-RESOLVE-1, -3, -5, -10): context -> body ->
+// ONE transport call -> gate, whole body in try/catch. Every transport here is
+// a fake lambda, so the default test run makes NO network access. Mirrors
+// testProseTransport's fake-transport discipline. ---
+static void testNlResolveAiResolve() {
+    const TempDbFile worldPath("textworld_nlairesolve_tests.db");
+    Db db = openWorld(worldPath.string(), "seed/base.sql");
+
+    // Canned emit_action -> correct Action; transport invoked EXACTLY once.
+    {
+        int calls = 0;
+        HttpTransport fake = [&](const std::string&) {
+            ++calls;
+            return cannedToolUse("take", "lantern");
+        };
+        auto a = aiResolve(db, "grab the lantern", fake);
+        CHECK(a.has_value());
+        CHECK(a->verb == Verb::Take);
+        CHECK(a->subject == 4);
+        CHECK(calls == 1);  // no retries (REQ-RESOLVE-10)
+    }
+
+    // Transport error -> nullopt.
+    {
+        HttpTransport fake = [](const std::string&) {
+            HttpResponse r;
+            r.transportError = true;
+            return r;
+        };
+        CHECK(!aiResolve(db, "take lantern", fake));
+    }
+
+    // Malformed body -> nullopt.
+    {
+        HttpTransport fake = [](const std::string&) {
+            HttpResponse r;
+            r.status = 200;
+            r.body = "}{ not json";
+            return r;
+        };
+        CHECK(!aiResolve(db, "take lantern", fake));
+    }
+
+    // THROWING transport -> caught, nullopt, no crash (REQ-RESOLVE-3).
+    {
+        HttpTransport fake = [](const std::string&) -> HttpResponse {
+            throw std::runtime_error("socket exploded");
+        };
+        CHECK(!aiResolve(db, "take lantern", fake));
+    }
+
+    // No-tool-call -> nullopt cleanly (the fallback path).
+    {
+        HttpTransport fake = [](const std::string&) {
+            nlohmann::json j;
+            j["stop_reason"] = "end_turn";
+            j["content"] = nlohmann::json::array();
+            HttpResponse r;
+            r.status = 200;
+            r.body = j.dump();
+            return r;
+        };
+        CHECK(!aiResolve(db, "smell the flowers", fake));
+    }
+
+    // DB byte-identity across aiResolve (REQ-RESOLVE-5): resolver path is
+    // read-only, so the world file bytes are unchanged before/after.
+    {
+        const std::string bytesBefore = readFileBytes(worldPath);
+        CHECK(!bytesBefore.empty());
+        HttpTransport takeFake = [](const std::string&) {
+            return cannedToolUse("take", "lantern");
+        };
+        HttpTransport goFake = [](const std::string&) {
+            return cannedToolUse("go", "", "north");
+        };
+        (void)aiResolve(db, "take lantern", takeFake);
+        (void)aiResolve(db, "go north", goFake);
+        CHECK(readFileBytes(worldPath) == bytesBefore);
+    }
+}
+
 // Canned 200 response in the Anthropic Messages shape: stop_reason plus one
 // text content block. Tests below perturb single fields off this baseline.
 static HttpResponse cannedResponse(const std::string& text,
@@ -1896,6 +1978,7 @@ int main() {
     testProseRequestBody();
     testNlResolveRequestBody();
     testNlResolveGate();
+    testNlResolveAiResolve();
     testProseValidation();
     testProseNarrationEnabled();
     testProseAiRender();

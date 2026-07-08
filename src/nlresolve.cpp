@@ -12,6 +12,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <optional>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -290,4 +291,28 @@ std::optional<Action> validateAndLower(const HttpResponse& response, Db& db) {
             break;
     }
     return action;
+}
+
+std::optional<Action> aiResolve(Db& db, const std::string& line,
+                                const HttpTransport& transport) {
+    // REQ-RESOLVE-3: no AI-path failure may derail a turn. The whole pipeline
+    // sits inside try/catch; ANY failure yields one stderr diagnostic (never a
+    // spoofed Action) and nullopt — the caller falls back to the parser.
+    try {
+        // Exactly ONE transport call — no retry loop, ever (REQ-RESOLVE-10).
+        const ResolveContext ctx = buildResolveContext(db, line);
+        const HttpResponse resp = transport(buildResolveRequestBody(ctx.payload));
+        // validateAndLower never throws and emits its own clause diagnostic on
+        // rejection; a clean no-tool-call returns nullopt silently.
+        return validateAndLower(resp, db);
+    } catch (const std::exception& e) {
+        std::fprintf(stderr, "aiResolve: failed, falling back to parser: %s\n",
+                     e.what());
+        return std::nullopt;
+    } catch (...) {
+        std::fprintf(stderr,
+                     "aiResolve: failed, falling back to parser: "
+                     "unknown exception\n");
+        return std::nullopt;
+    }
 }
