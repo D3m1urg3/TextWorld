@@ -17,6 +17,14 @@
 #include "db.hpp"
 #include "prose.hpp"    // HttpResponse / HttpTransport seam, reused as-is
 
+// The resolver's system prompt (REQ-RESOLVE-12) — git-versioned, like the
+// narrator prompt. It IS the ISA spec: it defines the seven verbs
+// non-overlappingly and states every lowering rule (one action, in-scope-noun
+// subject, no new nouns, direction for go, no tool call on unknown/multi-
+// intent, no pronoun resolution). Exposed so its structure is spot-checkable
+// by substring; reword with care.
+extern const char* const kResolveSystemPrompt;
+
 // The scope facts for one input line, assembled by buildResolveContext() from
 // fresh SELECTs. `payload` is the JSON string sent as the LLM user message; it
 // carries EXACTLY the REQ-RESOLVE-7 fields — input, room, exits, items,

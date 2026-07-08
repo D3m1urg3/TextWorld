@@ -929,6 +929,44 @@ static void testNlResolveContext() {
     }
 }
 
+// --- ISA system prompt (REQ-RESOLVE-12): the prompt IS the instruction-set
+// spec. Mirrors testProseRequestBody's prompt substring sweep — STRUCTURE
+// only (names the seven verbs, states every lowering rule). Prompt QUALITY is
+// the live smoke's job (Step 9), never asserted here. ---
+static void testNlResolvePrompt() {
+    const std::string sys = kResolveSystemPrompt;
+    CHECK(!sys.empty());
+
+    // All seven ISA verbs are named.
+    for (const char* verb :
+         {"look", "go", "take", "drop", "inventory", "wait", "quit"}) {
+        CHECK(sys.find(verb) != std::string::npos);
+    }
+
+    // The tool is named; output is a tool call, not prose.
+    CHECK(sys.find("emit_action") != std::string::npos);
+
+    // One action only; multi-intent → no call.
+    CHECK(sys.find("exactly one action") != std::string::npos);
+    CHECK(sys.find("Never emit more than one action") != std::string::npos);
+
+    // Subject must be a supplied in-scope noun, copied verbatim; no new nouns.
+    CHECK(sys.find("copied verbatim") != std::string::npos);
+    CHECK(sys.find("Introduce no noun") != std::string::npos);
+
+    // direction for go is a movement/compass word.
+    CHECK(sys.find("compass word") != std::string::npos);
+
+    // Unknown / non-single-action → no tool call.
+    CHECK(sys.find("make no tool call") != std::string::npos);
+
+    // No pronoun / anaphora resolution (v2).
+    CHECK(sys.find("pronoun") != std::string::npos);
+
+    // Recognition, not applicability — the tier-b boundary.
+    CHECK(sys.find("recognition only") != std::string::npos);
+}
+
 // --- transport seam (REQ-PROSE-9, REQ-PROSE-10, REQ-PROSE-15): aiRender's
 // HTTP transport is injected; every transport in this suite is a fake lambda
 // returning a canned HttpResponse, so the default test run makes NO network
@@ -1641,6 +1679,7 @@ int main() {
     testLoop();
     testProseFacts();
     testNlResolveContext();
+    testNlResolvePrompt();
     testProseTransport();
     testProseRequestBody();
     testProseValidation();

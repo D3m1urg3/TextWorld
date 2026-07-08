@@ -34,7 +34,7 @@ Hard constraints held throughout:
 
 - [x] Step 1 — Hoist `lookupNoun` to `src/lookup.hpp` (S · low)
 - [x] Step 2 — New TU + scope-context builder (M · low)
-- [ ] Step 3 — ISA system prompt (S · low)
+- [x] Step 3 — ISA system prompt (S · low)
 - [ ] Step 4 — Request body + `emit_action` tool schema (M · low)
 - [ ] Step 5 — Validation & mapping gate (M · low)
 - [ ] Step 6 — `aiResolve` orchestration + production transport (M · low)
@@ -72,3 +72,21 @@ Hard constraints held throughout:
   for the no-ids sweep; byte-identity purity check. Registered in `main()`.
 - Gate: build clean; `./build/tests` → 1552 checks, 0 failures;
   `grep -En "INSERT|UPDATE|DELETE" src/nlresolve.cpp` empty (read-only ✓).
+
+### Step 3 — ISA system prompt (done)
+- Added `kResolveSystemPrompt` (raw-string constant) to `nlresolve.cpp` at file
+  scope. Defines all seven verbs non-overlappingly and states every lowering rule:
+  exactly one action / single `emit_action` call, subject ∈ supplied nouns copied
+  verbatim, introduce no new noun, `direction` = movement/compass word for `go`,
+  no tool call on unknown/multi-intent, no pronoun resolution, recognition-not-
+  applicability boundary.
+- **Divergence from prose (logged):** prose keeps its prompt private and tests it
+  through `buildRequestBody`. That path (resolver's `buildResolveRequestBody`) is
+  Step 4, so to give Step 3 its own gate I exposed the constant via
+  `extern const char* const kResolveSystemPrompt` in `nlresolve.hpp`. Step 4 will
+  embed this same constant in the request body's `system` field. Minor seam, not a
+  behavioral change.
+- `testNlResolvePrompt`: substring spot-check — seven verb names, `emit_action`,
+  "exactly one action", "copied verbatim", "Introduce no noun", "compass word",
+  "make no tool call", "pronoun", "recognition only". STRUCTURE only; quality → Step 9.
+- Gate: build clean; `./build/tests` → 1569 checks, 0 failures.
