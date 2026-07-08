@@ -5,6 +5,7 @@
 // Grammar: <verb-word> [argument]. Lowercase everything, split on the first
 // whitespace run. Recognition only — validity is resolution's job.
 #include "action.hpp"
+#include "lookup.hpp"
 
 #include <cctype>
 #include <optional>
@@ -26,16 +27,6 @@ std::string trim(const std::string& s) {
     while (b < e && isSpace(s[b])) ++b;
     while (e > b && isSpace(s[e - 1])) --e;
     return s.substr(b, e - b);
-}
-
-// Look up `noun` against ALL rows of the name table (names are stored
-// lowercase in the seed; input is already lowercased). Returns the entity id
-// of the first match — no ambiguity handling — or 0 if no match anywhere.
-int64_t lookupNoun(Db& db, const std::string& noun) {
-    Stmt s = db.prepare("SELECT entity FROM name WHERE value = ? LIMIT 1");
-    s.bind(1, noun);
-    if (s.step()) return s.colInt(0);
-    return 0;
 }
 
 }  // namespace
