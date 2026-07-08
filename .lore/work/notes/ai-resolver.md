@@ -39,7 +39,7 @@ Hard constraints held throughout:
 - [x] Step 5 — Validation & mapping gate (M · low)
 - [x] Step 6 — `aiResolve` orchestration + production transport (M · low)
   - [x] 6a orchestrator + tests · [x] 6b libcurl transport
-- [ ] Step 7 — Loop dispatch + parser promotion (S · low)
+- [x] Step 7 — Loop dispatch + parser promotion (S · low)
 - [ ] Step 8 — Tier-b passthrough test (S · low)
 - [ ] Step 9 — Live end-to-end smoke, gated (S code · HIGH token-risk)
 - [ ] Step 10 — Final validation against spec checklist (S · low)
@@ -148,3 +148,21 @@ Hard constraints held throughout:
   **8 s** timeout, no retries, key only in header. No direct unit test — exercised
   only by Step 9's gated live smoke, so isolated in its own commit for review. Test
   count unchanged (1632); twcore already links CURL::libcurl.
+
+### Step 7 — Loop dispatch + parser promotion (done)
+- `resolveOrParse(db, line[, transport])` in `nlresolve`: aiResolve → parse (the
+  permanent fallback); first Action wins, else nullopt. Production overload binds
+  curlTransport; injected-transport overload makes the chain unit-testable offline.
+- `runTurn` (`loop.cpp`): `aiNarrationEnabled() ? resolveOrParse(db,line) : parse(db,line)`
+  — disabled mode never constructs a transport. Order aiResolve→parse→renderError.
+  `#include "nlresolve.hpp"`. Everything downstream (Quit-before-tick, tick txn,
+  resolve, narration dispatch) untouched.
+- `parser.cpp` header rewritten: no longer "DISPOSABLE / deleted without ceremony" —
+  now the permanent deterministic fallback, input-side analog of render.cpp's
+  template renderer (REQ-RESOLVE-4). `parse()` behavior unchanged.
+- `testNlResolveDispatch`: fake no-tool-call transport → resolver declines →
+  parser yields Take (subject 4); "smell the flowers" → both decline → nullopt;
+  fake resolving transport → resolver's Go wins ("head north" isn't a fixed verb).
+  Existing `testLoop` passes unchanged (no key → disabled → parser path identical).
+- Gate: build clean; `./build/tests` → 1639 checks, 0 failures; `grep DISPOSABLE
+  src/parser.cpp` empty.

@@ -81,3 +81,13 @@ std::optional<Action> aiResolve(Db& db, const std::string& line);
 // transport is invoked at most once per call — no retries (REQ-RESOLVE-10).
 std::optional<Action> aiResolve(Db& db, const std::string& line,
                                 const HttpTransport& transport);
+
+// Full input resolution with fallback (REQ-RESOLVE-1, -4, -15): aiResolve, and
+// on nullopt the fixed-verb parse() — the permanent deterministic fallback.
+// Returns the first that yields an Action, else nullopt (which drives
+// renderError in runTurn). Order: aiResolve -> parse -> (caller) renderError.
+// The two-arg production version binds the libcurl transport; the injected-
+// transport overload makes the whole chain unit-testable with no live call.
+std::optional<Action> resolveOrParse(Db& db, const std::string& line);
+std::optional<Action> resolveOrParse(Db& db, const std::string& line,
+                                     const HttpTransport& transport);

@@ -1446,6 +1446,52 @@ static void testNlResolveAiResolve() {
     }
 }
 
+// --- dispatch fallback chain (REQ-RESOLVE-1, -4, -15): resolveOrParse runs
+// aiResolve, then the permanent parser fallback, deterministically with a fake
+// no-tool-call transport. Proves the full aiResolve -> parse -> nullopt chain
+// without a live call. ---
+static void testNlResolveDispatch() {
+    const TempDbFile worldPath("textworld_nldispatch_tests.db");
+    Db db = openWorld(worldPath.string(), "seed/base.sql");
+
+    // Fake transport that always makes no tool call: aiResolve declines,
+    // so resolveOrParse must fall through to the parser.
+    HttpTransport declines = [](const std::string&) {
+        nlohmann::json j;
+        j["stop_reason"] = "end_turn";
+        j["content"] = nlohmann::json::array();
+        HttpResponse r;
+        r.status = 200;
+        r.body = j.dump();
+        return r;
+    };
+
+    // Resolver declines "take lantern" -> the PARSER yields Take (subject 4).
+    {
+        auto a = resolveOrParse(db, "take lantern", declines);
+        CHECK(a.has_value());
+        CHECK(a->verb == Verb::Take);
+        CHECK(a->subject == 4);
+    }
+
+    // Both decline "smell the flowers" -> nullopt (the value that drives
+    // renderError in runTurn).
+    CHECK(!resolveOrParse(db, "smell the flowers", declines));
+
+    // When the resolver DOES resolve, its Action wins and the parser is not
+    // needed — "head north" is not a fixed-verb phrase, so only the resolver
+    // could produce this Go.
+    {
+        HttpTransport resolves = [](const std::string&) {
+            return cannedToolUse("go", "", "north");
+        };
+        auto a = resolveOrParse(db, "head north", resolves);
+        CHECK(a.has_value());
+        CHECK(a->verb == Verb::Go);
+        CHECK(a->direction == "north");
+    }
+}
+
 // Canned 200 response in the Anthropic Messages shape: stop_reason plus one
 // text content block. Tests below perturb single fields off this baseline.
 static HttpResponse cannedResponse(const std::string& text,
@@ -1979,6 +2025,7 @@ int main() {
     testNlResolveRequestBody();
     testNlResolveGate();
     testNlResolveAiResolve();
+    testNlResolveDispatch();
     testProseValidation();
     testProseNarrationEnabled();
     testProseAiRender();

@@ -1,6 +1,8 @@
-// DISPOSABLE. This parser is a throwaway test harness for exercising the
-// engine through Action. Nothing downstream of Action may know it exists;
-// it will be deleted without ceremony when a real front end arrives.
+// PERMANENT deterministic fallback for input, the input-side analog of
+// render.cpp's template renderer (REQ-RESOLVE-4). The AI resolver lowers a raw
+// line to an Action when narration is enabled and available; this fixed-verb
+// parser is the always-there path when the resolver is disabled, declines, or
+// fails. Nothing downstream of Action knows which front end produced it.
 //
 // Grammar: <verb-word> [argument]. Lowercase everything, split on the first
 // whitespace run. Recognition only — validity is resolution's job.

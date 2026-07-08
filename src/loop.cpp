@@ -8,6 +8,7 @@
 #include <stdexcept>
 
 #include "action.hpp"
+#include "nlresolve.hpp"
 #include "prose.hpp"
 #include "render.hpp"
 #include "systems.hpp"
@@ -30,8 +31,12 @@ int64_t currentTurn(Db& db) {
 }  // namespace
 
 TurnResult runTurn(Db& db, const std::string& line) {
-    // Tier a: unparseable. No transaction, no tick, no world write.
-    const std::optional<Action> action = parse(db, line);
+    // Resolution: AI resolver -> parser fallback when narration is enabled
+    // (REQ-RESOLVE-1, -2), otherwise the fixed-verb parser directly — a disabled
+    // run never constructs a transport. Tier a: neither yields an Action ->
+    // renderError, no transaction, no tick, no world write.
+    const std::optional<Action> action =
+        aiNarrationEnabled() ? resolveOrParse(db, line) : parse(db, line);
     if (!action) {
         return {TurnOutcome::NoTick, renderError("I don't understand that.")};
     }

@@ -377,3 +377,18 @@ std::optional<Action> aiResolve(Db& db, const std::string& line,
 std::optional<Action> aiResolve(Db& db, const std::string& line) {
     return aiResolve(db, line, curlTransport);
 }
+
+std::optional<Action> resolveOrParse(Db& db, const std::string& line,
+                                     const HttpTransport& transport) {
+    // aiResolve -> parse: the resolver first, then the permanent deterministic
+    // fallback (REQ-RESOLVE-4). Either declining yields nullopt, which the loop
+    // turns into tier-a renderError.
+    if (std::optional<Action> action = aiResolve(db, line, transport)) {
+        return action;
+    }
+    return parse(db, line);
+}
+
+std::optional<Action> resolveOrParse(Db& db, const std::string& line) {
+    return resolveOrParse(db, line, curlTransport);
+}
