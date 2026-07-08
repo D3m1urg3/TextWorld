@@ -33,7 +33,7 @@ Hard constraints held throughout:
 ## Progress tracker
 
 - [x] Step 1 — Hoist `lookupNoun` to `src/lookup.hpp` (S · low)
-- [ ] Step 2 — New TU + scope-context builder (M · low)
+- [x] Step 2 — New TU + scope-context builder (M · low)
 - [ ] Step 3 — ISA system prompt (S · low)
 - [ ] Step 4 — Request body + `emit_action` tool schema (M · low)
 - [ ] Step 5 — Validation & mapping gate (M · low)
@@ -55,3 +55,20 @@ Hard constraints held throughout:
 - Gate: `cmake --build build` clean; `./build/tests` → 1455 checks, 0 failures;
   `testParser` (incl. `take lantern`→4, `take zeppelin`→nullopt) passes unchanged.
   No new test needed (behavior-preserving hoist).
+
+### Step 2 — TU + scope-context builder (done)
+- Created `src/nlresolve.{hpp,cpp}`; added `src/nlresolve.cpp` to twcore in
+  `CMakeLists.txt:17`. Header includes `action.hpp` + `prose.hpp` (permanent TU
+  contract; clangd flags them + `<optional>` unused for now — consumed in Steps 5–6),
+  no parser types. Header comment states the read-only + network-egress contract.
+- `buildResolveContext(Db&, line)` → `ResolveContext{payload}`. Payload JSON keys,
+  **exactly 5**: `input` (raw line verbatim), `room` (name), `exits`, `items`,
+  `inventory`. Resolves player itself via `SELECT entity FROM player LIMIT 1`; slices
+  room/items/inventory relative to it. SELECT shapes copied from prose (`portableNamesIn`
+  join char-identical). No ids in payload — room/actor ids used only to look up names.
+- `testNlResolveContext`: asserts the exact 5-key set + values on fresh seed
+  (`take the lantern` → stone hall / north / lantern / empty), then after
+  take+go-north (garden / south / key / lantern-in-hand); reuses `checkPayloadHygiene`
+  for the no-ids sweep; byte-identity purity check. Registered in `main()`.
+- Gate: build clean; `./build/tests` → 1552 checks, 0 failures;
+  `grep -En "INSERT|UPDATE|DELETE" src/nlresolve.cpp` empty (read-only ✓).

@@ -11,6 +11,7 @@
 #include "db.hpp"
 #include "loop.hpp"
 #include "mutations.hpp"
+#include "nlresolve.hpp"
 #include "prose.hpp"
 #include "render.hpp"
 #include "systems.hpp"
@@ -865,6 +866,69 @@ static void testProseFacts() {
     }
 }
 
+// --- AI resolver: scope-context builder (REQ-RESOLVE-6, -7). Pure function of
+// (db, line): SELECTs only, exactly the five REQ-RESOLVE-7 fields, no ids, no
+// network. Mirrors testProseFacts's payload-shape + hygiene + purity checks. ---
+static void testNlResolveContext() {
+    using nlohmann::json;
+
+    const TempDbFile worldPath("textworld_nlresolve_tests.db");
+    Db db = openWorld(worldPath.string(), "seed/base.sql");
+
+    // Fresh seed: player in the stone hall (1), lantern (4) here, key (5) in
+    // the garden (2), inventory empty. The raw line travels verbatim.
+    {
+        const ResolveContext ctx = buildResolveContext(db, "take the lantern");
+        const json p = json::parse(ctx.payload);
+
+        // Top-level keys are EXACTLY the REQ-RESOLVE-7 set — five, nothing else.
+        CHECK(p.is_object());
+        CHECK(p.size() == 5);
+        CHECK(p.contains("input"));
+        CHECK(p.contains("room"));
+        CHECK(p.contains("exits"));
+        CHECK(p.contains("items"));
+        CHECK(p.contains("inventory"));
+
+        CHECK(p["input"] == "take the lantern");  // raw line, verbatim
+        CHECK(p["room"] == "stone hall");
+        CHECK(p["exits"] == json::array({"north"}));
+        CHECK(p["items"] == json::array({"lantern"}));
+        CHECK(p["inventory"].empty());
+
+        // No entity/row id anywhere (REQ-RESOLVE-6): reuse the prose hygiene
+        // sweep — no digit in any string value, no table name, no file path.
+        checkPayloadHygiene(ctx.payload);
+    }
+
+    // The slice tracks the actor: take the lantern, walk north, and the
+    // context now shows the garden, its south exit, the visible key, and the
+    // lantern moved into inventory.
+    CHECK(runTurn(db, "take lantern").outcome == TurnOutcome::Ticked);
+    CHECK(runTurn(db, "go north").outcome == TurnOutcome::Ticked);
+    {
+        const ResolveContext ctx = buildResolveContext(db, "drop lantern");
+        const json p = json::parse(ctx.payload);
+        CHECK(p.size() == 5);
+        CHECK(p["room"] == "garden");
+        CHECK(p["exits"] == json::array({"south"}));
+        CHECK(p["items"] == json::array({"key"}));
+        CHECK(p["inventory"] == json::array({"lantern"}));
+        checkPayloadHygiene(ctx.payload);
+    }
+
+    // Purity: the builder performs no writes. All ticks above are committed,
+    // so the world file bytes are the full committed state; byte-identical
+    // before/after proves the builder touched nothing (mirrors testProseFacts).
+    {
+        const std::string bytesBefore = readFileBytes(worldPath);
+        CHECK(!bytesBefore.empty());
+        (void)buildResolveContext(db, "look");
+        (void)buildResolveContext(db, "go south");
+        CHECK(readFileBytes(worldPath) == bytesBefore);
+    }
+}
+
 // --- transport seam (REQ-PROSE-9, REQ-PROSE-10, REQ-PROSE-15): aiRender's
 // HTTP transport is injected; every transport in this suite is a fake lambda
 // returning a canned HttpResponse, so the default test run makes NO network
@@ -1576,6 +1640,7 @@ int main() {
     testRender();
     testLoop();
     testProseFacts();
+    testNlResolveContext();
     testProseTransport();
     testProseRequestBody();
     testProseValidation();
