@@ -38,3 +38,13 @@ struct ResolveContext {
 // room / visible items / inventory relative to it. The raw line travels
 // verbatim; nothing else — no ids, no schema — enters the payload.
 ResolveContext buildResolveContext(Db& db, const std::string& line);
+
+// Anthropic Messages API request body for the resolver (REQ-RESOLVE-8, -9).
+// Mirrors buildRequestBody except: max_tokens 512; a `tools` array carrying one
+// `emit_action` tool whose input schema has a schema-enforced `verb` enum of
+// exactly the seven ISA verbs, an optional `subject` string, and an optional
+// `direction` string; `tool_choice` = {"type":"auto"}. Model from
+// TEXTWORLD_MODEL if set and non-empty (else claude-opus-4-8; shared with the
+// renderer). system = kResolveSystemPrompt, one user message carrying the
+// context payload. No thinking, no stream, no prompt caching keys — ever.
+std::string buildResolveRequestBody(const std::string& contextPayload);

@@ -9,6 +9,7 @@
 #include "nlresolve.hpp"
 
 #include <cstdint>
+#include <cstdlib>
 #include <optional>
 #include <string>
 #include <vector>
@@ -120,4 +121,53 @@ ResolveContext buildResolveContext(Db& db, const std::string& line) {
     ResolveContext ctx;
     ctx.payload = payload.dump();
     return ctx;
+}
+
+std::string buildResolveRequestBody(const std::string& contextPayload) {
+    // Model: TEXTWORLD_MODEL (set AND non-empty) else claude-opus-4-8 — the
+    // same rule buildRequestBody uses, so both AI features share one override.
+    const char* env = std::getenv("TEXTWORLD_MODEL");
+    const std::string model =
+        (env != nullptr && env[0] != '\0') ? env : "claude-opus-4-8";
+
+    // The single emit_action tool (REQ-RESOLVE-8): a schema-enforced verb enum
+    // of exactly the seven ISA verbs, plus optional subject / direction. Only
+    // `verb` is required — bare verbs carry neither argument.
+    json emitAction;
+    emitAction["name"] = "emit_action";
+    emitAction["description"] =
+        "Lower the player's input line to exactly one engine action. Call at "
+        "most once; make no call when the line maps to no single in-scope "
+        "action.";
+    json properties;
+    properties["verb"] = {
+        {"type", "string"},
+        {"enum", json::array({"look", "go", "take", "drop", "inventory",
+                              "wait", "quit"})},
+        {"description", "The single ISA verb the input means."}};
+    properties["subject"] = {
+        {"type", "string"},
+        {"description",
+         "For take/drop: the item's noun word, copied verbatim from the "
+         "supplied items or inventory."}};
+    properties["direction"] = {
+        {"type", "string"},
+        {"description", "For go: the movement or compass word."}};
+    json inputSchema;
+    inputSchema["type"] = "object";
+    inputSchema["properties"] = std::move(properties);
+    inputSchema["required"] = json::array({"verb"});
+    emitAction["input_schema"] = std::move(inputSchema);
+
+    json body;
+    body["model"] = model;
+    body["max_tokens"] = 512;  // one small tool call, per REQ-RESOLVE-9
+    body["system"] = kResolveSystemPrompt;
+    body["messages"] =
+        json::array({{{"role", "user"}, {"content", contextPayload}}});
+    body["tools"] = json::array({std::move(emitAction)});
+    body["tool_choice"] = {{"type", "auto"}};  // no call on unknown/multi-intent
+    // Deliberately absent everywhere in this body: thinking, stream, and any
+    // cache-control key (REQ-RESOLVE-9; the test pins the exact top-level set).
+    return body.dump();
 }

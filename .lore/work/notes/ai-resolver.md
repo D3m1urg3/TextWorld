@@ -35,7 +35,7 @@ Hard constraints held throughout:
 - [x] Step 1 — Hoist `lookupNoun` to `src/lookup.hpp` (S · low)
 - [x] Step 2 — New TU + scope-context builder (M · low)
 - [x] Step 3 — ISA system prompt (S · low)
-- [ ] Step 4 — Request body + `emit_action` tool schema (M · low)
+- [x] Step 4 — Request body + `emit_action` tool schema (M · low)
 - [ ] Step 5 — Validation & mapping gate (M · low)
 - [ ] Step 6 — `aiResolve` orchestration + production transport (M · low)
 - [ ] Step 7 — Loop dispatch + parser promotion (S · low)
@@ -90,3 +90,20 @@ Hard constraints held throughout:
   "exactly one action", "copied verbatim", "Introduce no noun", "compass word",
   "make no tool call", "pronoun", "recognition only". STRUCTURE only; quality → Step 9.
 - Gate: build clean; `./build/tests` → 1569 checks, 0 failures.
+
+### Step 4 — Request body + emit_action tool schema (done)
+- Consulted the `claude-api` skill to pin the tool-use request shape (no live call,
+  per constraint). Confirmed: tool defs use `input_schema` (type/properties/required);
+  the verb enum lives at `input_schema.properties.verb.enum`; `tool_choice` is the
+  **object** form `{"type":"auto"}`, not a bare string.
+- `buildResolveRequestBody(contextPayload)` in `nlresolve.cpp`, mirroring
+  `buildRequestBody`. Differences per spec: `max_tokens` **512**; one `emit_action`
+  tool with a schema-enforced 7-verb enum + optional `subject`/`direction`, only
+  `verb` required; `tool_choice` auto; `system` = `kResolveSystemPrompt`. Same model
+  default + `TEXTWORLD_MODEL` override, no thinking/stream/cache keys. Top-level keys:
+  exactly 6 (model, max_tokens, system, messages, tools, tool_choice).
+- `testNlResolveRequestBody` (uses `ScopedModelEnv`): parses back and asserts the
+  7-value enum, `tool_choice.type==auto`, `max_tokens==512`, model default + override
+  + empty→default, and the exact 6-key top-level set (stray-key guard, mirroring
+  prose's `j.size()==4`).
+- Gate: build clean; `./build/tests` → 1592 checks, 0 failures.

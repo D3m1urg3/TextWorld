@@ -1152,6 +1152,80 @@ static void testProseRequestBody() {
     // guard's destructor restores the caller's TEXTWORLD_MODEL here.
 }
 
+// --- resolver request body + emit_action tool schema (REQ-RESOLVE-8, -9).
+// Pure string→string (plus env read); parsed back as JSON. Mirrors
+// testProseRequestBody, including its exact-top-level-key-set stray-key guard. ---
+static void testNlResolveRequestBody() {
+    using nlohmann::json;
+    const ScopedModelEnv guard;
+
+    // Context payload with characters that must survive JSON re-embedding.
+    const std::string payload =
+        "{\"input\":\"take the lantern\",\"room\":\"stone hall\","
+        "\"exits\":[\"north\"],\"items\":[\"lantern\"],\"inventory\":[]}";
+
+    // --- defaults: model, max_tokens, tool schema, forbidden/stray keys ---
+    unsetenv("TEXTWORLD_MODEL");
+    {
+        const json j = json::parse(buildResolveRequestBody(payload));
+        CHECK(j["model"] == "claude-opus-4-8");
+        CHECK(j["max_tokens"] == 512);
+
+        // REQ-RESOLVE-9 forbidden keys + exact top-level set (no thinking,
+        // stream, or cache-control key can slip in) — the resolver analog of
+        // testProseRequestBody's j.size()==4 stray-key guard.
+        CHECK(!j.contains("thinking"));
+        CHECK(!j.contains("stream"));
+        CHECK(j.size() == 6);  // model, max_tokens, system, messages, tools, tool_choice
+
+        // system prompt is the ISA prompt; one user message carries the payload.
+        CHECK(j["system"] == std::string(kResolveSystemPrompt));
+        CHECK(j["messages"].is_array());
+        CHECK(j["messages"].size() == 1);
+        CHECK(j["messages"][0]["role"] == "user");
+        CHECK(j["messages"][0]["content"] == payload);
+
+        // tool_choice: auto (object form).
+        CHECK(j["tool_choice"]["type"] == "auto");
+
+        // exactly one emit_action tool.
+        CHECK(j["tools"].is_array());
+        CHECK(j["tools"].size() == 1);
+        const json& tool = j["tools"][0];
+        CHECK(tool["name"] == "emit_action");
+
+        // input schema: object; verb enum is exactly the seven ISA verbs.
+        const json& schema = tool["input_schema"];
+        CHECK(schema["type"] == "object");
+        const json& verb = schema["properties"]["verb"];
+        CHECK(verb["type"] == "string");
+        CHECK(verb["enum"] ==
+              json::array({"look", "go", "take", "drop", "inventory", "wait",
+                           "quit"}));
+
+        // subject and direction present; verb is the ONLY required field.
+        CHECK(schema["properties"].contains("subject"));
+        CHECK(schema["properties"].contains("direction"));
+        CHECK(schema["required"] == json::array({"verb"}));
+    }
+
+    // --- TEXTWORLD_MODEL set and non-empty → override honored, only the model ---
+    setenv("TEXTWORLD_MODEL", "claude-test-model", 1);
+    {
+        const json j = json::parse(buildResolveRequestBody(payload));
+        CHECK(j["model"] == "claude-test-model");
+        CHECK(j["max_tokens"] == 512);
+    }
+
+    // --- TEXTWORLD_MODEL set but empty → default, not "" ---
+    setenv("TEXTWORLD_MODEL", "", 1);
+    {
+        const json j = json::parse(buildResolveRequestBody(payload));
+        CHECK(j["model"] == "claude-opus-4-8");
+    }
+    // guard's destructor restores the caller's TEXTWORLD_MODEL here.
+}
+
 // Canned 200 response in the Anthropic Messages shape: stop_reason plus one
 // text content block. Tests below perturb single fields off this baseline.
 static HttpResponse cannedResponse(const std::string& text,
@@ -1682,6 +1756,7 @@ int main() {
     testNlResolvePrompt();
     testProseTransport();
     testProseRequestBody();
+    testNlResolveRequestBody();
     testProseValidation();
     testProseNarrationEnabled();
     testProseAiRender();
