@@ -37,8 +37,8 @@ Hard constraints held throughout:
 - [x] Step 3 — ISA system prompt (S · low)
 - [x] Step 4 — Request body + `emit_action` tool schema (M · low)
 - [x] Step 5 — Validation & mapping gate (M · low)
-- [ ] Step 6 — `aiResolve` orchestration + production transport (M · low)
-  - [x] 6a orchestrator + tests · [ ] 6b libcurl transport
+- [x] Step 6 — `aiResolve` orchestration + production transport (M · low)
+  - [x] 6a orchestrator + tests · [x] 6b libcurl transport
 - [ ] Step 7 — Loop dispatch + parser promotion (S · low)
 - [ ] Step 8 — Tier-b passthrough test (S · low)
 - [ ] Step 9 — Live end-to-end smoke, gated (S code · HIGH token-risk)
@@ -132,3 +132,19 @@ Hard constraints held throughout:
   error → correct Action/nullopt.
 - Included `lookup.hpp` in `nlresolve.cpp`; `<optional>` now used (clangd warning cleared).
 - Gate: build clean; `./build/tests` → 1622 checks, 0 failures.
+
+### Step 6 — aiResolve orchestration + production transport (done, split 6a/6b)
+- **6a** `aiResolve(db, line, transport)`: context → body → ONE transport call →
+  `validateAndLower`, whole body in try/catch → nullopt + one stderr line on any
+  failure (REQ-RESOLVE-3), transport at most once (REQ-RESOLVE-10). Mirrors
+  `aiRender`. Enable check NOT here — like `aiRender`, it's at the dispatch point
+  (Step 7's loop gate), faithful mirror. `testNlResolveAiResolve` with fake
+  transports: canned→Action + call-count==1, transportError/malformed/**throwing**
+  →nullopt, no-tool-call→clean nullopt, world-file byte-identity (REQ-RESOLVE-5).
+  1632 checks; read-only grep clean.
+- **6b** `curlTransport` (anon-ns private) + production `aiResolve(db, line)` binding
+  it. Deliberately reimplements prose's transport (only the `HttpTransport` type is
+  shared, micro-decision #2); same URL / x-api-key+version+content-type headers /
+  **8 s** timeout, no retries, key only in header. No direct unit test — exercised
+  only by Step 9's gated live smoke, so isolated in its own commit for review. Test
+  count unchanged (1632); twcore already links CURL::libcurl.
