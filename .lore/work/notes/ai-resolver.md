@@ -1,7 +1,7 @@
 ---
 title: "Implementation notes: ai-resolver"
 date: 2026-07-08
-status: in_progress
+status: complete
 tags: [implementation, notes, ai-integration, nl-resolver, claude-api, tool-use]
 source: .lore/work/plans/ai-resolver.md
 modules: [parser, action, loop, nlresolve]
@@ -42,7 +42,7 @@ Hard constraints held throughout:
 - [x] Step 7 — Loop dispatch + parser promotion (S · low)
 - [x] Step 8 — Tier-b passthrough test (S · low)
 - [x] Step 9 — Live end-to-end smoke, gated (S code · HIGH token-risk) — written, NOT run live
-- [ ] Step 10 — Final validation against spec checklist (S · low)
+- [x] Step 10 — Final validation against spec checklist (S · low)
 
 ## Log
 
@@ -190,3 +190,41 @@ Hard constraints held throughout:
   Default `./build/tests` skips it (test count unchanged 1656; zero "RESOLVER LIVE
   SMOKE" lines → no network). Run rarely, manually, under the gate.
 - Gate: default run skips it, no network access.
+
+### Step 10 — Final validation against spec checklist (done)
+Walked the spec's AI Validation items 1–8; every one passes:
+1. **Build (REQ-RESOLVE-14):** `cmake --build build` clean, no new packages (only
+   the pre-existing `find_package(CURL)`). `nlresolve.{cpp,hpp}` present; `lookup.hpp`
+   included by both `parser.cpp` and `nlresolve.cpp`; nlresolve free of parser.cpp
+   types (the only `parse()` use is `resolveOrParse` calling the `action.hpp` seam).
+2. **Contract grep (REQ-RESOLVE-5):** `grep -En "INSERT|UPDATE|DELETE" src/nlresolve.cpp`
+   empty.
+3. **Prompt (REQ-RESOLVE-12):** grep confirms all seven verb definitions + every rule
+   (one action, verbatim in-scope noun, no new nouns, compass direction, no tool call,
+   no pronoun, recognition-only).
+4/4b. **Fallback + tier-b run:** `./build/textworld` with key unset → "AI narration
+   off — template mode"; `look`/`take key`/`go north`/`inventory` handled by the
+   parser; `take key` (out of room) → "You don't see that here."; `smell the flowers`
+   → "I don't understand that." parser.cpp header no longer says "DISPOSABLE".
+5. **Kill-switch (REQ-RESOLVE-2):** key set + `TEXTWORLD_AI=0` → byte-identical to
+   item 4, no network.
+6. **Unit suite (REQ-RESOLVE-6/7/8/11/13/15):** `./build/tests` → 1656 checks, 0
+   failures, all six `testNlResolve*` green.
+7. **Timeout/failure (REQ-RESOLVE-3/10):** fake transportError/malformed/throwing →
+   nullopt, no crash (testNlResolveAiResolve).
+8. **Live smoke (REQ-RESOLVE-16):** written + gated (Step 9); run manually/rarely.
+
+## Summary
+
+Built the AI action resolver in 10 plan steps / 11 commits (Step 6 split 6a/6b),
+all on `main`, mirroring the shipped prose renderer's seams. Deterministic skeleton
+(Steps 1–8) fully unit-tested with no network (+201 checks, 1455 → 1656); the single
+live-LLM step (9) is isolated, gated behind `TEXTWORLD_AI_LIVE_TEST=1`, mechanical-
+only, and was deliberately NOT executed. Resolver path is read-only (no writes, no
+ids on the wire), reuses `aiNarrationEnabled()` as the one shared switch, and defers
+all applicability to the engine. No divergences from the plan required user
+authorization; two small in-step implementation choices logged (Step 3 extern prompt
+accessor; Step 5 clean no-diagnostic 0-block path).
+
+Suggested next: run `/simplify` on the changed files (src/nlresolve.{cpp,hpp},
+src/lookup.hpp, src/loop.cpp, src/parser.cpp, tests/tests.cpp) to clean up for clarity.
