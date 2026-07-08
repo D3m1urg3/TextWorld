@@ -1255,6 +1255,20 @@ static HttpResponse cannedToolUse(const std::string& verb,
     return r;
 }
 
+// Canned 200 response with NO emit_action tool call — the model declining
+// (unknown / multi-intent). Zero emit_action blocks drive the gate's clean
+// no-action path (nullopt, no diagnostic).
+static HttpResponse cannedNoToolUse() {
+    nlohmann::json j;
+    j["stop_reason"] = "end_turn";
+    j["content"] = nlohmann::json::array(
+        {{{"type", "text"}, {"text", "I'm not sure what you mean."}}});
+    HttpResponse r;
+    r.status = 200;
+    r.body = j.dump();
+    return r;
+}
+
 // --- validation & mapping gate (REQ-RESOLVE-13 a-e): pure function of
 // (response, db). Fixtures from cannedToolUse cover each clause plus the
 // no-tool-call / two-tool-call / out-of-set / unknown-subject paths. Uses the
@@ -1317,16 +1331,7 @@ static void testNlResolveGate() {
     CHECK(!validateAndLower(cannedToolUse("frobnicate", "lantern"), db));
 
     // Clause a: no tool call (0 emit_action blocks) → nullopt, cleanly.
-    {
-        nlohmann::json j;
-        j["stop_reason"] = "end_turn";
-        j["content"] = nlohmann::json::array(
-            {{{"type", "text"}, {"text", "I'm not sure what you mean."}}});
-        HttpResponse r;
-        r.status = 200;
-        r.body = j.dump();
-        CHECK(!validateAndLower(r, db));
-    }
+    CHECK(!validateAndLower(cannedNoToolUse(), db));
 
     // Clause a: two emit_action blocks (multi-intent leak) → nullopt.
     {
@@ -1417,15 +1422,7 @@ static void testNlResolveAiResolve() {
 
     // No-tool-call -> nullopt cleanly (the fallback path).
     {
-        HttpTransport fake = [](const std::string&) {
-            nlohmann::json j;
-            j["stop_reason"] = "end_turn";
-            j["content"] = nlohmann::json::array();
-            HttpResponse r;
-            r.status = 200;
-            r.body = j.dump();
-            return r;
-        };
+        HttpTransport fake = [](const std::string&) { return cannedNoToolUse(); };
         CHECK(!aiResolve(db, "smell the flowers", fake));
     }
 
@@ -1456,15 +1453,7 @@ static void testNlResolveDispatch() {
 
     // Fake transport that always makes no tool call: aiResolve declines,
     // so resolveOrParse must fall through to the parser.
-    HttpTransport declines = [](const std::string&) {
-        nlohmann::json j;
-        j["stop_reason"] = "end_turn";
-        j["content"] = nlohmann::json::array();
-        HttpResponse r;
-        r.status = 200;
-        r.body = j.dump();
-        return r;
-    };
+    HttpTransport declines = [](const std::string&) { return cannedNoToolUse(); };
 
     // Resolver declines "take lantern" -> the PARSER yields Take (subject 4).
     {
