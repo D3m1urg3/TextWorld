@@ -41,7 +41,7 @@ Hard constraints held throughout:
   - [x] 6a orchestrator + tests · [x] 6b libcurl transport
 - [x] Step 7 — Loop dispatch + parser promotion (S · low)
 - [x] Step 8 — Tier-b passthrough test (S · low)
-- [ ] Step 9 — Live end-to-end smoke, gated (S code · HIGH token-risk)
+- [x] Step 9 — Live end-to-end smoke, gated (S code · HIGH token-risk) — written, NOT run live
 - [ ] Step 10 — Final validation against spec checklist (S · low)
 
 ## Log
@@ -175,3 +175,18 @@ Hard constraints held throughout:
   "You don't see that here.", calls still 1 (resolve never calls the resolver),
   key unmoved (still container 2). Drives aiResolve + resolve directly, not runTurn.
 - Gate: build clean; `./build/tests` → 1656 checks, 0 failures.
+
+### Step 9 — Live end-to-end smoke, gated (written, deliberately NOT run live)
+- `testNlResolveLiveSmoke`, structured exactly like `testProseLiveSmoke`: no-op
+  unless `TEXTWORLD_AI_LIVE_TEST=1`; reads env without mutating; called FIRST in
+  `main()` (right after `testProseLiveSmoke`, before the hermetic unset).
+- Drives real phrasings through the PRODUCTION 2-arg `aiResolve` (libcurl):
+  "pick up the lantern" / "grab lantern" → IF resolved, Take/subject 4 (else clean
+  nullopt); "head north" → IF resolved, Go with non-empty direction; nonsense
+  "smell the flowers" through `runTurn` → NoTick (renderError). **Mechanical asserts
+  only** — conditional on resolution, never on model wording, never "must resolve".
+  This is not a prompt-tune loop.
+- **Per the [[verification-must-be-bounded]] constraint I did NOT execute it live.**
+  Default `./build/tests` skips it (test count unchanged 1656; zero "RESOLVER LIVE
+  SMOKE" lines → no network). Run rarely, manually, under the gate.
+- Gate: default run skips it, no network access.

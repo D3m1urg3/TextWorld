@@ -1921,6 +1921,71 @@ static void testProseLiveSmoke() {
     CHECK(shown.find("Exits:") != std::string::npos);  // deterministic tail present
 }
 
+// --- live end-to-end resolver smoke (REQ-RESOLVE-16): structured exactly like
+// testProseLiveSmoke — the ONLY resolver test that touches the network, and
+// ONLY when TEXTWORLD_AI_LIVE_TEST=1. No-op otherwise, so the default suite is
+// offline. It reads TEXTWORLD_AI_LIVE_TEST and ANTHROPIC_API_KEY from the live
+// env (main() calls it BEFORE the hermetic unset) and mutates no env var.
+//
+// It drives real phrasings through the PRODUCTION transport (the 2-arg
+// aiResolve, libcurl) and asserts MECHANICAL invariants only: if a phrasing
+// resolves it must lower to the expected verb/subject; a nullopt is a correct
+// clean fallback, never a failure. This is deliberately NOT a prompt-tuning
+// loop — never assert on model wording or that a phrasing MUST resolve.
+static void testNlResolveLiveSmoke() {
+    const char* live = std::getenv("TEXTWORLD_AI_LIVE_TEST");
+    if (live == nullptr || std::string(live) != "1") {
+        return;  // default run: no-op, no network access.
+    }
+
+    const char* key = std::getenv("ANTHROPIC_API_KEY");
+    if (key == nullptr || key[0] == '\0') {
+        std::fprintf(stderr,
+                     "RESOLVER LIVE SMOKE SKIPPED: TEXTWORLD_AI_LIVE_TEST=1 but "
+                     "ANTHROPIC_API_KEY is unset/empty.\n");
+        return;
+    }
+
+    std::fprintf(stderr,
+                 "RESOLVER LIVE SMOKE: resolving real phrasings through the "
+                 "Anthropic API (this makes network calls)...\n");
+
+    const TempDbFile worldPath("textworld_resolve_live_smoke.db");
+    Db db = openWorld(worldPath.string(), "seed/base.sql");
+
+    // "take" synonyms the fixed-verb parser can't handle: if the model resolves
+    // one, it must lower to Take lantern (id 4, mechanically assigned). A
+    // nullopt is a correct clean fallback (model non-determinism), not a
+    // failure. Production 2-arg transport; never assert on wording.
+    for (const char* line : {"pick up the lantern", "grab lantern"}) {
+        const std::optional<Action> a = aiResolve(db, line);
+        if (a) {
+            CHECK(a->verb == Verb::Take);
+            CHECK(a->subject == 4);
+        }
+    }
+
+    // "head north": Go with a NON-EMPTY direction (the gate guarantees non-empty
+    // but never a specific word), or clean fallback.
+    {
+        const std::optional<Action> a = aiResolve(db, "head north");
+        if (a) {
+            CHECK(a->verb == Verb::Go);
+            CHECK(!a->direction.empty());
+        }
+    }
+
+    // Nonsense line: no single in-set action → no tool call → nullopt → the
+    // parser also declines → runTurn's tier-a renderError, no tick. The key is
+    // set, so aiNarrationEnabled() is true and runTurn goes through
+    // resolveOrParse (the full production dispatch).
+    {
+        const TurnResult r = runTurn(db, "smell the flowers");
+        CHECK(r.outcome == TurnOutcome::NoTick);
+        CHECK(!r.output.empty());
+    }
+}
+
 // --- persistence after play (REQ-PROTO-12 item 8, REQ-PROTO-10): a played
 // world survives a full close/reopen with turn counter, entity positions, and
 // the complete event transcript intact — and is still playable afterward. ---
@@ -2037,8 +2102,10 @@ int main() {
     // intact: it needs a real ANTHROPIC_API_KEY, and the hermetic unset below
     // would otherwise clobber it (see testProseLiveSmoke's env-ordering note).
     // No-op unless TEXTWORLD_AI_LIVE_TEST=1, so the default run is unaffected
-    // and makes no network access here (REQ-PROSE-17).
+    // and makes no network access here (REQ-PROSE-17, REQ-RESOLVE-16). Both
+    // live smokes run here, before the hermetic unset clobbers the real key.
     testProseLiveSmoke();
+    testNlResolveLiveSmoke();
 
     // Hermetic run: clear both AI env vars for the whole suite (guards
     // restore the developer's values on exit). Otherwise a developer shell
