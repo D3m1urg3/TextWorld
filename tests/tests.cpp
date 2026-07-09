@@ -130,7 +130,7 @@ static void testWorld() {
     const TempDbFile worldPath("textworld_world_tests.db");
 
     // Tests run from the repo root, so the default seed path resolves.
-    const std::string seedPath = "seed/base.sql";
+    const std::string seedPath = "tests/fixture.sql";
 
     // --- fresh create: schema + seed applied ---
     {
@@ -193,10 +193,73 @@ static void testWorld() {
     CHECK(readFileBytes(worldPath) == bytesBefore);  // byte-identical after refusal
 }
 
+// The shipped seed's REQ-PROTO-2 shape, checked structurally — never wording,
+// never entity counts beyond what REQ-PROTO-2 mandates (REQ-MAGE-5). The rest
+// of the suite runs against tests/fixture.sql; this is the one deterministic
+// test that opens the real seed/base.sql, so content swaps stay green here
+// without ever touching assertions.
+static void testShippedSeedShape() {
+    const TempDbFile worldPath("textworld_shipped_seed_tests.db");
+
+    // Shipped seed + default settingPath (seed/setting.txt), from the repo root.
+    Db db = openWorld(worldPath.string(), "seed/base.sql");
+
+    // Exactly 2 rooms.
+    CHECK(queryInt(db, "SELECT COUNT(*) FROM room") == 2);
+
+    // One bidirectional exit pair whose directions are mutual inverses from
+    // the invertible set (REQ-ARCH-8).
+    CHECK(queryInt(db, "SELECT COUNT(*) FROM exits") == 2);
+    CHECK(queryInt(db,
+                   "SELECT COUNT(*) FROM exits a "
+                   "JOIN exits b ON a.dest = b.room AND b.dest = a.room "
+                   "WHERE (a.direction, b.direction) IN "
+                   "(('north','south'),('south','north'),"
+                   "('east','west'),('west','east'),"
+                   "('up','down'),('down','up'),"
+                   "('in','out'),('out','in'))") == 2);
+
+    // Player exists, starts in room 1, and has no description row.
+    CHECK(queryInt(db, "SELECT COUNT(*) FROM player") == 1);
+    CHECK(queryInt(db,
+                   "SELECT COUNT(*) FROM player p "
+                   "JOIN location l ON l.entity = p.entity "
+                   "WHERE l.container = 1") == 1);
+    CHECK(queryInt(db,
+                   "SELECT COUNT(*) FROM description d "
+                   "JOIN player p ON d.entity = p.entity") == 0);
+
+    // >= 2 portables, at least one located in each of the two rooms.
+    CHECK(queryInt(db, "SELECT COUNT(*) FROM portable") >= 2);
+    CHECK(queryInt(db,
+                   "SELECT COUNT(DISTINCT l.container) FROM portable p "
+                   "JOIN location l ON l.entity = p.entity "
+                   "JOIN room r ON r.entity = l.container") == 2);
+
+    // Every room and portable has a non-empty name and description.
+    CHECK(queryInt(db,
+                   "SELECT COUNT(*) FROM room r "
+                   "LEFT JOIN name n ON n.entity = r.entity "
+                   "LEFT JOIN description d ON d.entity = r.entity "
+                   "WHERE n.value IS NULL OR trim(n.value) = '' "
+                   "OR d.prose IS NULL OR trim(d.prose) = ''") == 0);
+    CHECK(queryInt(db,
+                   "SELECT COUNT(*) FROM portable p "
+                   "LEFT JOIN name n ON n.entity = p.entity "
+                   "LEFT JOIN description d ON d.entity = p.entity "
+                   "WHERE n.value IS NULL OR trim(n.value) = '' "
+                   "OR d.prose IS NULL OR trim(d.prose) = ''") == 0);
+
+    // meta.turn = 0 and a non-empty meta.setting loaded from the default path.
+    CHECK(queryInt(db, "SELECT value FROM meta WHERE key = 'turn'") == 0);
+    CHECK(queryInt(db,
+                   "SELECT length(value) > 0 FROM meta WHERE key = 'setting'") == 1);
+}
+
 static void testParser() {
     const TempDbFile worldPath("textworld_parser_tests.db");
 
-    Db db = openWorld(worldPath.string(), "seed/base.sql");
+    Db db = openWorld(worldPath.string(), "tests/fixture.sql");
 
     // Unparseable lines → nullopt.
     CHECK(!parse(db, "frobnicate"));       // unknown verb
@@ -247,7 +310,7 @@ static void testParser() {
 static void testMutations() {
     const TempDbFile worldPath("textworld_mutations_tests.db");
 
-    Db db = openWorld(worldPath.string(), "seed/base.sql");
+    Db db = openWorld(worldPath.string(), "tests/fixture.sql");
 
     // Seed baseline: lantern (4) in stone hall (1), no events yet.
     CHECK(queryInt(db, "SELECT container FROM location WHERE entity = 4") == 1);
@@ -322,7 +385,7 @@ static void tick(Db& db, const Action& a, int64_t player = 3) {
 static void testSystems() {
     const TempDbFile worldPath("textworld_systems_tests.db");
 
-    Db db = openWorld(worldPath.string(), "seed/base.sql");
+    Db db = openWorld(worldPath.string(), "tests/fixture.sql");
 
     // Seed baseline: player 3 in room 1, lantern 4 in room 1, key 5 in room 2.
     CHECK(queryInt(db, "SELECT value FROM meta WHERE key = 'turn'") == 0);
@@ -465,7 +528,7 @@ static bool contains(const std::string& haystack, const std::string& needle) {
 static void testRender() {
     const TempDbFile worldPath("textworld_render_tests.db");
 
-    Db db = openWorld(worldPath.string(), "seed/base.sql");
+    Db db = openWorld(worldPath.string(), "tests/fixture.sql");
     int64_t turn = 0;
 
     // --- turn with no events renders as the empty string ---
@@ -557,7 +620,7 @@ static void testLoop() {
     // --- ticked turn: go north → garden prose, meta.turn incremented ---
     {
         const TempDbFile worldPath("textworld_loop_tests.db");
-        Db db = openWorld(worldPath.string(), "seed/base.sql");
+        Db db = openWorld(worldPath.string(), "tests/fixture.sql");
         CHECK(queryInt(db, "SELECT value FROM meta WHERE key = 'turn'") == 0);
 
         const TurnResult r = runTurn(db, "go north");
@@ -586,7 +649,7 @@ static void testLoop() {
     // driven through runTurn on a fresh world (player in room 1, key in 2) ---
     {
         const TempDbFile worldPath("textworld_loop_tests.db");
-        Db db = openWorld(worldPath.string(), "seed/base.sql");
+        Db db = openWorld(worldPath.string(), "tests/fixture.sql");
 
         // Tier b: recognized noun, wrong room → Ticked, one 'failed' event,
         // key untouched.
@@ -608,7 +671,7 @@ static void testLoop() {
     // --- scripted sequence on a fresh world: each line Ticked, turn == 6 ---
     {
         const TempDbFile worldPath("textworld_loop_tests.db");
-        Db db = openWorld(worldPath.string(), "seed/base.sql");
+        Db db = openWorld(worldPath.string(), "tests/fixture.sql");
 
         const char* script[] = {"look",         "take lantern", "go north",
                                 "drop lantern", "inventory",    "wait"};
@@ -628,7 +691,7 @@ static void testLoop() {
     // of letting the exception — or a throw from rollback itself — escape. ---
     {
         const TempDbFile worldPath("textworld_loop_tests.db");
-        Db db = openWorld(worldPath.string(), "seed/base.sql");
+        Db db = openWorld(worldPath.string(), "tests/fixture.sql");
         db.exec("DELETE FROM player");  // playerId() will throw mid-tick
         const int64_t turnBefore = queryInt(db, "SELECT value FROM meta WHERE key = 'turn'");
         const int64_t eventsBefore = queryInt(db, "SELECT COUNT(*) FROM events");
@@ -719,7 +782,7 @@ static void testProseFacts() {
     using nlohmann::json;
 
     const TempDbFile worldPath("textworld_prose_tests.db");
-    Db db = openWorld(worldPath.string(), "seed/base.sql");
+    Db db = openWorld(worldPath.string(), "tests/fixture.sql");
 
     // Canon prose fetched independently, compared verbatim below.
     const std::string hallProse =
@@ -877,7 +940,7 @@ static void testNlResolveContext() {
     using nlohmann::json;
 
     const TempDbFile worldPath("textworld_nlresolve_tests.db");
-    Db db = openWorld(worldPath.string(), "seed/base.sql");
+    Db db = openWorld(worldPath.string(), "tests/fixture.sql");
 
     // Fresh seed: player in the stone hall (1), lantern (4) here, key (5) in
     // the garden (2), inventory empty. The raw line travels verbatim.
@@ -977,7 +1040,7 @@ static void testNlResolvePrompt() {
 // access — the libcurl production transport is never invoked here. ---
 static void testProseTransport() {
     const TempDbFile worldPath("textworld_transport_tests.db");
-    Db db = openWorld(worldPath.string(), "seed/base.sql");
+    Db db = openWorld(worldPath.string(), "tests/fixture.sql");
 
     // One committed turn to render.
     CHECK(runTurn(db, "wait").outcome == TurnOutcome::Ticked);
@@ -1281,7 +1344,7 @@ static HttpResponse cannedNoToolUse() {
 // must never throw. ---
 static void testNlResolveGate() {
     const TempDbFile worldPath("textworld_nlgate_tests.db");
-    Db db = openWorld(worldPath.string(), "seed/base.sql");
+    Db db = openWorld(worldPath.string(), "tests/fixture.sql");
 
     // Clause e: argument-free verbs map with subject 0, direction empty.
     {
@@ -1379,7 +1442,7 @@ static void testNlResolveGate() {
 // testProseTransport's fake-transport discipline. ---
 static void testNlResolveAiResolve() {
     const TempDbFile worldPath("textworld_nlairesolve_tests.db");
-    Db db = openWorld(worldPath.string(), "seed/base.sql");
+    Db db = openWorld(worldPath.string(), "tests/fixture.sql");
 
     // Canned emit_action -> correct Action; transport invoked EXACTLY once.
     {
@@ -1453,7 +1516,7 @@ static void testNlResolveAiResolve() {
 // without a live call. ---
 static void testNlResolveDispatch() {
     const TempDbFile worldPath("textworld_nldispatch_tests.db");
-    Db db = openWorld(worldPath.string(), "seed/base.sql");
+    Db db = openWorld(worldPath.string(), "tests/fixture.sql");
 
     // Fake transport that always makes no tool call: aiResolve declines,
     // so resolveOrParse must fall through to the parser.
@@ -1490,7 +1553,7 @@ static void testNlResolveDispatch() {
 // applicability authority. Drives aiResolve + resolve directly (not runTurn). ---
 static void testNlResolveTierBPassthrough() {
     const TempDbFile worldPath("textworld_nltierb_tests.db");
-    Db db = openWorld(worldPath.string(), "seed/base.sql");
+    Db db = openWorld(worldPath.string(), "tests/fixture.sql");
 
     // key (5) exists world-wide but sits in the garden (2), NOT the player's
     // room (stone hall, 1). Clause c is recognition only, so aiResolve returns a
@@ -1721,7 +1784,7 @@ static void testProseNarrationEnabled() {
 // transports, plus the runTurn dispatch (template fallback). No network. ---
 static void testProseAiRender() {
     const TempDbFile worldPath("textworld_airender_tests.db");
-    Db db = openWorld(worldPath.string(), "seed/base.sql");
+    Db db = openWorld(worldPath.string(), "tests/fixture.sql");
 
     const std::string gardenProse =
         queryText(db, "SELECT prose FROM description WHERE entity = 2");
@@ -1894,7 +1957,7 @@ static void testProseLiveSmoke() {
                  "API (this makes a network call)...\n");
 
     const TempDbFile worldPath("textworld_live_smoke.db");
-    Db db = openWorld(worldPath.string(), "seed/base.sql");
+    Db db = openWorld(worldPath.string(), "tests/fixture.sql");
 
     // A moved turn (room-describing): canon rides verbatim inside the prose
     // and the deterministic tail carries the Exits line.
@@ -1944,7 +2007,7 @@ static void testNlResolveLiveSmoke() {
                  "Anthropic API (this makes network calls)...\n");
 
     const TempDbFile worldPath("textworld_resolve_live_smoke.db");
-    Db db = openWorld(worldPath.string(), "seed/base.sql");
+    Db db = openWorld(worldPath.string(), "tests/fixture.sql");
 
     // "take" synonyms the fixed-verb parser can't handle: if the model resolves
     // one, it must lower to Take lantern (id 4, mechanically assigned). A
@@ -2135,7 +2198,7 @@ static void testPersistence() {
     // at scope exit releases the connection; DELETE journal mode means the
     // file on disk is the full committed state).
     {
-        Db db = openWorld(worldPath.string(), "seed/base.sql");
+        Db db = openWorld(worldPath.string(), "tests/fixture.sql");
         CHECK(runTurn(db, "take lantern").outcome == TurnOutcome::Ticked);
         CHECK(runTurn(db, "go north").outcome == TurnOutcome::Ticked);
         CHECK(runTurn(db, "drop lantern").outcome == TurnOutcome::Ticked);
@@ -2144,7 +2207,7 @@ static void testPersistence() {
 
     // Reopen the same file: everything preserved.
     {
-        Db db = openWorld(worldPath.string(), "seed/base.sql");
+        Db db = openWorld(worldPath.string(), "tests/fixture.sql");
 
         // Turn counter survived the close.
         CHECK(queryInt(db, "SELECT value FROM meta WHERE key = 'turn'") == 3);
@@ -2187,7 +2250,7 @@ static void testPortability() {
 
     // Play the original: lantern in hand, player in the garden. Close it.
     {
-        Db db = openWorld(origPath.string(), "seed/base.sql");
+        Db db = openWorld(origPath.string(), "tests/fixture.sql");
         CHECK(runTurn(db, "take lantern").outcome == TurnOutcome::Ticked);
         CHECK(runTurn(db, "go north").outcome == TurnOutcome::Ticked);
         CHECK(queryInt(db, "SELECT value FROM meta WHERE key = 'turn'") == 2);
@@ -2202,7 +2265,7 @@ static void testPortability() {
     // Play the COPY down a divergent path: drop the lantern in the garden,
     // walk back south. Close it.
     {
-        Db db = openWorld(copyPath.string(), "seed/base.sql");
+        Db db = openWorld(copyPath.string(), "tests/fixture.sql");
         CHECK(queryInt(db, "SELECT value FROM meta WHERE key = 'turn'") == 2);
         CHECK(runTurn(db, "drop lantern").outcome == TurnOutcome::Ticked);
         CHECK(runTurn(db, "go south").outcome == TurnOutcome::Ticked);
@@ -2215,12 +2278,12 @@ static void testPortability() {
     // Reopen the original: pre-copy state, still playable, and its state
     // provably differs from the copy's (divergence).
     {
-        Db orig = openWorld(origPath.string(), "seed/base.sql");
+        Db orig = openWorld(origPath.string(), "tests/fixture.sql");
         CHECK(queryInt(orig, "SELECT value FROM meta WHERE key = 'turn'") == 2);
         CHECK(queryInt(orig, "SELECT container FROM location WHERE entity = 3") == 2);
         CHECK(queryInt(orig, "SELECT container FROM location WHERE entity = 4") == 3);
 
-        Db copy = openWorld(copyPath.string(), "seed/base.sql");
+        Db copy = openWorld(copyPath.string(), "tests/fixture.sql");
         CHECK(queryInt(copy, "SELECT value FROM meta WHERE key = 'turn'") == 4);
         CHECK(queryInt(copy, "SELECT container FROM location WHERE entity = 3") == 1);
         CHECK(queryInt(copy, "SELECT container FROM location WHERE entity = 4") == 2);
@@ -2272,7 +2335,7 @@ static void testArchitectSettingLoad() {
         const TempSettingFile setting("textworld_setting_present.txt", settingText);
         const TempDbFile worldPath("textworld_setting_present.db");
 
-        Db db = openWorld(worldPath.string(), "seed/base.sql", setting.string());
+        Db db = openWorld(worldPath.string(), "tests/fixture.sql", setting.string());
 
         CHECK(queryText(db, "SELECT value FROM meta WHERE key = 'setting'") ==
               settingText);
@@ -2291,7 +2354,7 @@ static void testArchitectSettingLoad() {
                 .string();
         std::filesystem::remove(missing);  // ensure it does not exist
 
-        Db db = openWorld(worldPath.string(), "seed/base.sql", missing);
+        Db db = openWorld(worldPath.string(), "tests/fixture.sql", missing);
 
         // Tolerant read: init succeeded, and meta.setting is present-but-empty.
         CHECK(queryText(db, "SELECT value FROM meta WHERE key = 'setting'").empty());
@@ -2328,7 +2391,7 @@ static void testArchitectContext() {
         "A quiet cloister of grey stone and green light.";
     const TempSettingFile setting("textworld_ctx_setting.txt", settingText);
     const TempDbFile worldPath("textworld_arch_context.db");
-    Db db = openWorld(worldPath.string(), "seed/base.sql", setting.string());
+    Db db = openWorld(worldPath.string(), "tests/fixture.sql", setting.string());
 
     // Origin = the stone hall (room 1); walk an unmapped direction: 'east'.
     const nlohmann::json j =
@@ -2358,7 +2421,7 @@ static void testArchitectContext() {
             (std::filesystem::temp_directory_path() / "textworld_ctx_no_setting.txt")
                 .string();
         std::filesystem::remove(missing);
-        Db db2 = openWorld(w2.string(), "seed/base.sql", missing);
+        Db db2 = openWorld(w2.string(), "tests/fixture.sql", missing);
 
         const nlohmann::json j2 =
             nlohmann::json::parse(buildArchitectContext(db2, 1, "up"));
@@ -2569,7 +2632,7 @@ static void testArchitectGate() {
 // from the hall — base.sql maps only north/south) so no exit PK collides. ---
 static void testWriteGeneratedRoom() {
     const TempDbFile worldPath("textworld_write_gen_room.db");
-    Db db = openWorld(worldPath.string(), "seed/base.sql");
+    Db db = openWorld(worldPath.string(), "tests/fixture.sql");
 
     const int64_t originRoom = 1;  // stone hall
     const int64_t player = 3;
@@ -2627,7 +2690,7 @@ static void testArchitectGenerate() {
     // --- success: canned create_room → true; room + reciprocal exits + event ---
     {
         const TempDbFile worldPath("textworld_arch_gen_ok.db");
-        Db db = openWorld(worldPath.string(), "seed/base.sql");
+        Db db = openWorld(worldPath.string(), "tests/fixture.sql");
 
         int calls = 0;
         HttpTransport fake = [&](const std::string&) {
@@ -2655,7 +2718,7 @@ static void testArchitectGenerate() {
     // --- Phase-1 atomic fallback: each failure → false, NO orphan written ---
     {
         const TempDbFile worldPath("textworld_arch_gen_fail.db");
-        Db db = openWorld(worldPath.string(), "seed/base.sql");
+        Db db = openWorld(worldPath.string(), "tests/fixture.sql");
 
         const int64_t entities0 = queryInt(db, "SELECT COUNT(*) FROM entities");
         const int64_t exits0 = queryInt(db, "SELECT COUNT(*) FROM exits");
@@ -2722,7 +2785,7 @@ static void testResolveGoGenerate() {
     const ScopedEnvVar aiGuard("TEXTWORLD_AI");
 
     const TempDbFile worldPath("textworld_resolvego_gen.db");
-    Db db = openWorld(worldPath.string(), "seed/base.sql");
+    Db db = openWorld(worldPath.string(), "tests/fixture.sql");
     const int64_t player = 3;
 
     int calls = 0;
@@ -2789,7 +2852,7 @@ static void testGeneratedEventInvisible() {
     unsetenv("TEXTWORLD_AI");
 
     const TempDbFile worldPath("textworld_gen_invisible.db");
-    Db db = openWorld(worldPath.string(), "seed/base.sql");
+    Db db = openWorld(worldPath.string(), "tests/fixture.sql");
 
     HttpTransport fake = [](const std::string&) {
         return cannedCreateRoom("crypt", "A cold undercroft of grey stone.");
@@ -2902,6 +2965,7 @@ int main() {
 
     testDb();
     testWorld();
+    testShippedSeedShape();
     testParser();
     testMutations();
     testSystems();

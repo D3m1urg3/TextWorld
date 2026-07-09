@@ -16,7 +16,7 @@ The **engine foundation**, the **AI prose renderer**, the **AI action resolver**
 
 **AI narration** replaces the flat templates with Claude-generated second-person prose, grounded in a facts payload built from the turn's events (never the raw database). It is read-only and additive: the AI path performs SELECTs only, and every failure — no key, HTTP error, timeout, refusal, or a response that fails the mechanical validation gate — falls back silently to the original templates for that turn. The template renderer stays intact as the permanent fallback, so a turn never fails to produce output. Exits, visible items, and inventory lines are always appended deterministically by the engine, never left to the model. See [AI narration](#ai-narration) below to enable it.
 
-**AI input resolution** is the input-side mirror of narration: with AI enabled, a raw input line is lowered to the engine's fixed instruction set by Claude tool-use *before* the parser runs, so natural phrasings like `pick up the lantern`, `grab the key`, or `head north` resolve to the same actions the fixed verbs produce. It is read-only and additive on the same terms — SELECTs only, one call per line, an 8-second timeout, no retries — and shares narration's single on/off switch and its silent fallback on any failure. The model recognizes nouns only; whether an action actually applies stays the engine's decision, so a resolved `take` for an item that isn't in the room fails the ordinary way.
+**AI input resolution** is the input-side mirror of narration: with AI enabled, a raw input line is lowered to the engine's fixed instruction set by Claude tool-use *before* the parser runs, so natural phrasings like `pick up the candle`, `grab the key`, or `head north` resolve to the same actions the fixed verbs produce. It is read-only and additive on the same terms — SELECTs only, one call per line, an 8-second timeout, no retries — and shares narration's single on/off switch and its silent fallback on any failure. The model recognizes nouns only; whether an action actually applies stays the engine's decision, so a resolved `take` for an item that isn't in the room fails the ordinary way.
 
 **AI world generation** is the first *read-write* AI feature — the world is no longer fixed at two rooms. With AI enabled, walking an exit that leads nowhere yet no longer just fails: an **architect** generates one new room, coherent with the setting (a hand-authored `seed/setting.txt` loaded into canon at init) and with the room you are leaving, writes it to canon, and moves you in. The model proposes only a name and a description via Claude tool-use; the engine mints the id, owns the exit and its mechanical reciprocal, and enforces every invariant, so the model never invents structure and never sees an id. A generated room is permanent — walk back and forth and it is the same room, never regenerated, because the exit now simply exists. Directions with no mechanical opposite (`northeast`, `widdershins`), a disabled AI, or any generation failure fall back to the original wall, `You can't go that way.` — so an unmapped edge behaves exactly as it does today whenever generation can't run. The write is confined to one sanctioned engine helper; the architect translation unit itself issues no raw SQL.
 
@@ -41,7 +41,7 @@ Run the game from the directory where you want the world file to live:
 ./build/textworld
 ```
 
-On first launch it creates `world.db` and seeds the starting world: a stone hall and a walled garden, a brass lantern, and a rusty iron key. On later launches it resumes exactly where you left off.
+On first launch it creates `world.db` and seeds the starting world: a dormitory cell and a night-dark corridor, a white candle, a cold iron key, and an ashwood wand. On later launches it resumes exactly where you left off.
 
 ### Commands
 
@@ -57,7 +57,7 @@ On first launch it creates `world.db` and seeds the starting world: a stone hall
 
 Every command except `quit` consumes a turn — including failed attempts the world understands, like walking into a wall.
 
-With AI enabled (see below), you can type these as natural phrasings too — `pick up the lantern`, `head north`, `grab the key` — and the resolver lowers them to the actions above. Anything it can't map falls through to the fixed verbs, and a line neither can resolve is declined without consuming a turn.
+With AI enabled (see below), you can type these as natural phrasings too — `pick up the candle`, `head north`, `grab the key` — and the resolver lowers them to the actions above. Anything it can't map falls through to the fixed verbs, and a line neither can resolve is declined without consuming a turn.
 
 With AI enabled you can also walk *off the edge of the map*: a `go` in a direction that leads nowhere yet builds a new room on the spot and steps you through it — see [AI world generation](#ai-world-generation) below. Without AI, that same move is the usual `You can't go that way.`
 
@@ -83,7 +83,7 @@ With AI enabled, a turn makes up to two synchronous Claude calls — one to reso
 
 When AI is on and you walk an exit that has no room beyond it yet, the game generates that room synchronously and moves you in. The context sent to the model is deliberately small and fixed-size: the setting text, the name and canon description of the room you are leaving, and the direction — no ids, no map, no history. The model returns just a room name and description; the engine assigns the id, creates the exit and its reciprocal (`north↔south`, `east↔west`, `up↔down`, `in↔out`), and commits it all inside the same turn transaction, so a generation either lands whole or not at all. Because the new exit then exists in canon, re-crossing it never calls the model again.
 
-The setting lives in `seed/setting.txt` — a freeform prose document describing the world's tone, premise, and scale, loaded into the world once at creation. Edit it before first launch (or delete `world.db` and relaunch) to grow a different kind of world; an absent or empty file just yields plainer rooms. The shipped setting is a ruined monastic priory, coherent with the stone hall and garden of the starting world.
+The setting lives in `seed/setting.txt` — a freeform prose document describing the world's tone, premise, and scale, loaded into the world once at creation. Edit it before first launch (or delete `world.db` and relaunch) to grow a different kind of world; an absent or empty file just yields plainer rooms. The shipped setting is Thornmere Hall, a manor–castle school of magic explored at night, coherent with the dormitory cell and corridor of the starting world.
 
 Deferred for now: a live storyteller that evolves the setting, coarse-to-fine level-of-detail with background prefetch (generation currently stalls the turn for one round trip), a world-size cap, and de-duplicating rooms that should be the same place. The world grows as a tree — each new room advertises only the way back.
 

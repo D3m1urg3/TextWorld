@@ -1,45 +1,53 @@
 -- TextWorld base seed: the two-room prototype world.
 -- Literal entity ids, per design §8. Id ledger:
---   1: room 'stone hall'
---   2: room 'garden'
+--   1: room 'dormitory cell'
+--   2: room 'corridor'
 --   3: player
---   4: portable 'lantern'
+--   4: portable 'candle'
 --   5: portable 'key'
+--   6: portable 'wand'
 
-INSERT INTO entities(id) VALUES (1), (2), (3), (4), (5);
+INSERT INTO entities(id) VALUES (1), (2), (3), (4), (5), (6);
 
--- 1: room 'stone hall'
+-- 1: room 'dormitory cell'
 INSERT INTO room(entity) VALUES (1);
-INSERT INTO name(entity, value) VALUES (1, 'stone hall');
+INSERT INTO name(entity, value) VALUES (1, 'dormitory cell');
 INSERT INTO description(entity, prose) VALUES (1,
-  'A vaulted hall of grey stone, its flagstones worn smooth by feet long gone. Cold air pools in the corners, and a doorway to the north lets in a thin blade of green light.');
+  'A narrow student''s cell under a sloped ceiling: a bed with unfamiliar sheets, a desk, a trunk you have not finished unpacking. Moonlight through the single lancet window finds the door to the north, standing just ajar.');
 
--- 2: room 'garden'
+-- 2: room 'corridor'
 INSERT INTO room(entity) VALUES (2);
-INSERT INTO name(entity, value) VALUES (2, 'garden');
+INSERT INTO name(entity, value) VALUES (2, 'corridor');
 INSERT INTO description(entity, prose) VALUES (2,
-  'An overgrown walled garden, all bramble and drowsy bees. Ivy has claimed the sundial, and the path south back into the hall is nearly lost under fallen petals.');
+  'A long panelled corridor, doors shut on either side and the ceiling lost in the dark. Somewhere far off a stair creaks to itself. A lamp in a wall bracket kindles quietly as you approach, and the way south leads back to your cell.');
 
 -- exits: north 1→2, south 2→1
 INSERT INTO exits(room, direction, dest) VALUES
   (1, 'north', 2),
   (2, 'south', 1);
 
--- 3: player, standing in the stone hall (no description: the player is not canon prose)
+-- 3: player, out of bed in the dormitory cell (no description: the player is not canon prose)
 INSERT INTO player(entity) VALUES (3);
 INSERT INTO name(entity, value) VALUES (3, 'player');
 INSERT INTO location(entity, container) VALUES (3, 1);
 
--- 4: portable 'lantern', in the stone hall
+-- 4: portable 'candle', in the dormitory cell
 INSERT INTO portable(entity) VALUES (4);
-INSERT INTO name(entity, value) VALUES (4, 'lantern');
+INSERT INTO name(entity, value) VALUES (4, 'candle');
 INSERT INTO description(entity, prose) VALUES (4,
-  'A brass lantern, dented and smoke-dulled, its little flame steady behind sooty glass.');
+  'A stub of white candle in a pewter holder, burning with a small, patient flame that never seems to shorten it.');
 INSERT INTO location(entity, container) VALUES (4, 1);
 
--- 5: portable 'key', in the garden
+-- 5: portable 'key', in the corridor
 INSERT INTO portable(entity) VALUES (5);
 INSERT INTO name(entity, value) VALUES (5, 'key');
 INSERT INTO description(entity, prose) VALUES (5,
-  'An iron key gone orange with rust, heavy as a promise, its teeth cut for a lock you have not found.');
+  'A cold iron key on a loop of faded ribbon, heavy as a promise, its teeth cut for a lock you have not found.');
 INSERT INTO location(entity, container) VALUES (5, 2);
+
+-- 6: portable 'wand', on the desk in the dormitory cell
+INSERT INTO portable(entity) VALUES (6);
+INSERT INTO name(entity, value) VALUES (6, 'wand');
+INSERT INTO description(entity, prose) VALUES (6,
+  'A wand of pale ashwood, smooth where other hands once held it, left on the desk as though someone knew you were coming.');
+INSERT INTO location(entity, container) VALUES (6, 1);

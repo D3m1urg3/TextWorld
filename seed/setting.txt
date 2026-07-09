@@ -1,12 +1,20 @@
-The ruin of Elwyn Priory, a small monastic house abandoned generations ago and
-now half-swallowed by the wood that grew up around it. Grey stone halls give way
-to walled gardens gone feral; ivy and bramble reclaim what the monks once kept.
-The air is cool and green-lit, the quiet that of a place emptied slowly rather
-than sacked. Water still runs in old channels, and the plan of the place — hall,
-cloister, garden, cell — remains legible under the moss to anyone who walks it.
+Thornmere Hall, a school of magic housed in a fortified manor on the edge of a
+dark mere. It was a castle once — the bones of towers and battlements remain —
+but four centuries of headmasters have domesticated it: wings added at odd
+angles, arrow slits reglazed as reading nooks, the gatehouse gone to a
+greenhouse. Staircases move when they think no one is watching, and the plan of
+the place has never been drawn twice the same way.
 
-Tone: hushed, elegiac, unhurried. The wonder here is of decay and persistence,
-not of monsters or treasure. Nothing threatens; much is simply lost. Rooms are
-human in scale — a hall, a garden, a passage, a chamber — connected by doorways,
-stairs, and worn paths. Keep to that register: no vast caverns, no machinery, no
-magic beyond the ordinary strangeness of an old holy place left to the seasons.
+It is deep night. The school sleeps — students behind shut dormitory doors,
+fires banked, corridors empty. The only light is candle-light, moonlight off
+the mere, and the Vigil Lamps: old brass fixtures that kindle themselves as you
+pass and dim again behind you. You are a new student, arrived only this
+morning, awake and out of bed in a school you do not yet know.
+
+Tone: hushed, warm, quietly wondrous — a serious old fortress gone soft and
+scholarly. Magic here is ambient and domestic: self-lighting candles, restless
+books, doors with opinions, the patient glow of the Vigil Lamps. Nothing
+threatens; the only tension is that of being out of bed after curfew. Rooms are
+human in scale — a cell, a corridor, a classroom, a stair — bounded by the
+manor's walls and grounds and the dark mere beyond. No monsters, no crowds, no
+spectacle: the school is asleep, and every room should feel like it.
