@@ -125,7 +125,9 @@ std::string render(Db& db, int64_t turn) {
         } else if (verb == "failed") {
             out += detail + "\n";
         }
-        // Unknown verb strings cannot occur (fixed six); render nothing.
+        // Unrecognized verbs (e.g. the architect's 'generated', REQ-ARCH-10)
+        // render nothing: the template emits output only for the verbs it knows,
+        // so a world-gen turn shows as its 'moved' block with no extra line.
     }
 
     return out;

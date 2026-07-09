@@ -14,7 +14,7 @@ target_include_directories(sqlite3 PUBLIC vendor)
 target_compile_definitions(sqlite3 PRIVATE SQLITE_OMIT_LOAD_EXTENSION)
 
 # --- twcore: engine sources shared by game and tests ---
-add_library(twcore STATIC src/db.cpp src/world.cpp src/parser.cpp src/mutations.cpp src/systems.cpp src/render.cpp src/prose.cpp src/nlresolve.cpp src/loop.cpp)
+add_library(twcore STATIC src/db.cpp src/world.cpp src/parser.cpp src/mutations.cpp src/systems.cpp src/render.cpp src/prose.cpp src/nlresolve.cpp src/architect.cpp src/loop.cpp)
 target_include_directories(twcore PUBLIC src)
 target_include_directories(twcore PRIVATE vendor)
 target_link_libraries(twcore PRIVATE sqlite3 CURL::libcurl)
@@ -24,5 +24,8 @@ add_executable(textworld src/main.cpp)
 target_link_libraries(textworld PRIVATE twcore)
 
 # --- tests: test executable ---
+# Links CURL directly so the gated architect live smoke (TEXTWORLD_AI_LIVE_TEST=1)
+# can make its single bounded coherence-judge call. The default offline run never
+# touches it.
 add_executable(tests tests/tests.cpp)
-target_link_libraries(tests PRIVATE twcore)
+target_link_libraries(tests PRIVATE twcore CURL::libcurl)

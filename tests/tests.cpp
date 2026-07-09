@@ -6,8 +6,12 @@
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <vector>
+
+#include <curl/curl.h>  // architect live smoke's single bounded judge call (gated)
 
 #include "action.hpp"
+#include "architect.hpp"
 #include "db.hpp"
 #include "loop.hpp"
 #include "mutations.hpp"
@@ -1975,6 +1979,152 @@ static void testNlResolveLiveSmoke() {
     }
 }
 
+// libcurl write callback for the architect smoke's judge call.
+static size_t liveJudgeAppend(char* ptr, size_t size, size_t nmemb, void* ud) {
+    static_cast<std::string*>(ud)->append(ptr, size * nmemb);
+    return size * nmemb;
+}
+
+// One bounded coherence-judge call (REQ-ARCH-13): feed the setting + the
+// generated descriptions to a single plain (no-tool) Messages call and return
+// the model's text, or "" on any failure. Test-local transport — mirrors the
+// codebase's per-unit curlTransport stance. ONE call, no loop; a human reads it.
+static std::string liveCoherenceJudge(const std::string& setting,
+                                      const std::vector<std::string>& descriptions) {
+    nlohmann::json body;
+    const char* env = std::getenv("TEXTWORLD_MODEL");
+    body["model"] = (env != nullptr && env[0] != '\0') ? env : "claude-opus-4-8";
+    body["max_tokens"] = 256;
+    body["system"] =
+        "You judge whether a set of text-adventure room descriptions are "
+        "coherent with a given setting and with each other. Reply with 'yes' or "
+        "'no' on the first line, then one short line saying why.";
+    std::string user = "SETTING:\n" + setting + "\n\nROOMS:\n";
+    for (size_t i = 0; i < descriptions.size(); ++i) {
+        user += std::to_string(i + 1) + ". " + descriptions[i] + "\n";
+    }
+    user +=
+        "\nAre these rooms coherent with the setting and with each other? "
+        "Answer yes/no + one line.";
+    body["messages"] =
+        nlohmann::json::array({{{"role", "user"}, {"content", user}}});
+    const std::string payload = body.dump();
+
+    CURL* curl = curl_easy_init();
+    if (curl == nullptr) return "";
+    std::string resp;
+    const char* key = std::getenv("ANTHROPIC_API_KEY");
+    curl_slist* headers = nullptr;
+    headers = curl_slist_append(
+        headers, ("x-api-key: " + std::string(key != nullptr ? key : "")).c_str());
+    headers = curl_slist_append(headers, "anthropic-version: 2023-06-01");
+    headers = curl_slist_append(headers, "content-type: application/json");
+    curl_easy_setopt(curl, CURLOPT_URL, "https://api.anthropic.com/v1/messages");
+    curl_easy_setopt(curl, CURLOPT_POST, 1L);
+    curl_easy_setopt(curl, CURLOPT_POSTFIELDS, payload.c_str());
+    curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE, static_cast<long>(payload.size()));
+    curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
+    curl_easy_setopt(curl, CURLOPT_TIMEOUT, 8L);
+    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, liveJudgeAppend);
+    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &resp);
+    const CURLcode rc = curl_easy_perform(curl);
+    curl_slist_free_all(headers);
+    curl_easy_cleanup(curl);
+    if (rc != CURLE_OK) return "";
+
+    const nlohmann::json j =
+        nlohmann::json::parse(resp, /*cb=*/nullptr, /*allow_exceptions=*/false);
+    if (j.is_discarded() || !j.contains("content") || !j["content"].is_array()) {
+        return "";
+    }
+    for (const auto& block : j["content"]) {
+        if (block.is_object() && block.value("type", "") == "text") {
+            return block.value("text", "");
+        }
+    }
+    return "";
+}
+
+// --- Step 10, REQ-ARCH-13: gated live end-to-end smoke + one bounded coherence
+// judge. Structured like testNlResolveLiveSmoke: no-op unless
+// TEXTWORLD_AI_LIVE_TEST=1, reads env without mutating it. main() calls it FIRST
+// (before the hermetic ANTHROPIC_API_KEY unset), else the key is cleared and the
+// smoke silently no-ops. MECHANICAL assertions only — never model wording — plus
+// ONE judge call whose yes/no a human reads. NOT a prompt-tuning loop. ---
+static void testArchitectLiveSmoke() {
+    const char* live = std::getenv("TEXTWORLD_AI_LIVE_TEST");
+    if (live == nullptr || std::string(live) != "1") {
+        return;  // default run: no-op, no network access.
+    }
+
+    const char* key = std::getenv("ANTHROPIC_API_KEY");
+    if (key == nullptr || key[0] == '\0') {
+        std::fprintf(stderr,
+                     "ARCHITECT LIVE SMOKE SKIPPED: TEXTWORLD_AI_LIVE_TEST=1 but "
+                     "ANTHROPIC_API_KEY is unset/empty.\n");
+        return;
+    }
+
+    std::fprintf(stderr,
+                 "ARCHITECT LIVE SMOKE: generating a room chain through the "
+                 "Anthropic API (this makes network calls)...\n");
+
+    // Default settingPath → the committed seed/setting.txt gives real shared
+    // context. tick() drives the PRODUCTION transport (real generation + move).
+    const TempDbFile worldPath("textworld_arch_live_smoke.db");
+    Db db = openWorld(worldPath.string(), "seed/base.sql");
+    const std::string setting =
+        queryText(db, "SELECT value FROM meta WHERE key = 'setting'");
+    CHECK(!setting.empty());
+
+    // A short chain of unmapped, invertible directions. Each new room advertises
+    // only the way back, so any non-back direction is unmapped from it.
+    std::vector<std::string> descriptions;
+    for (const char* dir : {"east", "north", "east"}) {
+        const int64_t before =
+            queryInt(db, "SELECT container FROM location WHERE entity = 3");
+        tick(db, Action{Verb::Go, 0, dir});
+        const int64_t after =
+            queryInt(db, "SELECT container FROM location WHERE entity = 3");
+
+        if (after == before) {
+            // A clean fallback (model non-determinism / transient) is not a
+            // failure — the chain simply stops (mirrors the resolver smoke).
+            std::fprintf(stderr,
+                         "  (generation declined for '%s' — clean fallback, "
+                         "chain stops)\n", dir);
+            break;
+        }
+
+        // Mechanical invariants for the generated room — never its wording.
+        CHECK(after > 5);  // engine-minted id, distinct from seed ids 1–5
+        const std::string name = queryText(
+            db, ("SELECT value FROM name WHERE entity = " + std::to_string(after)).c_str());
+        const std::string desc = queryText(
+            db, ("SELECT prose FROM description WHERE entity = " + std::to_string(after)).c_str());
+        CHECK(!name.empty());
+        CHECK(!desc.empty());
+
+        // Two reciprocal exits: origin -dir-> new, new -inverse-> origin.
+        CHECK(queryInt(db, ("SELECT dest FROM exits WHERE room = " +
+                            std::to_string(before) + " AND direction = '" + dir + "'").c_str()) == after);
+        const std::optional<std::string> inv = inverseDirection(dir);
+        CHECK(inv.has_value());
+        CHECK(queryInt(db, ("SELECT dest FROM exits WHERE room = " +
+                            std::to_string(after) + " AND direction = '" + *inv + "'").c_str()) == before);
+
+        descriptions.push_back(desc);
+    }
+
+    CHECK(!descriptions.empty());  // at least one room generated
+
+    // The single bounded coherence judge (REQ-ARCH-13): one call, observed.
+    const std::string verdict = liveCoherenceJudge(setting, descriptions);
+    std::fprintf(stderr, "ARCHITECT COHERENCE JUDGE (%zu rooms):\n%s\n",
+                 descriptions.size(), verdict.c_str());
+    CHECK(!verdict.empty());  // structural only — a human reads the yes/no + line
+}
+
 // --- persistence after play (REQ-PROTO-12 item 8, REQ-PROTO-10): a played
 // world survives a full close/reopen with turn counter, entity positions, and
 // the complete event transcript intact — and is still playable afterward. ---
@@ -2086,6 +2236,646 @@ static void testPortability() {
     }
 }
 
+// ============================================================================
+// Architect (story-seed + world-gen) tests. Source: .lore/work/specs/
+// story-seed-architect.md (REQ-ARCH-*). Mirror the resolver's fake-transport
+// discipline: the default suite makes NO network access; every transport is a
+// fake lambda. The one live smoke (testArchitectLiveSmoke) is gated behind
+// TEXTWORLD_AI_LIVE_TEST=1 and registered at the TOP of main() with the others.
+// ============================================================================
+
+// Writes `contents` to a scratch file for one test, removing it on destruction.
+// Used for the setting-load cases (REQ-ARCH-1) so the committed seed/setting.txt
+// is never renamed.
+struct TempSettingFile {
+    std::filesystem::path path;
+
+    TempSettingFile(const char* filename, const std::string& contents)
+        : path(std::filesystem::temp_directory_path() / filename) {
+        std::filesystem::remove(path);
+        std::ofstream out(path, std::ios::binary);
+        out << contents;
+    }
+    ~TempSettingFile() { std::filesystem::remove(path); }
+
+    std::string string() const { return path.string(); }
+};
+
+// --- Step 1, REQ-ARCH-1: setting seed load. A settingPath at a real scratch
+// file lands its text in meta.setting with SCHEMA_VERSION unchanged; an absent
+// scratch path still initializes with meta.setting empty. Zero DDL. ---
+static void testArchitectSettingLoad() {
+    // --- present setting file: text lands verbatim in meta.setting ---
+    {
+        const std::string settingText =
+            "A quiet cloister of grey stone and green light.";
+        const TempSettingFile setting("textworld_setting_present.txt", settingText);
+        const TempDbFile worldPath("textworld_setting_present.db");
+
+        Db db = openWorld(worldPath.string(), "seed/base.sql", setting.string());
+
+        CHECK(queryText(db, "SELECT value FROM meta WHERE key = 'setting'") ==
+              settingText);
+        // Zero DDL: SCHEMA_VERSION row is unchanged.
+        CHECK(queryInt(db, "SELECT value FROM meta WHERE key = 'schema_version'") ==
+              SCHEMA_VERSION);
+        // The base world is intact — this is a new row, not a new shape.
+        CHECK(queryInt(db, "SELECT COUNT(*) FROM room") == 2);
+    }
+
+    // --- absent setting file: init still succeeds, meta.setting empty ---
+    {
+        const TempDbFile worldPath("textworld_setting_absent.db");
+        const std::string missing =
+            (std::filesystem::temp_directory_path() / "textworld_no_such_setting.txt")
+                .string();
+        std::filesystem::remove(missing);  // ensure it does not exist
+
+        Db db = openWorld(worldPath.string(), "seed/base.sql", missing);
+
+        // Tolerant read: init succeeded, and meta.setting is present-but-empty.
+        CHECK(queryText(db, "SELECT value FROM meta WHERE key = 'setting'").empty());
+        CHECK(queryInt(db, "SELECT value FROM meta WHERE key = 'schema_version'") ==
+              SCHEMA_VERSION);
+        CHECK(queryInt(db, "SELECT COUNT(*) FROM room") == 2);
+    }
+
+    // --- the committed seed/setting.txt exists and is non-trivial (AI-Val #3) ---
+    CHECK(!readFileBytes("seed/setting.txt").empty());
+}
+
+// Recursively assert no key or string value anywhere in `j` looks like an id
+// (ARCH context/proposal carry NO ids, REQ-ARCH-6). Reuses the ban-set idea
+// from checkPayloadHygiene but works structurally on a parsed object.
+static void checkNoIdKeys(const nlohmann::json& j) {
+    if (j.is_object()) {
+        for (auto it = j.begin(); it != j.end(); ++it) {
+            const std::string key = it.key();
+            CHECK(key != "id" && key != "entity" && key != "room" &&
+                  key != "dest" && key != "container");
+            checkNoIdKeys(it.value());
+        }
+    } else if (j.is_array()) {
+        for (const auto& e : j) checkNoIdKeys(e);
+    }
+}
+
+// --- Step 2, REQ-ARCH-7a / REQ-ARCH-6: the context builder emits EXACTLY the
+// four fields (setting, origin name, origin canon description, direction) and
+// no ids anywhere. Pure SELECTs; no network. ---
+static void testArchitectContext() {
+    const std::string settingText =
+        "A quiet cloister of grey stone and green light.";
+    const TempSettingFile setting("textworld_ctx_setting.txt", settingText);
+    const TempDbFile worldPath("textworld_arch_context.db");
+    Db db = openWorld(worldPath.string(), "seed/base.sql", setting.string());
+
+    // Origin = the stone hall (room 1); walk an unmapped direction: 'east'.
+    const nlohmann::json j =
+        nlohmann::json::parse(buildArchitectContext(db, 1, "east"));
+
+    // Exactly the four REQ-ARCH-7a fields — assert the whole key set.
+    CHECK(j.is_object());
+    CHECK(j.size() == 4);
+    CHECK(j.contains("setting"));
+    CHECK(j.contains("origin_name"));
+    CHECK(j.contains("origin_description"));
+    CHECK(j.contains("direction"));
+
+    // Field values come from canon: setting text, the hall's name + canon prose.
+    CHECK(j["setting"] == settingText);
+    CHECK(j["origin_name"] == "stone hall");
+    CHECK(contains(j["origin_description"].get<std::string>(), "vaulted hall"));
+    CHECK(j["direction"] == "east");
+
+    // No ids anywhere (REQ-ARCH-6).
+    checkNoIdKeys(j);
+
+    // --- empty meta.setting → thinner but well-formed payload ---
+    {
+        const TempDbFile w2("textworld_arch_context_empty.db");
+        const std::string missing =
+            (std::filesystem::temp_directory_path() / "textworld_ctx_no_setting.txt")
+                .string();
+        std::filesystem::remove(missing);
+        Db db2 = openWorld(w2.string(), "seed/base.sql", missing);
+
+        const nlohmann::json j2 =
+            nlohmann::json::parse(buildArchitectContext(db2, 1, "up"));
+        CHECK(j2.size() == 4);
+        CHECK(j2["setting"] == "");
+        CHECK(j2["origin_name"] == "stone hall");
+        CHECK(j2["direction"] == "up");
+    }
+}
+
+// --- Step 4, REQ-ARCH-7b: the request body carries the create_room tool with
+// required name+description and no other input fields; tool_choice REQUIRES the
+// tool; max_tokens 1024; model default + TEXTWORLD_MODEL override; and the EXACT
+// top-level key set (no thinking/stream/cache key can slip in). Pure
+// string→string plus an env read. ---
+static void testArchitectRequestBody() {
+    const ScopedModelEnv guard;
+
+    const std::string payload =
+        "{\"setting\":\"grey stone\",\"direction\":\"east\"}";
+
+    // --- defaults: model, max_tokens, tool schema, tool_choice, key set ---
+    unsetenv("TEXTWORLD_MODEL");
+    {
+        const nlohmann::json j =
+            nlohmann::json::parse(buildArchitectRequestBody(payload));
+        CHECK(j["model"] == "claude-opus-4-8");
+        CHECK(j["max_tokens"] == 1024);
+
+        // Exact top-level set: model, max_tokens, system, messages, tools,
+        // tool_choice — and nothing else (no thinking/stream/cache-control).
+        CHECK(j.size() == 6);
+        CHECK(!j.contains("thinking"));
+        CHECK(!j.contains("stream"));
+
+        // system is the architect prompt; one user message carries the payload.
+        CHECK(j["system"] == std::string(kArchitectPrompt));
+        CHECK(j["messages"].is_array());
+        CHECK(j["messages"].size() == 1);
+        CHECK(j["messages"][0]["role"] == "user");
+        CHECK(j["messages"][0]["content"] == payload);
+
+        // tool_choice REQUIRES the create_room tool (no auto/decline branch).
+        CHECK(j["tool_choice"]["type"] == "tool");
+        CHECK(j["tool_choice"]["name"] == "create_room");
+
+        // exactly one create_room tool.
+        CHECK(j["tools"].is_array());
+        CHECK(j["tools"].size() == 1);
+        const nlohmann::json& tool = j["tools"][0];
+        CHECK(tool["name"] == "create_room");
+
+        // input schema: object; REQUIRED name + description; NO other props.
+        const nlohmann::json& schema = tool["input_schema"];
+        CHECK(schema["type"] == "object");
+        CHECK(schema["properties"]["name"]["type"] == "string");
+        CHECK(schema["properties"]["description"]["type"] == "string");
+        CHECK(schema["properties"].size() == 2);  // no other fields
+        CHECK(schema["required"] ==
+              nlohmann::json::array({"name", "description"}));
+    }
+
+    // --- TEXTWORLD_MODEL set and non-empty → override honored, only the model ---
+    setenv("TEXTWORLD_MODEL", "claude-test-model", 1);
+    {
+        const nlohmann::json j =
+            nlohmann::json::parse(buildArchitectRequestBody(payload));
+        CHECK(j["model"] == "claude-test-model");
+        CHECK(j["max_tokens"] == 1024);
+    }
+
+    // --- TEXTWORLD_MODEL set but empty → default, not "" ---
+    setenv("TEXTWORLD_MODEL", "", 1);
+    {
+        const nlohmann::json j =
+            nlohmann::json::parse(buildArchitectRequestBody(payload));
+        CHECK(j["model"] == "claude-opus-4-8");
+    }
+}
+
+// Canned 200 tool_use response in the documented Anthropic shape (Step-5
+// fixture): stop_reason "tool_use" + one create_room tool_use block carrying
+// name + description. The architect analog of cannedToolUse — built from
+// documented structure, NEVER a network probe.
+static HttpResponse cannedCreateRoom(const std::string& name,
+                                     const std::string& description) {
+    nlohmann::json input;
+    input["name"] = name;
+    input["description"] = description;
+
+    nlohmann::json block;
+    block["type"] = "tool_use";
+    block["id"] = "toolu_test";
+    block["name"] = "create_room";
+    block["input"] = std::move(input);
+
+    nlohmann::json j;
+    j["stop_reason"] = "tool_use";
+    j["content"] = nlohmann::json::array({std::move(block)});
+
+    HttpResponse r;
+    r.status = 200;
+    r.body = j.dump();
+    return r;
+}
+
+// --- Step 5, REQ-ARCH-9a–c: the validation gate. Pure function of the
+// HttpResponse; called directly here (outside any try/catch), so a throw would
+// crash — it must never throw. No network. ---
+static void testArchitectGate() {
+    // Happy path: exactly one create_room block with name + description.
+    {
+        auto p = validateRoomProposal(
+            cannedCreateRoom("chapter house", "A low vaulted room of grey stone."));
+        CHECK(p.has_value());
+        CHECK(p->name == "chapter house");
+        CHECK(p->description == "A low vaulted room of grey stone.");
+    }
+
+    // Clause b: empty / whitespace-only name → nullopt.
+    CHECK(!validateRoomProposal(cannedCreateRoom("", "prose")));
+    CHECK(!validateRoomProposal(cannedCreateRoom("   \t\n", "prose")));
+
+    // Clause c: empty / whitespace-only description → nullopt.
+    CHECK(!validateRoomProposal(cannedCreateRoom("name", "")));
+    CHECK(!validateRoomProposal(cannedCreateRoom("name", "   ")));
+
+    // Clause a HTTP half: non-200 / transport error / malformed body → nullopt.
+    {
+        HttpResponse r = cannedCreateRoom("name", "prose");
+        r.status = 500;  // valid body, bad status
+        CHECK(!validateRoomProposal(r));
+    }
+    {
+        HttpResponse r;
+        r.transportError = true;  // status 0
+        CHECK(!validateRoomProposal(r));
+    }
+    {
+        HttpResponse r;
+        r.status = 200;
+        r.body = "}{ not json";
+        CHECK(!validateRoomProposal(r));
+    }
+
+    // Clause a, 0-block: a valid 200 with NO create_room call → nullopt (the
+    // tool was required; a non-call is a gate failure → wall).
+    {
+        nlohmann::json j;
+        j["stop_reason"] = "end_turn";
+        j["content"] = nlohmann::json::array(
+            {{{"type", "text"}, {"text", "I decline."}}});
+        HttpResponse r;
+        r.status = 200;
+        r.body = j.dump();
+        CHECK(!validateRoomProposal(r));
+    }
+
+    // Clause a, ≥2-block: two create_room blocks → nullopt.
+    {
+        nlohmann::json blk;
+        blk["type"] = "tool_use";
+        blk["id"] = "toolu_a";
+        blk["name"] = "create_room";
+        blk["input"] = {{"name", "a"}, {"description", "b"}};
+        nlohmann::json j;
+        j["stop_reason"] = "tool_use";
+        j["content"] = nlohmann::json::array({blk, blk});
+        HttpResponse r;
+        r.status = 200;
+        r.body = j.dump();
+        CHECK(!validateRoomProposal(r));
+    }
+
+    // ids-not-from-model (REQ-ARCH-6): a create_room input carrying a spurious
+    // id/entity key still validates to a RoomProposal of JUST name+description —
+    // the stray key is ignored at the gate and never reaches the two-field
+    // struct. The model can put no id on the wire.
+    {
+        nlohmann::json input;
+        input["name"] = "crypt";
+        input["description"] = "A cold undercroft.";
+        input["id"] = 999;         // spurious
+        input["entity"] = 42;      // spurious
+        nlohmann::json block;
+        block["type"] = "tool_use";
+        block["id"] = "toolu_test";
+        block["name"] = "create_room";
+        block["input"] = std::move(input);
+        nlohmann::json j;
+        j["stop_reason"] = "tool_use";
+        j["content"] = nlohmann::json::array({std::move(block)});
+        HttpResponse r;
+        r.status = 200;
+        r.body = j.dump();
+
+        auto p = validateRoomProposal(r);
+        CHECK(p.has_value());
+        CHECK(p->name == "crypt");
+        CHECK(p->description == "A cold undercroft.");
+        // RoomProposal is a two-field struct — there is nowhere for an id to go.
+    }
+}
+
+// --- Step 6, REQ-ARCH-9 (write) / REQ-ARCH-6: writeGeneratedRoom mints a room
+// with engine-chosen id, both reciprocal exits, and one 'generated' event, all
+// inside the caller's transaction. Uses an UNMAPPED invertible direction (east
+// from the hall — base.sql maps only north/south) so no exit PK collides. ---
+static void testWriteGeneratedRoom() {
+    const TempDbFile worldPath("textworld_write_gen_room.db");
+    Db db = openWorld(worldPath.string(), "seed/base.sql");
+
+    const int64_t originRoom = 1;  // stone hall
+    const int64_t player = 3;
+    const RoomProposal proposal{"chapter house",
+                                "A low vaulted room of grey stone, its shelves bare."};
+
+    const int64_t eventsBefore = queryInt(db, "SELECT COUNT(*) FROM events");
+
+    db.begin();
+    const int64_t newRoom =
+        writeGeneratedRoom(db, originRoom, "east", proposal, player);
+    db.commit();
+
+    // Engine-minted id, distinct from the seed ids 1–5.
+    CHECK(newRoom > 5);
+
+    // Component rows carry the canned values; the room is tagged; NO location row.
+    CHECK(queryInt(db, ("SELECT COUNT(*) FROM room WHERE entity = " +
+                        std::to_string(newRoom)).c_str()) == 1);
+    CHECK(queryText(db, ("SELECT value FROM name WHERE entity = " +
+                         std::to_string(newRoom)).c_str()) == "chapter house");
+    CHECK(queryText(db, ("SELECT prose FROM description WHERE entity = " +
+                         std::to_string(newRoom)).c_str()) ==
+          "A low vaulted room of grey stone, its shelves bare.");
+    CHECK(queryInt(db, ("SELECT COUNT(*) FROM location WHERE entity = " +
+                        std::to_string(newRoom)).c_str()) == 0);
+
+    // Both reciprocal exits: origin -east-> new, new -west-> origin.
+    CHECK(queryInt(db, "SELECT dest FROM exits WHERE room = 1 AND direction = 'east'") ==
+          newRoom);
+    CHECK(queryInt(db, ("SELECT dest FROM exits WHERE room = " +
+                        std::to_string(newRoom) + " AND direction = 'west'").c_str()) ==
+          originRoom);
+
+    // Exactly one new 'generated' event, subject = new room, object = origin,
+    // detail = direction.
+    CHECK(queryInt(db, "SELECT COUNT(*) FROM events") == eventsBefore + 1);
+    CHECK(queryText(db, "SELECT verb FROM events ORDER BY id DESC LIMIT 1") ==
+          "generated");
+    CHECK(queryInt(db, "SELECT subject FROM events ORDER BY id DESC LIMIT 1") ==
+          newRoom);
+    CHECK(queryInt(db, "SELECT object FROM events ORDER BY id DESC LIMIT 1") ==
+          originRoom);
+    CHECK(queryText(db, "SELECT detail FROM events ORDER BY id DESC LIMIT 1") ==
+          "east");
+}
+
+// --- Step 7, REQ-ARCH-4/-5/-6/-11: architectGenerate orchestration with the
+// two-phase catch boundary. Every transport is a fake lambda — NO network. A
+// canned create_room creates the room end-to-end; every Phase-1 failure returns
+// false and, because no write was attempted, leaves NO orphan row. ---
+static void testArchitectGenerate() {
+    const int64_t player = 3;
+
+    // --- success: canned create_room → true; room + reciprocal exits + event ---
+    {
+        const TempDbFile worldPath("textworld_arch_gen_ok.db");
+        Db db = openWorld(worldPath.string(), "seed/base.sql");
+
+        int calls = 0;
+        HttpTransport fake = [&](const std::string&) {
+            ++calls;
+            return cannedCreateRoom("crypt", "A cold undercroft of grey stone.");
+        };
+
+        db.begin();
+        const bool ok = architectGenerate(db, 1, "east", player, fake);
+        db.commit();
+
+        CHECK(ok);
+        CHECK(calls == 1);  // one transport call, no retries
+
+        const int64_t newRoom =
+            queryInt(db, "SELECT dest FROM exits WHERE room = 1 AND direction = 'east'");
+        CHECK(newRoom > 5);
+        CHECK(queryInt(db, ("SELECT dest FROM exits WHERE room = " +
+                            std::to_string(newRoom) + " AND direction = 'west'").c_str()) == 1);
+        CHECK(queryText(db, ("SELECT value FROM name WHERE entity = " +
+                             std::to_string(newRoom)).c_str()) == "crypt");
+        CHECK(queryInt(db, "SELECT COUNT(*) FROM events WHERE verb = 'generated'") == 1);
+    }
+
+    // --- Phase-1 atomic fallback: each failure → false, NO orphan written ---
+    {
+        const TempDbFile worldPath("textworld_arch_gen_fail.db");
+        Db db = openWorld(worldPath.string(), "seed/base.sql");
+
+        const int64_t entities0 = queryInt(db, "SELECT COUNT(*) FROM entities");
+        const int64_t exits0 = queryInt(db, "SELECT COUNT(*) FROM exits");
+        const int64_t desc0 = queryInt(db, "SELECT COUNT(*) FROM description");
+        const int64_t events0 = queryInt(db, "SELECT COUNT(*) FROM events");
+
+        // transport error (count the calls: exactly one, no retries).
+        int calls = 0;
+        HttpTransport err = [&](const std::string&) {
+            ++calls;
+            HttpResponse r;
+            r.transportError = true;
+            return r;
+        };
+        CHECK(!architectGenerate(db, 1, "east", player, err));
+        CHECK(calls == 1);
+
+        // malformed body.
+        HttpTransport bad = [](const std::string&) {
+            HttpResponse r;
+            r.status = 200;
+            r.body = "}{ not json";
+            return r;
+        };
+        CHECK(!architectGenerate(db, 1, "east", player, bad));
+
+        // throwing transport → caught in Phase 1, no crash.
+        HttpTransport thr = [](const std::string&) -> HttpResponse {
+            throw std::runtime_error("socket exploded");
+        };
+        CHECK(!architectGenerate(db, 1, "east", player, thr));
+
+        // valid 200 with no create_room call (gate 0-block).
+        HttpTransport none = [](const std::string&) { return cannedNoToolUse(); };
+        CHECK(!architectGenerate(db, 1, "east", player, none));
+
+        // No write happened in Phase 1: every table is exactly as it was.
+        CHECK(queryInt(db, "SELECT COUNT(*) FROM entities") == entities0);
+        CHECK(queryInt(db, "SELECT COUNT(*) FROM exits") == exits0);
+        CHECK(queryInt(db, "SELECT COUNT(*) FROM description") == desc0);
+        CHECK(queryInt(db, "SELECT COUNT(*) FROM events") == events0);
+        // Specifically: no 'east' exit was ever created off the hall.
+        CHECK(queryInt(db,
+                       "SELECT COUNT(*) FROM exits WHERE room = 1 AND direction = 'east'") == 0);
+    }
+}
+
+// Tick helper that injects the architect's transport into resolve (Go world-gen
+// seam), mirroring the production tick but with NO network.
+static void tickT(Db& db, const Action& a, const HttpTransport& transport,
+                  int64_t player = 3) {
+    db.begin();
+    db.exec("UPDATE meta SET value = value + 1 WHERE key = 'turn'");
+    resolve(db, a, player, transport);
+    db.commit();
+}
+
+// --- Step 8, REQ-ARCH-3/-2/-8: the resolveGo world-gen branch, driven through
+// the tick with a fake transport. (a) generate+move on an unmapped invertible
+// exit; (b) persistence — re-crossing takes branch a, zero transport calls;
+// (c) non-invertible → wall, no call; (d) disabled → wall, no call. ---
+static void testResolveGoGenerate() {
+    const ScopedEnvVar keyGuard("ANTHROPIC_API_KEY");
+    const ScopedEnvVar aiGuard("TEXTWORLD_AI");
+
+    const TempDbFile worldPath("textworld_resolvego_gen.db");
+    Db db = openWorld(worldPath.string(), "seed/base.sql");
+    const int64_t player = 3;
+
+    int calls = 0;
+    HttpTransport fake = [&](const std::string&) {
+        ++calls;
+        return cannedCreateRoom("crypt", "A cold undercroft of grey stone.");
+    };
+
+    // Enabled: dummy key present, TEXTWORLD_AI unset → aiNarrationEnabled() true.
+    // The injected transport means no real network call is ever made.
+    setenv("ANTHROPIC_API_KEY", "test-key-never-used", 1);
+    unsetenv("TEXTWORLD_AI");
+
+    // (a) go east — unmapped (base.sql maps only north/south) and invertible →
+    // branch b generates a room and the player moves into it.
+    tickT(db, Action{Verb::Go, 0, "east"}, fake, player);
+    CHECK(calls == 1);
+    const int64_t newRoom =
+        queryInt(db, "SELECT dest FROM exits WHERE room = 1 AND direction = 'east'");
+    CHECK(newRoom > 5);
+    CHECK(queryInt(db, "SELECT container FROM location WHERE entity = 3") == newRoom);
+    CHECK(queryInt(db, ("SELECT dest FROM exits WHERE room = " +
+                        std::to_string(newRoom) + " AND direction = 'west'").c_str()) == 1);
+
+    // (b) persistence / no-regen: go west back to the hall (branch a — the
+    // reciprocal exit exists), then east again (branch a — the exit now exists).
+    // The transport is invoked ZERO more times.
+    tickT(db, Action{Verb::Go, 0, "west"}, fake, player);
+    CHECK(queryInt(db, "SELECT container FROM location WHERE entity = 3") == 1);
+    tickT(db, Action{Verb::Go, 0, "east"}, fake, player);
+    CHECK(queryInt(db, "SELECT container FROM location WHERE entity = 3") == newRoom);
+    CHECK(calls == 1);  // still just the one generation from (a)
+
+    // (c) non-invertible direction → wall, no transport call. From newRoom,
+    // 'northeast' has no inverse in the engine table, so branch b is skipped.
+    tickT(db, Action{Verb::Go, 0, "northeast"}, fake, player);
+    CHECK(calls == 1);
+    CHECK(queryInt(db, "SELECT container FROM location WHERE entity = 3") == newRoom);
+    CHECK(queryText(db, "SELECT verb FROM events ORDER BY id DESC LIMIT 1") == "failed");
+    CHECK(queryText(db, "SELECT detail FROM events ORDER BY id DESC LIMIT 1") ==
+          "You can't go that way.");
+
+    // (d) disabled mode: key unset → aiNarrationEnabled() false → an unmapped
+    // invertible exit ('up') walls, and the transport is NEVER invoked.
+    unsetenv("ANTHROPIC_API_KEY");
+    tickT(db, Action{Verb::Go, 0, "up"}, fake, player);
+    CHECK(calls == 1);  // no transport constructed/invoked
+    CHECK(queryInt(db, "SELECT container FROM location WHERE entity = 3") == newRoom);
+    CHECK(queryText(db, "SELECT verb FROM events ORDER BY id DESC LIMIT 1") == "failed");
+    CHECK(queryText(db, "SELECT detail FROM events ORDER BY id DESC LIMIT 1") ==
+          "You can't go that way.");
+    // No room was generated up.
+    CHECK(queryInt(db, ("SELECT COUNT(*) FROM exits WHERE room = " +
+                        std::to_string(newRoom) + " AND direction = 'up'").c_str()) == 0);
+}
+
+// --- Step 9, REQ-ARCH-10: the 'generated' verb is renderer-invisible. A turn
+// carrying a 'generated' event (alongside 'moved') shows as the moved room
+// block, and 'generated' is absent from BOTH buildFacts payload keys. ---
+static void testGeneratedEventInvisible() {
+    const ScopedEnvVar keyGuard("ANTHROPIC_API_KEY");
+    const ScopedEnvVar aiGuard("TEXTWORLD_AI");
+    setenv("ANTHROPIC_API_KEY", "test-key-never-used", 1);
+    unsetenv("TEXTWORLD_AI");
+
+    const TempDbFile worldPath("textworld_gen_invisible.db");
+    Db db = openWorld(worldPath.string(), "seed/base.sql");
+
+    HttpTransport fake = [](const std::string&) {
+        return cannedCreateRoom("crypt", "A cold undercroft of grey stone.");
+    };
+
+    // Generate a room: this turn carries BOTH a 'generated' and a 'moved' event,
+    // sharing the same turn number.
+    tickT(db, Action{Verb::Go, 0, "east"}, fake, 3);
+    const int64_t genTurn = queryInt(db, "SELECT value FROM meta WHERE key = 'turn'");
+    CHECK(queryInt(db, ("SELECT COUNT(*) FROM events WHERE turn = " +
+                        std::to_string(genTurn) + " AND verb = 'generated'").c_str()) == 1);
+    CHECK(queryInt(db, ("SELECT COUNT(*) FROM events WHERE turn = " +
+                        std::to_string(genTurn) + " AND verb = 'moved'").c_str()) == 1);
+
+    // current-turn payload key `events`: 'generated' absent, 'moved' present.
+    {
+        const TurnFacts facts = buildFacts(db, genTurn);
+        const nlohmann::json j = nlohmann::json::parse(facts.payload);
+        bool sawGenerated = false, sawMoved = false;
+        for (const auto& e : j["events"]) {
+            if (e.value("verb", "") == "generated") sawGenerated = true;
+            if (e.value("verb", "") == "moved") sawMoved = true;
+        }
+        CHECK(!sawGenerated);
+        CHECK(sawMoved);
+    }
+
+    // recent-events payload key `recent_events` (turn < ?): 'generated' absent.
+    tick(db, Action{Verb::Wait, 0, ""});  // a plain following turn
+    {
+        const TurnFacts facts = buildFacts(db, genTurn + 1);
+        const nlohmann::json j = nlohmann::json::parse(facts.payload);
+        bool sawGenerated = false;
+        for (const auto& e : j["recent_events"]) {
+            if (e.value("verb", "") == "generated") sawGenerated = true;
+        }
+        CHECK(!sawGenerated);
+    }
+
+    // Template renderer: the generation turn renders as the moved room block
+    // (the new room), with no output for the 'generated' event.
+    {
+        const std::string out = render(db, genTurn);
+        CHECK(!out.empty());
+        CHECK(contains(out, "crypt") || contains(out, "undercroft"));
+    }
+}
+
+// --- Step 5, REQ-ARCH-8: the direction-invertibility table. Pure, no DB. ---
+static void testArchitectInvertible() {
+    CHECK(inverseDirection("north") == "south");
+    CHECK(inverseDirection("south") == "north");
+    CHECK(inverseDirection("east") == "west");
+    CHECK(inverseDirection("west") == "east");
+    CHECK(inverseDirection("up") == "down");
+    CHECK(inverseDirection("down") == "up");
+    CHECK(inverseDirection("in") == "out");
+    CHECK(inverseDirection("out") == "in");
+
+    // Non-invertible directions → nullopt (not generatable → wall, no AI call).
+    CHECK(!inverseDirection("northeast"));
+    CHECK(!inverseDirection("widdershins"));
+    CHECK(!inverseDirection(""));
+}
+
+// --- Step 3, REQ-ARCH-7c: the architect system prompt pins its STRUCTURE by
+// substring (quality is a live concern, Step 10). Mirrors the resolver's prompt
+// test. ---
+static void testArchitectPrompt() {
+    const std::string p = kArchitectPrompt;
+    CHECK(!p.empty());
+
+    // One room, coherent with the setting.
+    CHECK(contains(p, "one room"));
+    CHECK(contains(p, "coherent"));
+    CHECK(contains(p, "setting"));
+    // Emitted via create_room as a name + a description.
+    CHECK(contains(p, "create_room"));
+    CHECK(contains(p, "name"));
+    CHECK(contains(p, "description"));
+    // Prohibitions: no exits/directions, no arrival narration, no ids.
+    CHECK(contains(p, "exits") || contains(p, "directions"));
+    CHECK(contains(p, "arrival"));
+    CHECK(contains(p, "ids"));
+}
+
 int main() {
     // Live smoke FIRST, while the developer's real environment is still
     // intact: it needs a real ANTHROPIC_API_KEY, and the hermetic unset below
@@ -2095,6 +2885,7 @@ int main() {
     // live smokes run here, before the hermetic unset clobbers the real key.
     testProseLiveSmoke();
     testNlResolveLiveSmoke();
+    testArchitectLiveSmoke();  // MUST be here — before the hermetic key unset below
 
     // Hermetic run: clear both AI env vars for the whole suite (guards
     // restore the developer's values on exit). Otherwise a developer shell
@@ -2131,6 +2922,16 @@ int main() {
     testProseAiRender();
     testPersistence();
     testPortability();
+    testArchitectSettingLoad();
+    testArchitectContext();
+    testArchitectPrompt();
+    testArchitectRequestBody();
+    testArchitectGate();
+    testArchitectInvertible();
+    testWriteGeneratedRoom();
+    testArchitectGenerate();
+    testResolveGoGenerate();
+    testGeneratedEventInvisible();
 
     std::printf("%d checks, %d failures\n", g_checks, g_failures);
     return g_failures == 0 ? 0 : 1;

@@ -4,6 +4,7 @@
 #include <stdexcept>
 #include <string>
 
+#include "architect.hpp"  // architectGenerate + inverseDirection + aiNarrationEnabled (via prose.hpp)
 #include "mutations.hpp"
 
 namespace {
@@ -46,13 +47,38 @@ bool isPortable(Db& db, int64_t entity) {
 
 // --- per-verb resolution --------------------------------------------------
 
-void resolveGo(Db& db, const Action& action, int64_t player) {
+// The 3-way world-gen branch (REQ-ARCH-3), evaluated IN ORDER. `transport` is
+// null in production (architectGenerate binds libcurl itself) and non-null only
+// under the test-injected resolve overload.
+void resolveGo(Db& db, const Action& action, int64_t player,
+               const HttpTransport* transport) {
     const int64_t room = roomOf(db, player);
+
+    // (a) Exit already exists → move. Precedes any AI call, so re-crossing a
+    // generated exit never regenerates — persistence falls out of exitDest.
     if (auto dest = exitDest(db, room, action.direction)) {
         moveEntity(db, player, *dest, player, "moved");
-    } else {
-        appendEvent(db, player, "failed", 0, 0, "You can't go that way.");
+        return;
     }
+
+    // (b) No exit yet: generate one iff AI is enabled AND the direction is
+    // invertible (else no reciprocal to create → wall, no AI call) AND the
+    // architect succeeds; then move through the now-existing exit.
+    if (aiNarrationEnabled() && inverseDirection(action.direction)) {
+        const bool generated =
+            transport != nullptr
+                ? architectGenerate(db, room, action.direction, player, *transport)
+                : architectGenerate(db, room, action.direction, player);
+        if (generated) {
+            const std::optional<int64_t> dest =
+                exitDest(db, room, action.direction);
+            moveEntity(db, player, *dest, player, "moved");
+            return;
+        }
+    }
+
+    // (c) The wall — today's behavior, byte-identical.
+    appendEvent(db, player, "failed", 0, 0, "You can't go that way.");
 }
 
 void resolveTake(Db& db, const Action& action, int64_t player) {
@@ -78,12 +104,13 @@ void resolveDrop(Db& db, const Action& action, int64_t player) {
     }
 }
 
-}  // namespace
-
-void resolve(Db& db, const Action& action, int64_t player) {
+// Shared dispatch. `transport` is null in production (Go uses the curl-bound
+// architectGenerate) and non-null under the test-injected overload.
+void resolveImpl(Db& db, const Action& action, int64_t player,
+                 const HttpTransport* transport) {
     switch (action.verb) {
         case Verb::Go:
-            resolveGo(db, action, player);
+            resolveGo(db, action, player, transport);
             break;
         case Verb::Take:
             resolveTake(db, action, player);
@@ -109,4 +136,15 @@ void resolve(Db& db, const Action& action, int64_t player) {
             // rolls back the transaction, so no tick is recorded.
             throw std::logic_error("resolve: Verb::Quit must be handled pre-transaction");
     }
+}
+
+}  // namespace
+
+void resolve(Db& db, const Action& action, int64_t player) {
+    resolveImpl(db, action, player, /*transport=*/nullptr);
+}
+
+void resolve(Db& db, const Action& action, int64_t player,
+             const HttpTransport& transport) {
+    resolveImpl(db, action, player, &transport);
 }

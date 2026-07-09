@@ -57,8 +57,25 @@ std::string readFile(const std::string& path) {
     return buf.str();
 }
 
-void initialize(Db& db, const std::string& seedPath) {
+// Tolerant reader for the setting document (REQ-ARCH-1): unlike readFile, an
+// absent/unreadable file is NOT an error — it yields "" so init still succeeds
+// with an empty setting. Deliberately distinct from readFile, which must throw
+// for the mandatory seed.
+std::string readFileOrEmpty(const std::string& path) {
+    std::ifstream in(path, std::ios::binary);
+    if (!in) return "";
+    std::ostringstream buf;
+    buf << in.rdbuf();
+    return buf.str();
+}
+
+void initialize(Db& db, const std::string& seedPath,
+                const std::string& settingPath) {
     const std::string seedSql = readFile(seedPath);
+    // Read the setting tolerantly BEFORE opening the transaction; an absent
+    // file is fine (empty setting), and this keeps any filesystem work out of
+    // the write path.
+    const std::string setting = readFileOrEmpty(settingPath);
     db.begin();
     try {
         db.exec(SCHEMA_DDL);
@@ -67,6 +84,12 @@ void initialize(Db& db, const std::string& seedPath) {
             "INSERT INTO meta(key, value) VALUES ('schema_version', ?), ('turn', 0)");
         meta.bind(1, SCHEMA_VERSION);
         meta.step();
+        // meta.setting: a new ROW, not a new shape — zero DDL, no SCHEMA_VERSION
+        // bump (REQ-ARCH-1). Written even when empty so the key is present.
+        Stmt settingStmt = db.prepare(
+            "INSERT INTO meta(key, value) VALUES ('setting', ?)");
+        settingStmt.bind(1, setting);
+        settingStmt.step();
         db.commit();
     } catch (...) {
         db.rollback();
@@ -76,12 +99,13 @@ void initialize(Db& db, const std::string& seedPath) {
 
 }  // namespace
 
-Db openWorld(const std::string& path, const std::string& seedPath) {
+Db openWorld(const std::string& path, const std::string& seedPath,
+             const std::string& settingPath) {
     Db db(path);
 
     if (!hasMetaTable(db)) {
         // Absent, zero-byte, or otherwise uninitialized: build the world.
-        initialize(db, seedPath);
+        initialize(db, seedPath, settingPath);
         return db;
     }
 

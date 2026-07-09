@@ -34,5 +34,12 @@ public:
 // Interface contract: `seedPath` is resolved relative to the current working
 // directory; the binary is always launched from the repo root, where the
 // default "seed/base.sql" resolves. Tests may pass an explicit path.
+//
+// `settingPath` (default "seed/setting.txt") is a freeform setting document
+// loaded once into meta.setting at init (REQ-ARCH-1). Unlike the mandatory
+// seed, it is read TOLERANTLY: an absent or empty file leaves meta.setting
+// empty/absent and init still succeeds — an empty setting simply yields a
+// thinner architect prompt. Zero DDL: this is a new meta *row*, not a shape.
 Db openWorld(const std::string& path,
-             const std::string& seedPath = "seed/base.sql");
+             const std::string& seedPath = "seed/base.sql",
+             const std::string& settingPath = "seed/setting.txt");

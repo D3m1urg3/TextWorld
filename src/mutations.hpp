@@ -9,12 +9,20 @@
 //   - `appendEvent` alone (no component write) is legal ONLY for the
 //     no-write verbs: 'looked', 'waited', 'failed'.
 //   - ALL other world mutation goes through these helpers; systems code
-//     never runs raw SQL writes against component tables or `events`.
+//     never runs raw SQL writes against component tables or `events`. The
+//     'generated' verb is helper-issued too: it is written ONLY by
+//     writeGeneratedRoom, alongside that room's component + exit rows.
 #pragma once
 
 #include <cstdint>
+#include <string>
 
 #include "db.hpp"
+
+// A model-proposed room (name + description). Defined in architect.hpp;
+// forward-declared here so the mutation helper can name it without pulling the
+// architect/prose headers into every includer of mutations.hpp.
+struct RoomProposal;
 
 // Append one row to the `events` log, stamped with the CURRENT turn number
 // (read from meta.turn inside the caller's ambient transaction).
@@ -32,3 +40,19 @@ void appendEvent(Db& db, int64_t actor, const char* verb, int64_t subj,
 // did not happen. The caller is expected to roll back.
 void moveEntity(Db& db, int64_t what, int64_t toContainer, int64_t actor,
                 const char* verb);
+
+// The SOLE sanctioned write path for a generated room (REQ-ARCH-9), inside the
+// caller's ambient transaction. The model proposes flavor; the engine disposes:
+// this helper MINTS one entity (the first runtime entity mint), writes its
+// `room` tag, `name` (= proposal.name), and `description` (canon =
+// proposal.description) rows — NO location row (rooms have no container) — then
+// writes the exit `(originRoom, direction) → new` and the reciprocal
+// `(new, inverse(direction)) → originRoom`, and appends one `generated` event
+// (actor = player, subject = new room, object = originRoom, detail = direction —
+// deliberately unlike moveEntity's subject/object reading). Ids are engine-
+// minted; the proposal carries none (REQ-ARCH-6). `direction` must be invertible
+// (REQ-ARCH-8) — the caller guarantees it; a non-invertible direction here is an
+// engine fault (throws, caller rolls back). Returns the minted room id.
+int64_t writeGeneratedRoom(Db& db, int64_t originRoom,
+                           const std::string& direction,
+                           const RoomProposal& proposal, int64_t actor);

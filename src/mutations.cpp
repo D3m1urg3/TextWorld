@@ -1,7 +1,10 @@
 #include "mutations.hpp"
 
+#include <optional>
 #include <stdexcept>
 #include <string>
+
+#include "architect.hpp"  // RoomProposal (full definition) + inverseDirection
 
 namespace {
 
@@ -43,4 +46,74 @@ void moveEntity(Db& db, int64_t what, int64_t toContainer, int64_t actor,
                                  " has no location row");
     }
     appendEvent(db, actor, verb, what, toContainer, nullptr);
+}
+
+int64_t writeGeneratedRoom(Db& db, int64_t originRoom,
+                           const std::string& direction,
+                           const RoomProposal& proposal, int64_t actor) {
+    // The reciprocal is created mechanically (REQ-ARCH-8/-9): the caller only
+    // reaches here for invertible directions, so a missing inverse is an engine
+    // fault — throw before writing anything so the caller rolls back cleanly.
+    const std::optional<std::string> inverse = inverseDirection(direction);
+    if (!inverse) {
+        throw std::runtime_error(
+            "writeGeneratedRoom: non-invertible direction '" + direction + "'");
+    }
+
+    // Mint one entity — the first runtime entity mint (micro-decision #1). No
+    // db.hpp change: INSERT DEFAULT VALUES then read last_insert_rowid().
+    db.exec("INSERT INTO entities DEFAULT VALUES");
+    int64_t newRoom = 0;
+    {
+        Stmt s = db.prepare("SELECT last_insert_rowid()");
+        if (!s.step()) throw std::runtime_error("writeGeneratedRoom: rowid read failed");
+        newRoom = s.colInt(0);
+    }
+
+    // Component rows: room tag, name, canon description. NO location row —
+    // rooms have no container (matching base.sql).
+    {
+        Stmt s = db.prepare("INSERT INTO room(entity) VALUES (?)");
+        s.bind(1, newRoom);
+        s.step();
+    }
+    {
+        Stmt s = db.prepare("INSERT INTO name(entity, value) VALUES (?, ?)");
+        s.bind(1, newRoom);
+        s.bind(2, proposal.name);
+        s.step();
+    }
+    {
+        Stmt s = db.prepare("INSERT INTO description(entity, prose) VALUES (?, ?)");
+        s.bind(1, newRoom);
+        s.bind(2, proposal.description);
+        s.step();
+    }
+
+    // Both reciprocal exits: origin -direction-> new, new -inverse-> origin.
+    // Persistence falls out of these rows — once they exist, exitDest finds the
+    // room and no regeneration is possible (REQ-ARCH-3a).
+    {
+        Stmt s = db.prepare(
+            "INSERT INTO exits(room, direction, dest) VALUES (?, ?, ?)");
+        s.bind(1, originRoom);
+        s.bind(2, direction);
+        s.bind(3, newRoom);
+        s.step();
+    }
+    {
+        Stmt s = db.prepare(
+            "INSERT INTO exits(room, direction, dest) VALUES (?, ?, ?)");
+        s.bind(1, newRoom);
+        s.bind(2, *inverse);
+        s.bind(3, originRoom);
+        s.step();
+    }
+
+    // One 'generated' event: subject = the new room (asserted into existence),
+    // object = its origin of reference, detail = the direction travelled. This
+    // subject/object reading is deliberately unlike moveEntity's.
+    appendEvent(db, actor, "generated", newRoom, originRoom, direction.c_str());
+
+    return newRoom;
 }

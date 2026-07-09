@@ -318,7 +318,11 @@ TurnFacts buildFacts(Db& db, int64_t turn) {
     {
         Stmt ev = db.prepare(
             "SELECT actor, verb, subject, detail, detail IS NULL "
-            "FROM events WHERE turn = ? ORDER BY id");
+            // The 'generated' verb is renderer-invisible (REQ-ARCH-10): exclude
+            // it here so a world-gen turn narrates as the 'moved' block, never
+            // the room's birth (both share this turn number — the load-bearing
+            // case).
+            "FROM events WHERE turn = ? AND verb <> 'generated' ORDER BY id");
         ev.bind(1, turn);
         while (ev.step()) {
             if (actor == 0) actor = ev.colInt(0);
@@ -379,7 +383,9 @@ TurnFacts buildFacts(Db& db, int64_t turn) {
         std::vector<json> rows;
         Stmt s = db.prepare(
             "SELECT turn, verb, subject FROM events "
-            "WHERE turn < ? ORDER BY id DESC LIMIT 6");
+            // 'generated' excluded here too (REQ-ARCH-10): it never enters
+            // recent_events context either.
+            "WHERE turn < ? AND verb <> 'generated' ORDER BY id DESC LIMIT 6");
         s.bind(1, turn);
         while (s.step()) {
             json e;
