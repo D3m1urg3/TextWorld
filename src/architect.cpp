@@ -7,12 +7,14 @@
 // accepted cost of leaving prose.cpp untouched.
 #include "architect.hpp"
 
+#include <cctype>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <exception>
 #include <optional>
 #include <string>
+#include <vector>
 
 #include <curl/curl.h>
 
@@ -44,6 +46,26 @@ bool blankAfterTrim(const std::string& s) {
         }
     }
     return true;
+}
+
+// Trim leading/trailing ASCII whitespace and lowercase, so an exit like
+// "North" or " up " matches the fixed direction table (REQ-EXITS-7).
+std::string normalizeDirection(const std::string& s) {
+    auto isWs = [](unsigned char c) {
+        return c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\f' ||
+               c == '\v';
+    };
+    size_t begin = 0;
+    size_t end = s.size();
+    while (begin < end && isWs(static_cast<unsigned char>(s[begin]))) ++begin;
+    while (end > begin && isWs(static_cast<unsigned char>(s[end - 1]))) --end;
+    std::string out;
+    out.reserve(end - begin);
+    for (size_t i = begin; i < end; ++i) {
+        out.push_back(static_cast<char>(
+            std::tolower(static_cast<unsigned char>(s[i]))));
+    }
+    return out;
 }
 
 // --- production HTTP transport (REQ-ARCH-11) --------------------------------
@@ -130,8 +152,9 @@ std::string canonProseOf(Db& db, int64_t entity) {
 
 // Stable constant, versioned by git — this prompt IS the generation contract:
 // one room, coherent with the setting and origin, emitted via create_room as a
-// name + standalone description, with the exit/arrival/id prohibitions that keep
-// the model to flavor and the engine to structure. Prompt QUALITY is verified
+// name + standalone description + declared onward exits, with the return-exit
+// exclusion and the arrival/id prohibitions that keep the model to flavor +
+// onward directions and the engine to structure. Prompt QUALITY is verified
 // live (Step 10 / spec AI-Validation item 4); the unit test here only pins its
 // STRUCTURE by substring, so it can never become a live tune-retry loop. Reword
 // with care: tests spot-check its phrases.
@@ -142,14 +165,15 @@ Each user message is a JSON object of context: "setting" (the world's tone, prem
 
 Your task: generate exactly one room that is reachable by travelling "direction" from the origin room. It must be coherent with the setting - matching its tone, scale, and premise - and consistent with the origin room it adjoins, as though the two have always been neighbours. If the setting is empty, invent a plain, quiet room that could plausibly adjoin the origin.
 
-Emit the room with a single create_room call carrying two fields:
+Emit the room with a single create_room call carrying:
 - name: a short handle for the room (a few words, like "stone hall" or "chapter house").
-- description: standalone room prose, two to four sentences, written as the player reads it on first entry. Describe what is here - the space, its air, its light, what remains in it.
+- description: standalone room prose, two to four sentences, written as the player reads it on first entry. Describe what is here - the space, its air, its light, what remains in it - including the ways that lead onward.
+- exits: an array of the directions that lead onward from this room, each one of "north", "south", "east", "west", "up", "down", "in", "out". Declare the directions that fit this room and setting - how many is your call (a sealed vault may declare none, a crossroads several).
 
 Rules, absolute:
 - Call create_room exactly once. Write no prose outside the tool call.
-- The description is of THIS room only. Do NOT describe exits, directions, doorways leading onward, other rooms, or where passages go. Do NOT narrate the player's arrival, movement, or the act of entering ("you step into...") - describe the standing room, not the journey to it.
-- Invent no ids, numbers, or identifiers of any kind. You name and describe; the engine assigns everything else.
+- The description is of THIS room only. Declare in exits the directions that lead onward, and describe those declared exits in the prose; name no opening you did not declare. EXCLUDE the direction back the way the player came - the engine adds that return exit itself. Do NOT narrate the player's arrival, movement, or the act of entering ("you step into...") - describe the standing room, not the journey to it.
+- Invent no ids, numbers, or identifiers of any kind. You name, describe, and declare exit directions; the engine assigns everything else.
 - Introduce nothing that contradicts the setting or the origin room.)";
 
 std::string buildArchitectContext(Db& db, int64_t room,
@@ -173,9 +197,11 @@ std::string buildArchitectRequestBody(const std::string& contextPayload) {
     const std::string model =
         (env != nullptr && env[0] != '\0') ? env : "claude-opus-4-8";
 
-    // The single create_room tool (REQ-ARCH-7b): a schema-enforced object with
-    // REQUIRED name + description strings and NO other fields. The model
-    // proposes flavor only; ids/exits are the engine's, never on the wire.
+    // The single create_room tool (REQ-ARCH-7b / REQ-EXITS-5): a schema-enforced
+    // object with REQUIRED name + description strings and one OPTIONAL exits
+    // array (invertible direction names that lead onward, excluding the entry
+    // return). The model proposes flavor + onward directions; ids and the return
+    // exit are the engine's, never on the wire.
     json createRoom;
     createRoom["name"] = "create_room";
     createRoom["description"] =
@@ -189,10 +215,19 @@ std::string buildArchitectRequestBody(const std::string& contextPayload) {
         {"type", "string"},
         {"description",
          "Standalone room prose as the player reads it on entry: the space, "
-         "its air and light, what remains in it. No exits, no arrival."}};
+         "its air and light, what remains in it. Describe the exits you "
+         "declare; narrate no arrival."}};
+    properties["exits"] = {
+        {"type", "array"},
+        {"items", {{"type", "string"}}},
+        {"description",
+         "the invertible directions that lead onward from this room, "
+         "excluding the way the player entered"}};
     json inputSchema;
     inputSchema["type"] = "object";
     inputSchema["properties"] = std::move(properties);
+    // exits is OPTIONAL — absent/empty is a dead end; only name+description
+    // are required (REQ-EXITS-5).
     inputSchema["required"] = json::array({"name", "description"});
     createRoom["input_schema"] = std::move(inputSchema);
 
@@ -225,7 +260,8 @@ std::optional<std::string> inverseDirection(const std::string& direction) {
     return std::nullopt;
 }
 
-std::optional<RoomProposal> validateRoomProposal(const HttpResponse& response) {
+std::optional<RoomProposal> validateRoomProposal(
+    const HttpResponse& response, const std::string& directionOfTravel) {
     // Clause a, HTTP half: a transport error carries status 0, so it fails here.
     if (response.status != 200) {
         return failClause('a', "HTTP status is not 200");
@@ -288,7 +324,60 @@ std::optional<RoomProposal> validateRoomProposal(const HttpResponse& response) {
         return failClause('c', "description is empty after trim");
     }
 
-    return RoomProposal{name, description};
+    // --- exit sanitization (REQ-EXITS-7): LENIENT. A bad exit NEVER rejects the
+    // room — from here on we only drop, with one stderr diagnostic per drop, and
+    // never fail. Absent/empty exits → empty vector (a dead end).
+    RoomProposal proposal{name, description, {}};
+
+    // The return direction the model was told to omit (REQ-EXITS-6): the inverse
+    // of the way it travelled. Default "" → inverseDirection("") == nullopt → no
+    // return direction to drop (the 11 exit-less call sites keep every entry).
+    const std::optional<std::string> returnDir =
+        inverseDirection(directionOfTravel);
+
+    if (input.contains("exits") && input["exits"].is_array()) {
+        for (const json& entry : input["exits"]) {
+            if (!entry.is_string()) {
+                std::fprintf(stderr,
+                             "validateRoomProposal: dropped exit, not a "
+                             "string\n");
+                continue;
+            }
+            const std::string norm =
+                normalizeDirection(entry.get<std::string>());
+            if (!inverseDirection(norm)) {
+                std::fprintf(stderr,
+                             "validateRoomProposal: dropped exit '%s', not an "
+                             "invertible direction\n",
+                             norm.c_str());
+                continue;
+            }
+            if (returnDir && norm == *returnDir) {
+                std::fprintf(stderr,
+                             "validateRoomProposal: dropped exit '%s', the "
+                             "entry-return direction\n",
+                             norm.c_str());
+                continue;
+            }
+            bool duplicate = false;
+            for (const std::string& kept : proposal.exits) {
+                if (kept == norm) {
+                    duplicate = true;
+                    break;
+                }
+            }
+            if (duplicate) {
+                std::fprintf(stderr,
+                             "validateRoomProposal: dropped exit '%s', a "
+                             "duplicate\n",
+                             norm.c_str());
+                continue;
+            }
+            proposal.exits.push_back(norm);
+        }
+    }
+
+    return proposal;
 }
 
 bool architectGenerate(Db& db, int64_t room, const std::string& direction,
@@ -298,7 +387,7 @@ bool architectGenerate(Db& db, int64_t room, const std::string& direction,
         const std::string ctx = buildArchitectContext(db, room, direction);
         const std::string body = buildArchitectRequestBody(ctx);
         const HttpResponse resp = transport(body);  // at most once, no retries
-        proposal = validateRoomProposal(resp);       // never throws
+        proposal = validateRoomProposal(resp, direction);  // never throws
     } catch (const std::exception& e) {
         std::fprintf(stderr, "architectGenerate: phase 1 failed: %s\n", e.what());
         return false;  // → wall (REQ-ARCH-3c)
@@ -318,4 +407,12 @@ bool architectGenerate(Db& db, int64_t room, const std::string& direction,
 bool architectGenerate(Db& db, int64_t room, const std::string& direction,
                        int64_t actor) {
     return architectGenerate(db, room, direction, actor, curlTransport);
+}
+
+bool architectEnabled() {
+    // DISPLAY / ontology gate (REQ-EXITS-4). Returns aiNarrationEnabled() today,
+    // but is intentionally a SEPARATE predicate from the prose/cosmetic switch:
+    // showing a latent exit asserts the direction is traversable, so it must
+    // track whether generation can run — not merely whether prose is dressed up.
+    return aiNarrationEnabled();
 }

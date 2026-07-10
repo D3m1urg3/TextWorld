@@ -1,5 +1,6 @@
 #include "mutations.hpp"
 
+#include <cstdio>
 #include <optional>
 #include <stdexcept>
 #include <string>
@@ -90,23 +91,53 @@ int64_t writeGeneratedRoom(Db& db, int64_t originRoom,
         s.step();
     }
 
-    // Both reciprocal exits: origin -direction-> new, new -inverse-> origin.
-    // Persistence falls out of these rows — once they exist, exitDest finds the
-    // room and no regeneration is possible (REQ-ARCH-3a).
+    // Realize the origin exit. In the production path this row pre-exists as a
+    // latent (NULL-dest) stub — resolveGo reaches generation only via such a row
+    // (REQ-EXITS-2b) — so this is an UPDATE of that row's dest, expressed as an
+    // upsert against the (room, direction) PK for defensiveness. An ABSENT row
+    // here is a precondition violation, never a normal path: log one stderr
+    // diagnostic and proceed (the upsert degrades to a plain insert).
+    {
+        Stmt chk = db.prepare(
+            "SELECT 1 FROM exits WHERE room = ? AND direction = ?");
+        chk.bind(1, originRoom);
+        chk.bind(2, direction);
+        if (!chk.step()) {
+            std::fprintf(stderr,
+                         "writeGeneratedRoom: latent origin exit absent for "
+                         "room %lld direction '%s' (REQ-EXITS-2b precondition "
+                         "violation) — realizing via insert\n",
+                         static_cast<long long>(originRoom), direction.c_str());
+        }
+    }
     {
         Stmt s = db.prepare(
-            "INSERT INTO exits(room, direction, dest) VALUES (?, ?, ?)");
+            "INSERT INTO exits(room, direction, dest) VALUES (?, ?, ?) "
+            "ON CONFLICT(room, direction) DO UPDATE SET dest = excluded.dest");
         s.bind(1, originRoom);
         s.bind(2, direction);
         s.bind(3, newRoom);
         s.step();
     }
+    // The realized return exit. A fresh room has no prior rows, so this is a
+    // plain insert.
     {
         Stmt s = db.prepare(
             "INSERT INTO exits(room, direction, dest) VALUES (?, ?, ?)");
         s.bind(1, newRoom);
         s.bind(2, *inverse);
         s.bind(3, originRoom);
+        s.step();
+    }
+    // Plant latent stubs for each declared onward exit (NULL dest). The set is
+    // already deduped and already excludes the return direction (REQ-EXITS-7),
+    // so it cannot collide with the return row above. Latent stubs emit no
+    // events.
+    for (const std::string& dir : proposal.exits) {
+        Stmt s = db.prepare(
+            "INSERT INTO exits(room, direction, dest) VALUES (?, ?, NULL)");
+        s.bind(1, newRoom);
+        s.bind(2, dir);
         s.step();
     }
 

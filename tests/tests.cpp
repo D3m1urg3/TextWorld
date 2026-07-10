@@ -1,4 +1,5 @@
 // Micro test harness: CHECK(cond) records failures; main() reports a summary.
+#include <algorithm>
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
@@ -207,9 +208,14 @@ static void testShippedSeedShape() {
     // Exactly 2 rooms.
     CHECK(queryInt(db, "SELECT COUNT(*) FROM room") == 2);
 
+    // Exit rows: 2 realized (the cell↔corridor pair) + 2 latent frontier stubs
+    // (dest NULL) planted by the seed (REQ-EXITS-9).
+    CHECK(queryInt(db, "SELECT COUNT(*) FROM exits") == 4);
+    // Exactly 2 latent (dest IS NULL) start exits.
+    CHECK(queryInt(db, "SELECT COUNT(*) FROM exits WHERE dest IS NULL") == 2);
     // One bidirectional exit pair whose directions are mutual inverses from
-    // the invertible set (REQ-ARCH-8).
-    CHECK(queryInt(db, "SELECT COUNT(*) FROM exits") == 2);
+    // the invertible set (REQ-ARCH-8). The join ignores NULL dests, so the
+    // realized pair is still exactly 2 — unchanged by the latent frontier.
     CHECK(queryInt(db,
                    "SELECT COUNT(*) FROM exits a "
                    "JOIN exits b ON a.dest = b.room AND b.dest = a.room "
@@ -1120,6 +1126,50 @@ struct ScopedEnvVar {
         }
     }
 };
+
+// REQ-EXITS-4: the Exits line lists realized exits always, latent exits only
+// when the architect is enabled, and a latent exit renders IDENTICALLY to a
+// realized one (no marker). Build a room (stone hall, room 1) with one realized
+// exit (north→garden, from the fixture) and one latent exit (up, dest NULL),
+// then render it with the architect enabled vs disabled. Defined here, after
+// ScopedEnvVar, because it toggles ANTHROPIC_API_KEY under a guard.
+static void testExitDisplayInvariant() {
+    const TempDbFile worldPath("textworld_exitdisplay_tests.db");
+    Db db = openWorld(worldPath.string(), "tests/fixture.sql");
+
+    // Plant a latent exit on room 1 (the player's room): up, dest NULL.
+    db.exec("INSERT INTO exits(room, direction, dest) VALUES (1, 'up', NULL)");
+
+    // This test owns the AI env vars for its duration (the suite runs hermetic
+    // with both unset); the guards restore whatever was there.
+    const ScopedEnvVar keyGuard("ANTHROPIC_API_KEY");
+    const ScopedEnvVar aiGuard("TEXTWORLD_AI");
+
+    // --- architect ENABLED: both the realized and the latent exit list ---
+    setenv("ANTHROPIC_API_KEY", "test-key-never-used", 1);
+    unsetenv("TEXTWORLD_AI");
+    {
+        const std::string out = renderRoomOf(db, 3);
+        // Both directions present, ORDER BY direction → north, up.
+        CHECK(contains(out, "Exits: north, up."));
+        // The latent 'up' carries NO marker distinguishing it from the realized
+        // 'north' — both are bare direction words joined identically. The exact
+        // line above plus the absence of any decoration on 'up' proves it.
+        CHECK(!contains(out, "up*"));
+        CHECK(!contains(out, "up?"));
+        CHECK(!contains(out, "(up"));
+    }
+
+    // --- architect DISABLED (key unset): only the realized exit lists ---
+    unsetenv("ANTHROPIC_API_KEY");
+    unsetenv("TEXTWORLD_AI");
+    {
+        const std::string out = renderRoomOf(db, 3);
+        CHECK(contains(out, "Exits: north."));
+        // The latent 'up' is hidden entirely (room-1 prose contains no "up").
+        CHECK(!contains(out, "up"));
+    }
+}
 
 // Saves TEXTWORLD_MODEL on construction, restores it on destruction —
 // unsetenv if it was unset. Env-var discipline: the suite must pass (and
@@ -2143,6 +2193,7 @@ static void testArchitectLiveSmoke() {
     // A short chain of unmapped, invertible directions. Each new room advertises
     // only the way back, so any non-back direction is unmapped from it.
     std::vector<std::string> descriptions;
+    int roomsWithOnward = 0;  // REQ-EXITS-11: rooms declaring >=1 latent onward exit
     for (const char* dir : {"east", "north", "east"}) {
         const int64_t before =
             queryInt(db, "SELECT container FROM location WHERE entity = 3");
@@ -2177,9 +2228,79 @@ static void testArchitectLiveSmoke() {
                             std::to_string(after) + " AND direction = '" + *inv + "'").c_str()) == before);
 
         descriptions.push_back(desc);
+
+        // REQ-EXITS-11: the model's co-authored onward exits land as LATENT
+        // (dest-NULL) rows on the new room. Immediately after generation — before
+        // the next iteration walks on from it — the realized return is the ONLY
+        // non-NULL exit row, and any additional rows are latent onward exits.
+        CHECK(queryInt(db, ("SELECT COUNT(*) FROM exits WHERE room = " +
+                            std::to_string(after) + " AND dest IS NOT NULL").c_str()) == 1);
+        if (queryInt(db, ("SELECT COUNT(*) FROM exits WHERE room = " +
+                          std::to_string(after) + " AND dest IS NULL").c_str()) > 0) {
+            ++roomsWithOnward;
+        }
     }
 
     CHECK(!descriptions.empty());  // at least one room generated
+
+    // REQ-EXITS-11 anti-degeneration: across the generated chain, a NONZERO
+    // fraction of rooms declared >=1 surviving onward exit. A world collapsing to
+    // a straight corridor of dead ends — every room declaring zero onward exits,
+    // e.g. a systematically dropped exit format that per-drop stderr lines would
+    // bury — fails here.
+    CHECK(roomsWithOnward > 0);
+
+    // REQ-EXITS-11 displayed == walkable (failure-tolerant). On the room the
+    // player ended in: the rendered Exits line must equal the row-backed set
+    // (architect is enabled here → realized ∪ latent), and every invertible
+    // direction NOT on the line must WALL when walked — no row → resolveGo case
+    // (c) returns before any architect call, so the player does not move and no
+    // exit row is created (no network). Walking a SHOWN direction is already
+    // exercised by the chain above (shown latent → generates/moves); a shown
+    // direction that walls while KEEPING its row is a conforming transient
+    // failure (REQ-EXITS-3), so shown directions are deliberately not walked here.
+    auto parseExits = [](const std::string& block) {
+        std::vector<std::string> out;
+        const size_t p = block.find("Exits: ");
+        if (p == std::string::npos) return out;
+        size_t e = block.find(".\n", p);
+        if (e == std::string::npos) e = block.size();
+        const std::string list = block.substr(p + 7, e - (p + 7));
+        size_t start = 0;
+        while (start <= list.size()) {
+            const size_t comma = list.find(", ", start);
+            const std::string tok = (comma == std::string::npos)
+                                        ? list.substr(start)
+                                        : list.substr(start, comma - start);
+            if (!tok.empty()) out.push_back(tok);
+            if (comma == std::string::npos) break;
+            start = comma + 2;
+        }
+        return out;
+    };
+
+    const int64_t here =
+        queryInt(db, "SELECT container FROM location WHERE entity = 3");
+    const std::vector<std::string> shown = parseExits(renderRoomOf(db, 3));
+    const int64_t exitsBefore = queryInt(db, "SELECT COUNT(*) FROM exits");
+    auto isShown = [&](const std::string& d) {
+        return std::find(shown.begin(), shown.end(), d) != shown.end();
+    };
+    for (const char* dir : {"north", "south", "east", "west",
+                            "up", "down", "in", "out"}) {
+        const bool hasRow =
+            queryInt(db, ("SELECT COUNT(*) FROM exits WHERE room = " +
+                          std::to_string(here) + " AND direction = '" + dir + "'")
+                             .c_str()) > 0;
+        CHECK(isShown(dir) == hasRow);  // architect enabled → shown iff a row exists
+        if (!isShown(dir)) {
+            // Unshown ⇒ hard wall: walking it must not move the player.
+            tick(db, Action{Verb::Go, 0, dir});
+            CHECK(queryInt(db, "SELECT container FROM location WHERE entity = 3") == here);
+        }
+    }
+    // ...and no wall walk generated a room or planted a row (no network).
+    CHECK(queryInt(db, "SELECT COUNT(*) FROM exits") == exitsBefore);
 
     // The single bounded coherence judge (REQ-ARCH-13): one call, observed.
     const std::string verdict = liveCoherenceJudge(setting, descriptions);
@@ -2474,12 +2595,16 @@ static void testArchitectRequestBody() {
         const nlohmann::json& tool = j["tools"][0];
         CHECK(tool["name"] == "create_room");
 
-        // input schema: object; REQUIRED name + description; NO other props.
+        // input schema: object; REQUIRED name + description + OPTIONAL exits.
         const nlohmann::json& schema = tool["input_schema"];
         CHECK(schema["type"] == "object");
         CHECK(schema["properties"]["name"]["type"] == "string");
         CHECK(schema["properties"]["description"]["type"] == "string");
-        CHECK(schema["properties"].size() == 2);  // no other fields
+        // exits: optional string-array (REQ-EXITS-5).
+        CHECK(schema["properties"]["exits"]["type"] == "array");
+        CHECK(schema["properties"]["exits"]["items"]["type"] == "string");
+        CHECK(schema["properties"].size() == 3);  // name, description, exits
+        // exits is NOT required — name + description only.
         CHECK(schema["required"] ==
               nlohmann::json::array({"name", "description"}));
     }
@@ -2506,11 +2631,17 @@ static void testArchitectRequestBody() {
 // fixture): stop_reason "tool_use" + one create_room tool_use block carrying
 // name + description. The architect analog of cannedToolUse — built from
 // documented structure, NEVER a network probe.
-static HttpResponse cannedCreateRoom(const std::string& name,
-                                     const std::string& description) {
+static HttpResponse cannedCreateRoom(
+    const std::string& name, const std::string& description,
+    const std::vector<std::string>& exits = {}) {
     nlohmann::json input;
     input["name"] = name;
     input["description"] = description;
+    // Only add the optional exits array when non-empty — the analog of how
+    // cannedToolUse carries optional fields (REQ-EXITS-7 fixture).
+    if (!exits.empty()) {
+        input["exits"] = exits;
+    }
 
     nlohmann::json block;
     block["type"] = "tool_use";
@@ -2622,8 +2753,55 @@ static void testArchitectGate() {
         CHECK(p.has_value());
         CHECK(p->name == "crypt");
         CHECK(p->description == "A cold undercroft.");
-        // RoomProposal is a two-field struct — there is nowhere for an id to go.
+        CHECK(p->exits.empty());  // no exits array → dead end
     }
+
+    // --- REQ-EXITS-7: exit sanitization is LENIENT (never rejects the room). ---
+
+    // Normalization: "North"/" up " are trimmed+lowercased and KEPT (not
+    // spuriously dropped). NOTE: the plan's example says "travelling west", but
+    // inverse("west")=="east" would drop the "East" entry as the return
+    // direction, contradicting the stated {north,east,up} result. Travelling
+    // "in" (inverse "out", absent from the set) preserves the normalization
+    // intent — all three survive. See report for this divergence.
+    {
+        auto p = validateRoomProposal(
+            cannedCreateRoom("hall", "prose", {"north", "East", " up "}), "in");
+        CHECK(p.has_value());
+        CHECK(p->exits == std::vector<std::string>({"north", "east", "up"}));
+    }
+
+    // Junk mix: a non-string, a non-invertible direction, a duplicate, and the
+    // return direction (inverse(travel)) are EACH dropped — and the room is
+    // STILL created. Travelling "north" ⇒ return direction "south".
+    {
+        nlohmann::json input;
+        input["name"] = "hall";
+        input["description"] = "prose";
+        input["exits"] = nlohmann::json::array(
+            {"east", 42, "northeast", "up", "east", "south"});
+        nlohmann::json block;
+        block["type"] = "tool_use";
+        block["id"] = "toolu_test";
+        block["name"] = "create_room";
+        block["input"] = std::move(input);
+        nlohmann::json j;
+        j["stop_reason"] = "tool_use";
+        j["content"] = nlohmann::json::array({std::move(block)});
+        HttpResponse r;
+        r.status = 200;
+        r.body = j.dump();
+
+        auto p = validateRoomProposal(r, "north");
+        CHECK(p.has_value());  // junk exits never fail the room
+        // Survivors: east + up. Dropped: 42 (non-string), "northeast"
+        // (non-invertible), the second "east" (duplicate), "south" (return).
+        CHECK(p->exits == std::vector<std::string>({"east", "up"}));
+    }
+
+    // Blank name / description remain FATAL even when exits are present.
+    CHECK(!validateRoomProposal(cannedCreateRoom("", "prose", {"north"}), "east"));
+    CHECK(!validateRoomProposal(cannedCreateRoom("name", "  ", {"north"}), "east"));
 }
 
 // --- Step 6, REQ-ARCH-9 (write) / REQ-ARCH-6: writeGeneratedRoom mints a room
@@ -2636,14 +2814,22 @@ static void testWriteGeneratedRoom() {
 
     const int64_t originRoom = 1;  // stone hall
     const int64_t player = 3;
-    const RoomProposal proposal{"chapter house",
-                                "A low vaulted room of grey stone, its shelves bare."};
+
+    // --- primary path (REQ-EXITS-8): the origin exit pre-exists as a LATENT
+    // stub; realizing it is an UPDATE (upsert, not a second row). ---
+    // fixture maps 1 -north-> 2 as realized; downgrade it to latent so the
+    // realize path exercises the ON CONFLICT UPDATE, not a fresh insert.
+    db.exec("UPDATE exits SET dest = NULL WHERE room = 1 AND direction = 'north'");
+
+    const RoomProposal proposal{
+        "chapter house", "A low vaulted room of grey stone, its shelves bare.",
+        {"east", "down"}};
 
     const int64_t eventsBefore = queryInt(db, "SELECT COUNT(*) FROM events");
 
     db.begin();
     const int64_t newRoom =
-        writeGeneratedRoom(db, originRoom, "east", proposal, player);
+        writeGeneratedRoom(db, originRoom, "north", proposal, player);
     db.commit();
 
     // Engine-minted id, distinct from the seed ids 1–5.
@@ -2660,15 +2846,26 @@ static void testWriteGeneratedRoom() {
     CHECK(queryInt(db, ("SELECT COUNT(*) FROM location WHERE entity = " +
                         std::to_string(newRoom)).c_str()) == 0);
 
-    // Both reciprocal exits: origin -east-> new, new -west-> origin.
-    CHECK(queryInt(db, "SELECT dest FROM exits WHERE room = 1 AND direction = 'east'") ==
+    // Origin north is REALIZED to the new room via upsert — still exactly ONE
+    // row (not a second), now with a non-NULL dest.
+    CHECK(queryInt(db, "SELECT COUNT(*) FROM exits WHERE room = 1 AND direction = 'north'") == 1);
+    CHECK(queryInt(db, "SELECT dest FROM exits WHERE room = 1 AND direction = 'north'") ==
           newRoom);
+    // Realized return: new -south-> origin (inverse of north).
     CHECK(queryInt(db, ("SELECT dest FROM exits WHERE room = " +
-                        std::to_string(newRoom) + " AND direction = 'west'").c_str()) ==
+                        std::to_string(newRoom) + " AND direction = 'south'").c_str()) ==
           originRoom);
 
-    // Exactly one new 'generated' event, subject = new room, object = origin,
-    // detail = direction.
+    // The declared onward exits are planted as LATENT stubs (NULL dest).
+    CHECK(queryInt(db, ("SELECT COUNT(*) FROM exits WHERE room = " +
+                        std::to_string(newRoom) +
+                        " AND direction = 'east' AND dest IS NULL").c_str()) == 1);
+    CHECK(queryInt(db, ("SELECT COUNT(*) FROM exits WHERE room = " +
+                        std::to_string(newRoom) +
+                        " AND direction = 'down' AND dest IS NULL").c_str()) == 1);
+
+    // Exactly one new 'generated' event (latent stubs emit none), subject = new
+    // room, object = origin, detail = direction. Also proves no stub events.
     CHECK(queryInt(db, "SELECT COUNT(*) FROM events") == eventsBefore + 1);
     CHECK(queryText(db, "SELECT verb FROM events ORDER BY id DESC LIMIT 1") ==
           "generated");
@@ -2677,7 +2874,26 @@ static void testWriteGeneratedRoom() {
     CHECK(queryInt(db, "SELECT object FROM events ORDER BY id DESC LIMIT 1") ==
           originRoom);
     CHECK(queryText(db, "SELECT detail FROM events ORDER BY id DESC LIMIT 1") ==
-          "east");
+          "north");
+
+    // --- sub-case (micro-decision #3): an ABSENT origin latent row still
+    // realizes (upsert degrades to insert). It logs one stderr diagnostic
+    // (a REQ-EXITS-2b precondition violation) but does NOT throw — this is the
+    // log-and-proceed contract that keeps testArchitectGenerate green. Room 1
+    // has no 'east' row, so this exercises the no-conflict path. ---
+    CHECK(queryInt(db, "SELECT COUNT(*) FROM exits WHERE room = 1 AND direction = 'east'") == 0);
+    const RoomProposal proposal2{"cellar", "A damp brick cellar.", {"up"}};
+    db.begin();
+    const int64_t newRoom2 =
+        writeGeneratedRoom(db, originRoom, "east", proposal2, player);
+    db.commit();
+    CHECK(newRoom2 > 5 && newRoom2 != newRoom);
+    // Origin east realized to the new room (via insert), return west realized.
+    CHECK(queryInt(db, "SELECT dest FROM exits WHERE room = 1 AND direction = 'east'") ==
+          newRoom2);
+    CHECK(queryInt(db, ("SELECT dest FROM exits WHERE room = " +
+                        std::to_string(newRoom2) + " AND direction = 'west'").c_str()) ==
+          originRoom);
 }
 
 // --- Step 7, REQ-ARCH-4/-5/-6/-11: architectGenerate orchestration with the
@@ -2776,70 +2992,143 @@ static void tickT(Db& db, const Action& a, const HttpTransport& transport,
     db.commit();
 }
 
-// --- Step 8, REQ-ARCH-3/-2/-8: the resolveGo world-gen branch, driven through
-// the tick with a fake transport. (a) generate+move on an unmapped invertible
-// exit; (b) persistence — re-crossing takes branch a, zero transport calls;
-// (c) non-invertible → wall, no call; (d) disabled → wall, no call. ---
+// --- Step 4, REQ-EXITS-2/-3: the resolveGo three-case movement table, driven
+// through the tick with a fake transport. (a) realized → move, no AI call;
+// (b) latent + AI-on → generate + realize + move (and persistence: re-crossing
+// takes case a with no new call); (c) undeclared direction (no row) → wall,
+// zero transport calls; (d) latent + AI-off → wall; (e) failed generation twice
+// at the same latent exit → walls both times, latent row still present. Each
+// case uses its own fresh world so movement state never couples the cases. ---
 static void testResolveGoGenerate() {
     const ScopedEnvVar keyGuard("ANTHROPIC_API_KEY");
     const ScopedEnvVar aiGuard("TEXTWORLD_AI");
-
-    const TempDbFile worldPath("textworld_resolvego_gen.db");
-    Db db = openWorld(worldPath.string(), "tests/fixture.sql");
     const int64_t player = 3;
 
-    int calls = 0;
-    HttpTransport fake = [&](const std::string&) {
-        ++calls;
-        return cannedCreateRoom("crypt", "A cold undercroft of grey stone.");
-    };
+    // (a) Realized exit (fixture maps 1 -north-> 2 realized) → move, and the
+    // transport is NEVER invoked (case a precedes any AI call).
+    {
+        setenv("ANTHROPIC_API_KEY", "test-key-never-used", 1);
+        unsetenv("TEXTWORLD_AI");
+        const TempDbFile worldPath("textworld_resolvego_realized.db");
+        Db db = openWorld(worldPath.string(), "tests/fixture.sql");
+        int calls = 0;
+        HttpTransport fake = [&](const std::string&) {
+            ++calls;
+            return cannedCreateRoom("crypt", "A cold undercroft of grey stone.");
+        };
+        tickT(db, Action{Verb::Go, 0, "north"}, fake, player);
+        CHECK(calls == 0);
+        CHECK(queryInt(db, "SELECT container FROM location WHERE entity = 3") == 2);
+    }
 
-    // Enabled: dummy key present, TEXTWORLD_AI unset → aiNarrationEnabled() true.
-    // The injected transport means no real network call is ever made.
-    setenv("ANTHROPIC_API_KEY", "test-key-never-used", 1);
-    unsetenv("TEXTWORLD_AI");
+    // (b) Latent exit + AI-on → generate, realize, move; the origin row is now
+    // non-NULL; and re-crossing takes case (a) with ZERO further calls.
+    {
+        setenv("ANTHROPIC_API_KEY", "test-key-never-used", 1);
+        unsetenv("TEXTWORLD_AI");
+        const TempDbFile worldPath("textworld_resolvego_latent.db");
+        Db db = openWorld(worldPath.string(), "tests/fixture.sql");
+        // Seed a latent onward exit off the hall (fixture maps no 'east').
+        db.exec("INSERT INTO exits(room, direction, dest) VALUES (1, 'east', NULL)");
+        int calls = 0;
+        HttpTransport fake = [&](const std::string&) {
+            ++calls;
+            return cannedCreateRoom("crypt", "A cold undercroft of grey stone.");
+        };
 
-    // (a) go east — unmapped (base.sql maps only north/south) and invertible →
-    // branch b generates a room and the player moves into it.
-    tickT(db, Action{Verb::Go, 0, "east"}, fake, player);
-    CHECK(calls == 1);
-    const int64_t newRoom =
-        queryInt(db, "SELECT dest FROM exits WHERE room = 1 AND direction = 'east'");
-    CHECK(newRoom > 5);
-    CHECK(queryInt(db, "SELECT container FROM location WHERE entity = 3") == newRoom);
-    CHECK(queryInt(db, ("SELECT dest FROM exits WHERE room = " +
-                        std::to_string(newRoom) + " AND direction = 'west'").c_str()) == 1);
+        tickT(db, Action{Verb::Go, 0, "east"}, fake, player);
+        CHECK(calls == 1);
+        const int64_t newRoom =
+            queryInt(db, "SELECT dest FROM exits WHERE room = 1 AND direction = 'east'");
+        CHECK(newRoom > 5);  // origin row now non-NULL (realized)
+        CHECK(queryInt(db, "SELECT container FROM location WHERE entity = 3") == newRoom);
+        CHECK(queryInt(db, ("SELECT dest FROM exits WHERE room = " +
+                            std::to_string(newRoom) + " AND direction = 'west'").c_str()) == 1);
 
-    // (b) persistence / no-regen: go west back to the hall (branch a — the
-    // reciprocal exit exists), then east again (branch a — the exit now exists).
-    // The transport is invoked ZERO more times.
-    tickT(db, Action{Verb::Go, 0, "west"}, fake, player);
-    CHECK(queryInt(db, "SELECT container FROM location WHERE entity = 3") == 1);
-    tickT(db, Action{Verb::Go, 0, "east"}, fake, player);
-    CHECK(queryInt(db, "SELECT container FROM location WHERE entity = 3") == newRoom);
-    CHECK(calls == 1);  // still just the one generation from (a)
+        // persistence / no-regen: back west (case a — realized return), then
+        // east again (case a — now realized). The transport is not re-invoked.
+        tickT(db, Action{Verb::Go, 0, "west"}, fake, player);
+        CHECK(queryInt(db, "SELECT container FROM location WHERE entity = 3") == 1);
+        tickT(db, Action{Verb::Go, 0, "east"}, fake, player);
+        CHECK(queryInt(db, "SELECT container FROM location WHERE entity = 3") == newRoom);
+        CHECK(calls == 1);
+    }
 
-    // (c) non-invertible direction → wall, no transport call. From newRoom,
-    // 'northeast' has no inverse in the engine table, so branch b is skipped.
-    tickT(db, Action{Verb::Go, 0, "northeast"}, fake, player);
-    CHECK(calls == 1);
-    CHECK(queryInt(db, "SELECT container FROM location WHERE entity = 3") == newRoom);
-    CHECK(queryText(db, "SELECT verb FROM events ORDER BY id DESC LIMIT 1") == "failed");
-    CHECK(queryText(db, "SELECT detail FROM events ORDER BY id DESC LIMIT 1") ==
-          "You can't go that way.");
+    // (c) Undeclared direction (NO row) → hard wall, ZERO transport calls, even
+    // with AI enabled ('up' has no row off the hall in the fixture).
+    {
+        setenv("ANTHROPIC_API_KEY", "test-key-never-used", 1);
+        unsetenv("TEXTWORLD_AI");
+        const TempDbFile worldPath("textworld_resolvego_wall.db");
+        Db db = openWorld(worldPath.string(), "tests/fixture.sql");
+        int calls = 0;
+        HttpTransport fake = [&](const std::string&) {
+            ++calls;
+            return cannedCreateRoom("crypt", "A cold undercroft of grey stone.");
+        };
+        tickT(db, Action{Verb::Go, 0, "up"}, fake, player);
+        CHECK(calls == 0);
+        CHECK(queryInt(db, "SELECT container FROM location WHERE entity = 3") == 1);
+        CHECK(queryText(db, "SELECT verb FROM events ORDER BY id DESC LIMIT 1") == "failed");
+        CHECK(queryText(db, "SELECT detail FROM events ORDER BY id DESC LIMIT 1") ==
+              "You can't go that way.");
+        // No row was created for the undeclared direction.
+        CHECK(queryInt(db, "SELECT COUNT(*) FROM exits WHERE room = 1 AND direction = 'up'") == 0);
+    }
 
-    // (d) disabled mode: key unset → aiNarrationEnabled() false → an unmapped
-    // invertible exit ('up') walls, and the transport is NEVER invoked.
-    unsetenv("ANTHROPIC_API_KEY");
-    tickT(db, Action{Verb::Go, 0, "up"}, fake, player);
-    CHECK(calls == 1);  // no transport constructed/invoked
-    CHECK(queryInt(db, "SELECT container FROM location WHERE entity = 3") == newRoom);
-    CHECK(queryText(db, "SELECT verb FROM events ORDER BY id DESC LIMIT 1") == "failed");
-    CHECK(queryText(db, "SELECT detail FROM events ORDER BY id DESC LIMIT 1") ==
-          "You can't go that way.");
-    // No room was generated up.
-    CHECK(queryInt(db, ("SELECT COUNT(*) FROM exits WHERE room = " +
-                        std::to_string(newRoom) + " AND direction = 'up'").c_str()) == 0);
+    // (d) Latent exit + AI-off → wall, transport NEVER invoked; the latent row
+    // survives untouched.
+    {
+        unsetenv("ANTHROPIC_API_KEY");  // aiNarrationEnabled() false
+        unsetenv("TEXTWORLD_AI");
+        const TempDbFile worldPath("textworld_resolvego_off.db");
+        Db db = openWorld(worldPath.string(), "tests/fixture.sql");
+        db.exec("INSERT INTO exits(room, direction, dest) VALUES (1, 'east', NULL)");
+        int calls = 0;
+        HttpTransport fake = [&](const std::string&) {
+            ++calls;
+            return cannedCreateRoom("crypt", "A cold undercroft of grey stone.");
+        };
+        tickT(db, Action{Verb::Go, 0, "east"}, fake, player);
+        CHECK(calls == 0);
+        CHECK(queryInt(db, "SELECT container FROM location WHERE entity = 3") == 1);
+        CHECK(queryText(db, "SELECT verb FROM events ORDER BY id DESC LIMIT 1") == "failed");
+        CHECK(queryText(db, "SELECT detail FROM events ORDER BY id DESC LIMIT 1") ==
+              "You can't go that way.");
+        // Latent row still present and still NULL (hidden, not consumed).
+        CHECK(queryInt(db, "SELECT COUNT(*) FROM exits WHERE room = 1 AND direction = 'east' AND dest IS NULL") == 1);
+    }
+
+    // (e) Failed generation (Phase-1 forced to fail) TWICE at the same latent
+    // exit → walls both times, and the latent row is STILL present after each
+    // attempt (provably retryable, REQ-EXITS-3).
+    {
+        setenv("ANTHROPIC_API_KEY", "test-key-never-used", 1);
+        unsetenv("TEXTWORLD_AI");
+        const TempDbFile worldPath("textworld_resolvego_retry.db");
+        Db db = openWorld(worldPath.string(), "tests/fixture.sql");
+        db.exec("INSERT INTO exits(room, direction, dest) VALUES (1, 'east', NULL)");
+        int calls = 0;
+        HttpTransport err = [&](const std::string&) {
+            ++calls;
+            HttpResponse r;
+            r.transportError = true;  // Phase-1 failure, no write
+            return r;
+        };
+
+        tickT(db, Action{Verb::Go, 0, "east"}, err, player);
+        CHECK(queryInt(db, "SELECT container FROM location WHERE entity = 3") == 1);
+        CHECK(queryText(db, "SELECT verb FROM events ORDER BY id DESC LIMIT 1") == "failed");
+        // Latent row untouched after the first failed attempt.
+        CHECK(queryInt(db, "SELECT COUNT(*) FROM exits WHERE room = 1 AND direction = 'east' AND dest IS NULL") == 1);
+
+        tickT(db, Action{Verb::Go, 0, "east"}, err, player);
+        CHECK(queryInt(db, "SELECT container FROM location WHERE entity = 3") == 1);
+        CHECK(queryText(db, "SELECT verb FROM events ORDER BY id DESC LIMIT 1") == "failed");
+        // Still present and still NULL after the second — retryable indefinitely.
+        CHECK(queryInt(db, "SELECT COUNT(*) FROM exits WHERE room = 1 AND direction = 'east' AND dest IS NULL") == 1);
+        CHECK(calls == 2);  // one transport call per attempt, no retries
+    }
 }
 
 // --- Step 9, REQ-ARCH-10: the 'generated' verb is renderer-invisible. A turn
@@ -2853,6 +3142,10 @@ static void testGeneratedEventInvisible() {
 
     const TempDbFile worldPath("textworld_gen_invisible.db");
     Db db = openWorld(worldPath.string(), "tests/fixture.sql");
+
+    // Generation now fires only on a pre-existing latent row; seed the latent
+    // 'east' exit off the hall that this turn will walk (REQ-EXITS-2b).
+    db.exec("INSERT INTO exits(room, direction, dest) VALUES (1, 'east', NULL)");
 
     HttpTransport fake = [](const std::string&) {
         return cannedCreateRoom("crypt", "A cold undercroft of grey stone.");
@@ -2929,12 +3222,18 @@ static void testArchitectPrompt() {
     CHECK(contains(p, "one room"));
     CHECK(contains(p, "coherent"));
     CHECK(contains(p, "setting"));
-    // Emitted via create_room as a name + a description.
+    // Emitted via create_room as a name + a description + declared exits.
     CHECK(contains(p, "create_room"));
     CHECK(contains(p, "name"));
     CHECK(contains(p, "description"));
-    // Prohibitions: no exits/directions, no arrival narration, no ids.
-    CHECK(contains(p, "exits") || contains(p, "directions"));
+    // REQ-EXITS-6: the prompt now REQUIRES declaring the onward exits, EXCLUDES
+    // the entry-return direction, and REQUIRES the prose to describe them.
+    CHECK(contains(p, "Declare in exits the directions that lead onward"));
+    CHECK(contains(p, "describe those declared exits in the prose"));
+    CHECK(contains(p, "EXCLUDE the direction back the way the player came"));
+    // It no longer FORBIDS mentioning exits — the old prohibition is gone.
+    CHECK(!contains(p, "Do NOT describe exits"));
+    // Retained prohibitions: no arrival narration, no ids.
     CHECK(contains(p, "arrival"));
     CHECK(contains(p, "ids"));
 }
@@ -2970,6 +3269,7 @@ int main() {
     testMutations();
     testSystems();
     testRender();
+    testExitDisplayInvariant();
     testLoop();
     testProseFacts();
     testNlResolveContext();

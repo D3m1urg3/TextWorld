@@ -7,6 +7,8 @@
 #include <string>
 #include <vector>
 
+#include "architect.hpp"  // architectEnabled() — the latent-exit DISPLAY gate
+
 namespace {
 
 // --- read-only lookups ------------------------------------------------------
@@ -66,9 +68,15 @@ std::string roomBlock(Db& db, int64_t room) {
 
     {
         std::vector<std::string> dirs;
+        // Realized exits (dest non-NULL) always list; latent exits (dest NULL)
+        // list ONLY when the architect is enabled — walking one would wall
+        // otherwise (REQ-EXITS-4). A latent exit renders IDENTICALLY to a
+        // realized one: no marker distinguishes them.
         Stmt s = db.prepare(
-            "SELECT direction FROM exits WHERE room = ? ORDER BY direction");
+            "SELECT direction FROM exits WHERE room = ? "
+            "AND (dest IS NOT NULL OR ?) ORDER BY direction");
         s.bind(1, room);
+        s.bind(2, architectEnabled() ? 1 : 0);
         while (s.step()) dirs.push_back(s.colText(0));
         if (!dirs.empty()) out += "Exits: " + joinList(dirs) + ".\n";
     }

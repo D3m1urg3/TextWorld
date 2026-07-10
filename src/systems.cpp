@@ -4,7 +4,7 @@
 #include <stdexcept>
 #include <string>
 
-#include "architect.hpp"  // architectGenerate + inverseDirection + aiNarrationEnabled (via prose.hpp)
+#include "architect.hpp"  // architectGenerate + aiNarrationEnabled (via prose.hpp)
 #include "mutations.hpp"
 
 namespace {
@@ -30,13 +30,24 @@ std::optional<int64_t> containerOf(Db& db, int64_t entity) {
     return s.colInt(0);
 }
 
-// Destination of the exit (room, direction), or nullopt if no such exit.
-std::optional<int64_t> exitDest(Db& db, int64_t room, const std::string& direction) {
-    Stmt s = db.prepare("SELECT dest FROM exits WHERE room = ? AND direction = ?");
+// The three exhaustive exit states (REQ-EXITS-1): no row is a Wall, a NULL-dest
+// row is Latent (open but ungenerated), a non-NULL-dest row is Realized.
+enum class ExitState { Wall, Latent, Realized };
+
+// Three-state read of the exit (room, direction). The null bit is carried in
+// the SQL itself so a NULL dest is distinguishable from a missing row without
+// touching the frozen db.hpp Stmt API (micro-decision #1). `dest` is set only
+// for the Realized case.
+ExitState exitState(Db& db, int64_t room, const std::string& direction,
+                    int64_t& dest) {
+    Stmt s = db.prepare(
+        "SELECT dest, dest IS NULL FROM exits WHERE room = ? AND direction = ?");
     s.bind(1, room);
     s.bind(2, direction);
-    if (!s.step()) return std::nullopt;
-    return s.colInt(0);
+    if (!s.step()) return ExitState::Wall;
+    if (s.colInt(1) == 1) return ExitState::Latent;
+    dest = s.colInt(0);
+    return ExitState::Realized;
 }
 
 bool isPortable(Db& db, int64_t entity) {
@@ -47,37 +58,43 @@ bool isPortable(Db& db, int64_t entity) {
 
 // --- per-verb resolution --------------------------------------------------
 
-// The 3-way world-gen branch (REQ-ARCH-3), evaluated IN ORDER. `transport` is
-// null in production (architectGenerate binds libcurl itself) and non-null only
-// under the test-injected resolve overload.
+// The three-case movement table (REQ-EXITS-2), evaluated IN ORDER. `transport`
+// is null in production (architectGenerate binds libcurl itself) and non-null
+// only under the test-injected resolve overload.
 void resolveGo(Db& db, const Action& action, int64_t player,
                const HttpTransport* transport) {
     const int64_t room = roomOf(db, player);
 
-    // (a) Exit already exists → move. Precedes any AI call, so re-crossing a
-    // generated exit never regenerates — persistence falls out of exitDest.
-    if (auto dest = exitDest(db, room, action.direction)) {
-        moveEntity(db, player, *dest, player, "moved");
+    int64_t dest = 0;
+    const ExitState state = exitState(db, room, action.direction, dest);
+
+    // (a) Realized → move. Precedes any AI call, so re-crossing a generated
+    // exit never regenerates — persistence falls out of the realized row.
+    if (state == ExitState::Realized) {
+        moveEntity(db, player, dest, player, "moved");
         return;
     }
 
-    // (b) No exit yet: generate one iff AI is enabled AND the direction is
-    // invertible (else no reciprocal to create → wall, no AI call) AND the
-    // architect succeeds; then move through the now-existing exit.
-    if (aiNarrationEnabled() && inverseDirection(action.direction)) {
+    // (b) Latent AND generation enabled → realize it, then move through the
+    // now-realized exit. Every latent row is invertible by construction
+    // (REQ-EXITS-1), so no invertibility guard is needed here. On Phase-1
+    // failure the latent row is untouched — the wall below is retryable next
+    // turn (REQ-EXITS-3).
+    if (state == ExitState::Latent && aiNarrationEnabled()) {
         const bool generated =
             transport != nullptr
                 ? architectGenerate(db, room, action.direction, player, *transport)
                 : architectGenerate(db, room, action.direction, player);
         if (generated) {
-            const std::optional<int64_t> dest =
-                exitDest(db, room, action.direction);
-            moveEntity(db, player, *dest, player, "moved");
+            int64_t realizedDest = 0;
+            exitState(db, room, action.direction, realizedDest);
+            moveEntity(db, player, realizedDest, player, "moved");
             return;
         }
     }
 
-    // (c) The wall — today's behavior, byte-identical.
+    // (c) Otherwise — Wall, or Latent with generation disabled, or a failed
+    // realization → the wall, byte-identical text.
     appendEvent(db, player, "failed", 0, 0, "You can't go that way.");
 }
 
