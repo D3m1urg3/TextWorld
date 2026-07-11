@@ -897,13 +897,62 @@ static void testCombatCastGate() {
     // Wait until currentTurn reaches ready_turn, then the cast should tick.
     const int64_t readyTurn = queryInt(
         db, "SELECT ready_turn FROM cooldowns WHERE entity = 3 AND spell = 'ward'");
-    for (int i = 0; i < 20 && turn() + 1 < readyTurn &&
+    for (int i = 0; i < 20 && turn() < readyTurn &&
                     queryInt(db, "SELECT container FROM location WHERE entity = 3") == 2;
          ++i) {
         runTurn(db, "wait");
     }
     if (queryInt(db, "SELECT container FROM location WHERE entity = 3") == 2) {
         CHECK(runTurn(db, "cast ward").outcome == TurnOutcome::Ticked);
+    }
+}
+
+// Engine-appended status line: HP + per-spell cooldown readiness (REQ-COMBAT-15).
+// Present in combat, absent outside it, and the SAME shared helper both render
+// paths append (byte-identical). Deterministic.
+static void testCombatStatusLine() {
+    const TempDbFile worldPath("textworld_combat_statusline_tests.db");
+    Db db = openWorld(worldPath.string(), "tests/combat_fixture.sql");
+    const int64_t wardCd =
+        queryInt(db, "SELECT cooldown FROM spell_catalog WHERE spell = 'ward'");
+
+    // Outside combat: no status line.
+    CHECK(!contains(runTurn(db, "look").output, "HP:"));
+
+    // Entering combat: HP plus both known spells shown ready.
+    {
+        const std::string out = runTurn(db, "go north").output;
+        CHECK(contains(out, "HP: 12/12"));
+        CHECK(contains(out, "Stun: ready"));
+        CHECK(contains(out, "Ward: ready"));
+    }
+
+    // Cast ward (cooldown N): the line shows "Ward: N" the moment it is cast.
+    {
+        const std::string out = runTurn(db, "cast ward").output;
+        CHECK(contains(out, "Ward: " + std::to_string(wardCd)));
+    }
+    // It counts down each tick to "Ward: ready" at exactly tick T+N.
+    {
+        const std::string out = runTurn(db, "wait").output;
+        CHECK(contains(out, "Ward: " + std::to_string(wardCd - 1)));
+    }
+    {
+        // (wardCd == 2, so one more wait reaches ready.)
+        const std::string out = runTurn(db, "wait").output;
+        CHECK(contains(out, "Ward: ready"));
+    }
+
+    // Byte-identity of the append: render()'s output ends with exactly the shared
+    // combatStatusLine helper — the same helper the AI path appends, so the line
+    // is identical on both paths by construction.
+    {
+        const int64_t t = queryInt(db, "SELECT value FROM meta WHERE key = 'turn'");
+        const std::string rendered = render(db, t);
+        const std::string sl = combatStatusLine(db, 3);
+        CHECK(!sl.empty());
+        CHECK(rendered.size() >= sl.size());
+        CHECK(rendered.compare(rendered.size() - sl.size(), sl.size(), sl) == 0);
     }
 }
 
@@ -3845,6 +3894,7 @@ int main() {
     testCombatTelegraph();
     testCombatCastGate();
     testCombatCounter();
+    testCombatStatusLine();
     testRender();
     testExitDisplayInvariant();
     testLoop();

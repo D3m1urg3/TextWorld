@@ -1,5 +1,6 @@
 #include "combat.hpp"
 
+#include <cctype>
 #include <optional>
 #include <stdexcept>
 #include <string>
@@ -125,15 +126,17 @@ std::optional<std::string> castDenialReason(Db& db, int64_t player,
         s.bind(2, spell);
         if (!s.step()) return std::string("You don't know that spell.");
     }
-    // Off cooldown? (REQ-COMBAT-13). This runs PRE-TICK, so the cast would
-    // execute on the next tick (currentTurn + 1); it is ready iff
-    // ready_turn <= currentTurn + 1.
+    // Off cooldown? (REQ-COMBAT-13). Evaluated against the current meta.turn so
+    // this gate agrees exactly with the status line's readiness display (Step
+    // 12): a spell shown "ready" after tick t is castable on the next action.
+    // Ready iff ready_turn <= currentTurn (cast at T → declined for ticks
+    // T+1..T+cooldown, castable again once meta.turn reaches T+cooldown).
     {
         Stmt s = db.prepare(
             "SELECT ready_turn FROM cooldowns WHERE entity = ? AND spell = ?");
         s.bind(1, player);
         s.bind(2, spell);
-        if (s.step() && s.colInt(0) > currentTurn(db) + 1) {
+        if (s.step() && s.colInt(0) > currentTurn(db)) {
             return std::string("That spell is still recharging.");
         }
     }
@@ -181,13 +184,39 @@ std::string combatStatusLine(Db& db, int64_t player) {
     // so both render paths can append it unconditionally.
     if (hostileInRoom(db, roomOf(db, player)) == 0) return "";
 
-    Stmt s = db.prepare("SELECT current, max FROM health WHERE entity = ?");
+    std::string line;
+    {
+        Stmt s = db.prepare("SELECT current, max FROM health WHERE entity = ?");
+        s.bind(1, player);
+        if (!s.step()) return "";
+        line = "HP: " + std::to_string(s.colInt(0)) + "/" +
+               std::to_string(s.colInt(1));
+    }
+
+    // Per-known-spell readiness (REQ-COMBAT-15), computed from cooldowns vs the
+    // current tick — engine-authored, never the model's. Alphabetical by spell
+    // for a deterministic, replayable line. remaining = ready_turn - now (matches
+    // the cast gate: "ready" ⟺ castable next action); no cooldown row ⟹ ready.
+    const int64_t now = currentTurn(db);
+    Stmt s = db.prepare(
+        "SELECT ks.spell, c.ready_turn, c.ready_turn IS NULL "
+        "FROM known_spells ks "
+        "LEFT JOIN cooldowns c ON c.entity = ks.entity AND c.spell = ks.spell "
+        "WHERE ks.entity = ? ORDER BY ks.spell");
     s.bind(1, player);
-    if (!s.step()) return "";
-    const int64_t cur = s.colInt(0);
-    const int64_t mx = s.colInt(1);
-    // Brick 1: HP only. Step 12 prepends per-spell cooldown readiness.
-    return "HP: " + std::to_string(cur) + "/" + std::to_string(mx) + "\n";
+    while (s.step()) {
+        std::string spell = s.colText(0);
+        if (!spell.empty()) spell[0] = static_cast<char>(std::toupper(
+                                static_cast<unsigned char>(spell[0])));
+        const bool noCooldown = s.colInt(2) != 0;
+        const int64_t remaining = s.colInt(1) - now;
+        const std::string ready =
+            (noCooldown || remaining <= 0) ? "ready" : std::to_string(remaining);
+        line += " · " + spell + ": " + ready;
+    }
+
+    line += "\n";
+    return line;
 }
 
 void resolveCombat(Db& db, int64_t player, int64_t hostile) {

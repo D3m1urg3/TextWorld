@@ -34,7 +34,7 @@ in `./build/tests`.
 - [x] 9 — `Verb::Cast` + cooldown gate → `testCombatCastGate` ✅
 - [x] 10 — counters Ward/Stun → `testCombatCounter` ✅
 - [x] 11 — flee → `testCombatFlee` ✅
-- [ ] 12 — status line (cooldowns) → `testCombatStatusLine`
+- [x] 12 — status line (cooldowns) → `testCombatStatusLine` ✅ **(Brick 2 done)**
 
 **BRICK 3 — Elements / four-lock closure / learning economy**
 - [ ] 13 — schema: elements+locks+grimoire → `testCombatSchema` ext.
@@ -264,5 +264,22 @@ in `./build/tests`.
   at unchanged health across return.
 - Gate: build clean; `./build/tests` → 2201 checks, 0 failures. Covers
   AI-Validation item 12 (generation-disabled parts).
+
+### Step 12 — engine-appended status line (cooldowns + HP) ✅ (Brick 2 done)
+- `combatStatusLine` extended: `HP: c/m · Spell: ready|N · …` for each known spell,
+  alphabetical (deterministic), remaining = ready_turn - now, no cooldown row ⟹
+  ready. `capitalize` first letter for display. Same helper both paths append.
+- **Gate/line consistency fix:** `castDenialReason` cooldown check changed from
+  `> currentTurn+1` to `> currentTurn`, so "ready" on the line ⟺ castable next
+  action; cast at T declined for ticks T+1..T+cd, castable at T+cd (matches
+  "declined for exactly N ticks" + "ready at T+N"). Updated Step-9 test's resume
+  loop (`turn() < readyTurn`).
+- `testCombatStatusLine`: absent outside combat; HP + both spells ready on entry;
+  "Ward: N" on cast counting down to "Ward: ready" at T+N; render() output ends
+  with exactly `combatStatusLine(db,3)` (byte-identity by shared helper). Covers
+  AI-Validation item 7.
+- Gate: build clean; `./build/tests` → 2215 checks, 0 failures.
+
+## BRICK 2 COMPLETE — telegraph/counter/Cast/cooldowns; the timing puzzle works.
 </content>
 </invoke>
