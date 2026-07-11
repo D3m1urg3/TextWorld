@@ -177,6 +177,10 @@ std::string render(Db& db, int64_t turn) {
             // Frost damage + a slow (subject = enemy, object = adjusted amount).
             out += "Your frost bites the " + nameOf(db, subject) + " for " +
                    std::to_string(object) + " damage, and its movements slow.\n";
+        } else if (verb == "dot") {
+            // A damage-over-time tick (subject = enemy, object = per-tick amount).
+            out += "The " + nameOf(db, subject) + " smoulders, taking " +
+                   std::to_string(object) + " damage.\n";
         } else if (verb == "defeated") {
             // subject = the fallen enemy (name survives), object = its grimoire.
             out += "The " + nameOf(db, subject) + " falls. It drops the " +

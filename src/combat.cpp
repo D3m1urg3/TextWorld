@@ -104,6 +104,30 @@ int64_t resistedDamage(Db& db, const std::string& archetype,
     return base * num / den;    // integer ratio — deterministic
 }
 
+// Defeat + drop for a felled hostile: read its room + archetype (still present),
+// mint its grimoire into the room, then remove it from play (REQ-COMBAT-20).
+// Shared by the two defeat checks in resolveCombat (player-felled and DoT-felled).
+void defeatHostile(Db& db, int64_t hostile, int64_t player) {
+    const int64_t room = roomOf(db, hostile);
+    const std::string archetype = archetypeOf(db, hostile);
+    const int64_t grimoire = dropGrimoire(db, archetype, room);
+    defeatEnemy(db, hostile, grimoire, player);
+}
+
+// Apply one tick of any damage-over-time on `entity` (REQ-COMBAT-19): fixed
+// magnitude via damageEntity, dealt each tick BEFORE the status countdown
+// removes the effect. Independent of CC — a slowed/stunned enemy still burns.
+void applyDot(Db& db, int64_t entity, int64_t actor) {
+    Stmt s = db.prepare(
+        "SELECT magnitude FROM status_effects "
+        "WHERE entity = ? AND kind = 'dot' AND remaining > 0");
+    s.bind(1, entity);
+    if (s.step()) {
+        const int64_t mag = s.colInt(0);
+        if (mag > 0) damageEntity(db, entity, mag, actor, "dot");
+    }
+}
+
 }  // namespace
 
 // The living hostile sharing `room` (health.current > 0), or 0 if none. Lowest
@@ -215,6 +239,11 @@ void resolveCast(Db& db, int64_t player, const std::string& spell) {
         if (effect == "frost") {
             applyStatus(db, enemy, "slow", 0, kSlowDuration);
         }
+    } else if (effect == "dot") {
+        // Damage-over-time (REQ-COMBAT-19): a fixed magnitude burns each tick for
+        // a fixed duration. The 'cast' event records the application; the per-tick
+        // 'dot' damage is applied by resolveCombat's DoT lane.
+        applyStatus(db, enemy, "dot", kDotDamage, kDotDuration);
     }
     // Dispel (Step 16) and AoE (Step 17) effects arrive later in Brick 3.
 }
@@ -269,10 +298,7 @@ void resolveCombat(Db& db, int64_t player, int64_t hostile) {
     // so, combat ends now (REQ-COMBAT-3): the enemy takes NO turn and deals no
     // chip — it is defeated, removed, and drops its grimoire (REQ-COMBAT-20).
     if (*hp <= 0) {
-        const int64_t room = roomOf(db, hostile);
-        const std::string archetype = archetypeOf(db, hostile);
-        const int64_t grimoire = dropGrimoire(db, archetype, room);
-        defeatEnemy(db, hostile, grimoire, player);
+        defeatHostile(db, hostile, player);
         return;
     }
 
@@ -303,9 +329,18 @@ void resolveCombat(Db& db, int64_t player, int64_t hostile) {
         }
     }
 
-    // Tick down status effects AFTER the enemy turn, so a Stun/Ward cast THIS
-    // tick still affects this tick before counting down (an unconsumed ward
-    // expires; a stun's duration decrements). DoT damage-on-tick is Step 15.
+    // DoT lane (REQ-COMBAT-19): any damage-over-time on the enemy burns this
+    // tick, before the countdown removes it. A DoT that fells the enemy defeats
+    // it now — not a tick later — so it never lingers at 0 health.
+    applyDot(db, hostile, player);
+    if (const auto dotHp = healthOf(db, hostile); dotHp && *dotHp <= 0) {
+        defeatHostile(db, hostile, player);
+        return;
+    }
+
+    // Tick down status effects AFTER the enemy turn + DoT, so a Stun/Ward/DoT
+    // cast THIS tick still affects this tick before counting down (an unconsumed
+    // ward expires; stun/slow/DoT durations decrement).
     tickStatusEffects(db, player);
     tickStatusEffects(db, hostile);
 

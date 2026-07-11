@@ -39,7 +39,7 @@ in `./build/tests`.
 **BRICK 3 — Elements / four-lock closure / learning economy**
 - [x] 13 — schema: elements+locks+grimoire → `testCombatSchema` ext. ✅
 - [x] 14 — element+resist+Fire/Frost → `testCombatElements` ✅
-- [ ] 15 — DoT → `testCombatDoT`
+- [x] 15 — DoT → `testCombatDoT` ✅
 - [ ] 16 — defense lock (barrier/Dispel) → `testCombatDefenseLock`
 - [ ] 17 — multiplicity lock (AoE/swarm) → `testCombatMultiplicity`
 - [ ] 18 — grimoire→Read→learn → `testCombatLearn`
@@ -315,5 +315,19 @@ in `./build/tests`.
   kSpellDamage/2 (resist) + slow status; basic attack deals exactly
   kBasicAttackDamage (>0) to BOTH seeded archetypes. Covers AI-Validation item 8.
 - Gate: build clean; `./build/tests` → 2256 checks, 0 failures. combat.cpp clean.
+
+### Step 15 — DoT status effect ✅
+- `combat.hpp`: kDotDamage=2, kDotDuration=2. `combat.cpp`: extracted
+  `defeatHostile` (shared by both defeat checks); `applyDot` (fixed magnitude via
+  damageEntity, not resistance-scaled, independent of CC). resolveCast 'dot' effect
+  → applyStatus(enemy,'dot',mag,dur). resolveCombat DoT lane: applyDot → **defeat
+  check after DoT** (a DoT kill removes the enemy same-tick, never lingers at 0) →
+  status countdown.
+- render 'dot' template ("smoulders"). Seeds gain `ember` (effect 'dot', element
+  fire, cd 3).
+- `testCombatDoT`: cast ember burns tick 1, stun (survive) → tick 2, wait → expired;
+  exactly kDotDuration 'dot' events each of magnitude kDotDamage. With Step 10's CC
+  this closes AI-Validation item 9.
+- Gate: build clean; `./build/tests` → 2276 checks, 0 failures. combat.cpp clean.
 </content>
 </invoke>

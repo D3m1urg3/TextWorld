@@ -994,6 +994,47 @@ static void testCombatElements() {
     }
 }
 
+// Damage-over-time (REQ-COMBAT-19): a DoT applies its fixed damage for exactly
+// its duration, then stops. Stun keeps the player alive so the DoT can be
+// observed in isolation. Deterministic.
+static void testCombatDoT() {
+    const TempDbFile worldPath("textworld_combat_dot_tests.db");
+    Db db = openWorld(worldPath.string(), "tests/combat_fixture.sql");
+    db.exec("INSERT INTO known_spells(entity, spell) VALUES (3, 'ember')");
+
+    auto goblinHp = [&] {
+        return queryInt(db, "SELECT current FROM health WHERE entity = 7");
+    };
+    auto dotEvents = [&] {
+        return queryInt(db, "SELECT COUNT(*) FROM events WHERE verb = 'dot'");
+    };
+
+    CHECK(runTurn(db, "go north").outcome == TurnOutcome::Ticked);  // corridor
+    CHECK(goblinHp() == 8);
+
+    // Cast ember: the DoT is laid and burns its first tick this turn.
+    {
+        const std::string out = runTurn(db, "cast ember").output;
+        CHECK(goblinHp() == 8 - kDotDamage);
+        CHECK(dotEvents() == 1);
+        CHECK(contains(out, "smoulders"));  // render template
+    }
+    // Stun the goblin (keeps the player safe); the DoT still burns its 2nd tick.
+    CHECK(runTurn(db, "cast stun").outcome == TurnOutcome::Ticked);
+    CHECK(goblinHp() == 8 - 2 * kDotDamage);
+    CHECK(dotEvents() == 2);
+
+    // The DoT has now expired (duration 2): no further damage, no further events.
+    CHECK(runTurn(db, "wait").outcome == TurnOutcome::Ticked);
+    CHECK(goblinHp() == 8 - 2 * kDotDamage);  // unchanged
+    CHECK(dotEvents() == kDotDuration);        // exactly its duration, then stops
+
+    // Every DoT tick dealt exactly the fixed magnitude.
+    CHECK(queryInt(db,
+                   ("SELECT COUNT(*) FROM events WHERE verb = 'dot' AND object = " +
+                    std::to_string(kDotDamage)).c_str()) == kDotDuration);
+}
+
 // Engine-appended status line: HP + per-spell cooldown readiness (REQ-COMBAT-15).
 // Present in combat, absent outside it, and the SAME shared helper both render
 // paths append (byte-identical). Deterministic.
@@ -3983,6 +4024,7 @@ int main() {
     testCombatCounter();
     testCombatStatusLine();
     testCombatElements();
+    testCombatDoT();
     testRender();
     testExitDisplayInvariant();
     testLoop();

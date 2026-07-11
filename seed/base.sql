@@ -87,7 +87,8 @@ INSERT INTO spell_catalog(spell, element, cooldown, tier, effect) VALUES
   ('stun', NULL, 3, 1, 'stun'),
   ('fire', 'fire', 2, 1, 'damage'),      -- elemental damage (element lock key)
   ('frost', 'frost', 2, 1, 'frost'),     -- elemental damage + a slow (CC)
-  ('dispel', NULL, 3, 2, 'dispel');      -- strips a barrier (defense lock key)
+  ('dispel', NULL, 3, 2, 'dispel'),      -- strips a barrier (defense lock key)
+  ('ember', 'fire', 3, 1, 'dot');        -- damage-over-time (a multiplicity key)
 
 -- Resistance table: integer ratios (num/den), no floats, no RNG. A missing
 -- (archetype, element) row means neutral (1/1). The rime-touched archetype is

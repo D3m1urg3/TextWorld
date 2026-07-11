@@ -76,7 +76,8 @@ INSERT INTO spell_catalog(spell, element, cooldown, tier, effect) VALUES
   ('stun', NULL, 3, 1, 'stun'),
   ('fire', 'fire', 2, 1, 'damage'),
   ('frost', 'frost', 2, 1, 'frost'),
-  ('dispel', NULL, 3, 2, 'dispel');
+  ('dispel', NULL, 3, 2, 'dispel'),
+  ('ember', 'fire', 3, 1, 'dot');
 
 -- Resistance: rime-touched is weak to Fire (2x), resists Frost (1/2x).
 INSERT INTO resistance(archetype, element, multiplier_num, multiplier_den) VALUES

@@ -39,6 +39,11 @@ inline constexpr int64_t kSpellDamage = 4;
 // shorter reach than Stun, and it does not cancel a pending strike).
 inline constexpr int64_t kSlowDuration = 2;
 
+// Damage-over-time: fixed damage per tick, for a fixed number of ticks
+// (REQ-COMBAT-19). Engine-owned constants; the DoT is not resistance-scaled.
+inline constexpr int64_t kDotDamage = 2;
+inline constexpr int64_t kDotDuration = 2;
+
 // The living hostile (health.current > 0) sharing `room`, or 0 if none (lowest
 // entity id when several). Read-only. Exposed so resolveGo can refuse a flee into
 // an ungenerated exit while an enemy is present (REQ-COMBAT-26).
