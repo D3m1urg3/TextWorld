@@ -84,4 +84,15 @@ INSERT INTO location(entity, container) VALUES (7, 2);
 -- Brick 3. cooldown measured on the global tick clock; never reduced.
 INSERT INTO spell_catalog(spell, element, cooldown, tier, effect) VALUES
   ('ward', NULL, 2, 1, 'ward'),
-  ('stun', NULL, 3, 1, 'stun');
+  ('stun', NULL, 3, 1, 'stun'),
+  ('fire', 'fire', 2, 1, 'damage'),      -- elemental damage (element lock key)
+  ('frost', 'frost', 2, 1, 'frost'),     -- elemental damage + a slow (CC)
+  ('dispel', NULL, 3, 2, 'dispel');      -- strips a barrier (defense lock key)
+
+-- Resistance table: integer ratios (num/den), no floats, no RNG. A missing
+-- (archetype, element) row means neutral (1/1). The rime-touched archetype is
+-- the element lock: weak to Fire (2x), shrugs off Frost (1/2x). Its INSTANCE is
+-- placed in Step 14; the archetype-level ratios live here.
+INSERT INTO resistance(archetype, element, multiplier_num, multiplier_den) VALUES
+  ('rime_touched', 'fire', 2, 1),
+  ('rime_touched', 'frost', 1, 2);

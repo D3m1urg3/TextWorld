@@ -36,6 +36,12 @@ CREATE TABLE pending_strike(entity INTEGER PRIMARY KEY, damage INTEGER, element 
 CREATE TABLE status_effects(entity INTEGER, kind TEXT, magnitude INTEGER,
                             remaining INTEGER, PRIMARY KEY(entity, kind));  -- DoT / CC, ticks down each tick
 
+-- combat: elements, defense lock, grimoire→spell bridge
+CREATE TABLE resistance(archetype TEXT, element TEXT, multiplier_num INTEGER,
+                        multiplier_den INTEGER, PRIMARY KEY(archetype, element));  -- integer ratio: no floats, no RNG
+CREATE TABLE barrier(entity INTEGER PRIMARY KEY);              -- defense-lock state (row exists = warded)
+CREATE TABLE grimoire(entity INTEGER PRIMARY KEY, spell TEXT); -- the dropped item → spell it teaches
+
 -- the event log (append-only)
 CREATE TABLE events(
   id INTEGER PRIMARY KEY,

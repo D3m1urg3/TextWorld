@@ -340,6 +340,26 @@ static void testCombatSchema() {
     // The seed enemy carries a telegraph_period constant.
     CHECK(queryInt(db,
                    "SELECT telegraph_period FROM hostile WHERE entity = 7") > 0);
+
+    // --- Brick 3 tables: elements, defense lock, grimoire bridge ---
+    CHECK(queryInt(db, "SELECT COUNT(*) FROM pragma_table_info('resistance') "
+                       "WHERE name IN ('archetype','element','multiplier_num',"
+                       "'multiplier_den')") == 4);
+    CHECK(queryInt(db, "SELECT COUNT(*) FROM pragma_table_info('barrier') "
+                       "WHERE name = 'entity'") == 1);
+    CHECK(queryInt(db, "SELECT COUNT(*) FROM pragma_table_info('grimoire') "
+                       "WHERE name IN ('entity','spell')") == 2);
+
+    // Resistance rows are integer ratios (num/den, both non-zero) — no floats.
+    CHECK(queryInt(db, "SELECT COUNT(*) FROM resistance") >= 1);
+    CHECK(queryInt(db,
+                   "SELECT COUNT(*) FROM resistance "
+                   "WHERE multiplier_num > 0 AND multiplier_den > 0") ==
+          queryInt(db, "SELECT COUNT(*) FROM resistance"));
+    // The rime-touched weakness/resistance ratios are seeded.
+    CHECK(queryInt(db,
+                   "SELECT multiplier_num FROM resistance "
+                   "WHERE archetype = 'rime_touched' AND element = 'fire'") == 2);
 }
 
 static void testParser() {

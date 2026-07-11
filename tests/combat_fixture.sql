@@ -59,7 +59,16 @@ INSERT INTO name(entity, value) VALUES (7, 'goblin grunt');
 INSERT INTO description(entity, prose) VALUES (7, 'A scrawny goblin in stolen leathers.');
 INSERT INTO location(entity, container) VALUES (7, 2);
 
--- Spell catalog: engine-owned constants. The player knows ward + stun (above).
+-- Spell catalog: engine-owned constants. The player knows ward + stun (above);
+-- fire/frost/dispel are learned from grimoires (Step 18).
 INSERT INTO spell_catalog(spell, element, cooldown, tier, effect) VALUES
   ('ward', NULL, 2, 1, 'ward'),
-  ('stun', NULL, 3, 1, 'stun');
+  ('stun', NULL, 3, 1, 'stun'),
+  ('fire', 'fire', 2, 1, 'damage'),
+  ('frost', 'frost', 2, 1, 'frost'),
+  ('dispel', NULL, 3, 2, 'dispel');
+
+-- Resistance: rime-touched is weak to Fire (2x), resists Frost (1/2x).
+INSERT INTO resistance(archetype, element, multiplier_num, multiplier_den) VALUES
+  ('rime_touched', 'fire', 2, 1),
+  ('rime_touched', 'frost', 1, 2);

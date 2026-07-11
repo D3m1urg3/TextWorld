@@ -37,7 +37,7 @@ in `./build/tests`.
 - [x] 12 — status line (cooldowns) → `testCombatStatusLine` ✅ **(Brick 2 done)**
 
 **BRICK 3 — Elements / four-lock closure / learning economy**
-- [ ] 13 — schema: elements+locks+grimoire → `testCombatSchema` ext.
+- [x] 13 — schema: elements+locks+grimoire → `testCombatSchema` ext. ✅
 - [ ] 14 — element+resist+Fire/Frost → `testCombatElements`
 - [ ] 15 — DoT → `testCombatDoT`
 - [ ] 16 — defense lock (barrier/Dispel) → `testCombatDefenseLock`
@@ -281,5 +281,22 @@ in `./build/tests`.
 - Gate: build clean; `./build/tests` → 2215 checks, 0 failures.
 
 ## BRICK 2 COMPLETE — telegraph/counter/Cast/cooldowns; the timing puzzle works.
+
+### Step 13 — schema: elements, resistances, barrier, grimoire (+ bump) ✅
+- `world.cpp`: `resistance(archetype, element, multiplier_num, multiplier_den)`
+  (integer ratio — no floats/RNG), `barrier(entity PK)`, `grimoire(entity PK,
+  spell)`. Version 3 → 4.
+- Seed (both): spell_catalog += fire('damage'), frost('frost'), dispel('dispel',
+  tier2); resistance rows rime_touched weak-fire 2/1, resist-frost 1/2 (archetype
+  data — instance placed Step 14). barrier/grimoire tables start empty (ironhide's
+  barrier row is Step 16 per plan; grimoire rows written by dropGrimoire in Step 18).
+- **Divergence (noted):** plan had Step 13 seed the ironhide/book_swarm INSTANCES
+  into base.sql. Deferred: archetype-level catalog/resistance data seeded now in
+  both seeds; enemy instances go in combat_fixture.sql at their behavior steps
+  (14/16/17) and base.sql's full roster is assembled in Step 19 (where the plan
+  already re-expresses all four via placeEnemy). Keeps the curated Thornmere world
+  + testShippedSeedShape stable until the coherent Step-19 assembly.
+- `testCombatSchema`: three tables' columns; resistance rows are non-zero integer
+  ratios; rime fire ratio == 2. Gate: build clean; 2228 checks, 0 failures.
 </content>
 </invoke>
