@@ -29,7 +29,7 @@ in `./build/tests`.
 - [x] 6 — narration + template + HP status line → `testCombatRender` ✅ **(Brick 1 done)**
 
 **BRICK 2 — Telegraph / counter / Cast / cooldowns**
-- [ ] 7 — schema: telegraph+cooldown+spells → `testCombatSchema` ext.
+- [x] 7 — schema: telegraph+cooldown+spells → `testCombatSchema` ext. ✅
 - [ ] 8 — telegraph→strike lane → `testCombatTelegraph`
 - [ ] 9 — `Verb::Cast` + cooldown gate → `testCombatCastGate`
 - [ ] 10 — counters Ward/Stun → `testCombatCounter`
@@ -171,5 +171,19 @@ in `./build/tests`.
 - Gate: build clean; `./build/tests` → 2078 checks, 0 failures.
 
 ## BRICK 1 COMPLETE — the loop exists, someone can die, fully deterministic/offline.
+
+### Step 7 — schema: telegraph + cooldowns + spells + status effects ✅
+- `world.cpp` SCHEMA_DDL: `hostile` gains `telegraph_period`; five new tables —
+  `spell_catalog(spell PK, element, cooldown, tier, effect)`, `known_spells`,
+  `cooldowns(entity, spell, ready_turn)`, `pending_strike(entity PK, damage,
+  element)`, `status_effects(entity, kind, magnitude, remaining)`. Version 2 → 3.
+- Seed (base.sql + combat_fixture.sql): `spell_catalog` rows ward(cd2)/stun(cd3),
+  both tier 1, no element; player `known_spells` = {ward, stun}; goblin
+  `telegraph_period = 2`. **Spell keys are lowercase** to match the lowercasing
+  parser/resolver input; status line will capitalize for display.
+- `testCombatSchema` now opens `combat_fixture.sql` (DDL shapes + seed content):
+  five tables' columns, hostile now 4 cols, player knows exactly {ward,stun},
+  catalog rows have cooldown>0/tier=1, goblin telegraph_period>0.
+- Gate: build clean; `./build/tests` → 2098 checks, 0 failures.
 </content>
 </invoke>

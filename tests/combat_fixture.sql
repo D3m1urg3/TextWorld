@@ -38,6 +38,7 @@ INSERT INTO player(entity) VALUES (3);
 INSERT INTO name(entity, value) VALUES (3, 'player');
 INSERT INTO location(entity, container) VALUES (3, 1);
 INSERT INTO health(entity, current, max) VALUES (3, 12, 12);
+INSERT INTO known_spells(entity, spell) VALUES (3, 'ward'), (3, 'stun');
 
 -- 4: portable 'wand', in the cell
 INSERT INTO portable(entity) VALUES (4);
@@ -51,9 +52,14 @@ INSERT INTO name(entity, value) VALUES (5, 'key');
 INSERT INTO description(entity, prose) VALUES (5, 'A cold iron key.');
 INSERT INTO location(entity, container) VALUES (5, 2);
 
--- 7: hostile 'goblin grunt', in the corridor
-INSERT INTO hostile(entity, archetype, chip) VALUES (7, 'goblin_grunt', 1);
+-- 7: hostile 'goblin grunt', in the corridor (telegraphs every 2 combat turns)
+INSERT INTO hostile(entity, archetype, chip, telegraph_period) VALUES (7, 'goblin_grunt', 1, 2);
 INSERT INTO health(entity, current, max) VALUES (7, 8, 8);
 INSERT INTO name(entity, value) VALUES (7, 'goblin grunt');
 INSERT INTO description(entity, prose) VALUES (7, 'A scrawny goblin in stolen leathers.');
 INSERT INTO location(entity, container) VALUES (7, 2);
+
+-- Spell catalog: engine-owned constants. The player knows ward + stun (above).
+INSERT INTO spell_catalog(spell, element, cooldown, tier, effect) VALUES
+  ('ward', NULL, 2, 1, 'ward'),
+  ('stun', NULL, 3, 1, 'stun');

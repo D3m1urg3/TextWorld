@@ -284,13 +284,13 @@ static void testShippedSeedShape() {
                    "JOIN player p ON p.entity = hp.entity") == 1);
 }
 
-// Combat schema shape (REQ-COMBAT-4, -5). Grows as later bricks add tables
-// (Steps 7, 13); Step 1 asserts the health + hostile foundation and that a
-// fresh world opens at the bumped SCHEMA_VERSION. Deterministic, no network.
+// Combat schema shape + seeded spell constants. Grows as later bricks add
+// tables (Step 13). Opens the combat fixture so both the DDL shapes AND the
+// seeded spell_catalog / known_spells content are asserted. Deterministic.
 static void testCombatSchema() {
     const TempDbFile worldPath("textworld_combat_schema_tests.db");
 
-    Db db = openWorld(worldPath.string(), "tests/fixture.sql");
+    Db db = openWorld(worldPath.string(), "tests/combat_fixture.sql");
 
     // Fresh world opened at the current (bumped) schema version.
     CHECK(queryInt(db, "SELECT value FROM meta WHERE key = 'schema_version'") ==
@@ -305,14 +305,41 @@ static void testCombatSchema() {
                    "SELECT COUNT(*) FROM pragma_table_info('health') "
                    "WHERE name IN ('entity','current','max')") == 3);
 
-    // hostile(entity, archetype, chip) exists with exactly those columns.
+    // hostile(entity, archetype, chip, telegraph_period).
     CHECK(queryInt(db,
                    "SELECT COUNT(*) FROM sqlite_master "
                    "WHERE type='table' AND name='hostile'") == 1);
-    CHECK(queryInt(db, "SELECT COUNT(*) FROM pragma_table_info('hostile')") == 3);
+    CHECK(queryInt(db, "SELECT COUNT(*) FROM pragma_table_info('hostile')") == 4);
     CHECK(queryInt(db,
                    "SELECT COUNT(*) FROM pragma_table_info('hostile') "
-                   "WHERE name IN ('entity','archetype','chip')") == 3);
+                   "WHERE name IN ('entity','archetype','chip','telegraph_period')") == 4);
+
+    // --- Brick 2 tables: existence + exact columns (REQ-COMBAT-13, -19) ---
+    CHECK(queryInt(db, "SELECT COUNT(*) FROM pragma_table_info('spell_catalog') "
+                       "WHERE name IN ('spell','element','cooldown','tier','effect')") == 5);
+    CHECK(queryInt(db, "SELECT COUNT(*) FROM pragma_table_info('spell_catalog')") == 5);
+    CHECK(queryInt(db, "SELECT COUNT(*) FROM pragma_table_info('known_spells') "
+                       "WHERE name IN ('entity','spell')") == 2);
+    CHECK(queryInt(db, "SELECT COUNT(*) FROM pragma_table_info('cooldowns') "
+                       "WHERE name IN ('entity','spell','ready_turn')") == 3);
+    CHECK(queryInt(db, "SELECT COUNT(*) FROM pragma_table_info('pending_strike') "
+                       "WHERE name IN ('entity','damage','element')") == 3);
+    CHECK(queryInt(db, "SELECT COUNT(*) FROM pragma_table_info('status_effects') "
+                       "WHERE name IN ('entity','kind','magnitude','remaining')") == 4);
+
+    // --- seeded spell constants + the player's starting known_spells ---
+    // The player (entity 3) knows EXACTLY {ward, stun}.
+    CHECK(queryInt(db, "SELECT COUNT(*) FROM known_spells WHERE entity = 3") == 2);
+    CHECK(queryInt(db,
+                   "SELECT COUNT(*) FROM known_spells "
+                   "WHERE entity = 3 AND spell IN ('ward','stun')") == 2);
+    // spell_catalog holds the two constant rows with their fixed cooldowns/tier.
+    CHECK(queryInt(db,
+                   "SELECT COUNT(*) FROM spell_catalog "
+                   "WHERE spell IN ('ward','stun') AND cooldown > 0 AND tier = 1") == 2);
+    // The seed enemy carries a telegraph_period constant.
+    CHECK(queryInt(db,
+                   "SELECT telegraph_period FROM hostile WHERE entity = 7") > 0);
 }
 
 static void testParser() {

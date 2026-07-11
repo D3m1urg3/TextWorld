@@ -41,6 +41,9 @@ INSERT INTO name(entity, value) VALUES (3, 'player');
 INSERT INTO location(entity, container) VALUES (3, 1);
 -- The player carries health like every combatant (REQ-COMBAT-4). Seed canon.
 INSERT INTO health(entity, current, max) VALUES (3, 12, 12);
+-- A student starts knowing the two basic counters, so the telegraph/counter
+-- puzzle is exercisable from a fresh world (REQ-COMBAT-7). Learned = canon.
+INSERT INTO known_spells(entity, spell) VALUES (3, 'ward'), (3, 'stun');
 
 -- 4: portable 'candle', in the dormitory cell
 INSERT INTO portable(entity) VALUES (4);
@@ -68,9 +71,17 @@ INSERT INTO location(entity, container) VALUES (6, 1);
 -- clock. Numbers are per-instance literals here (micro-decision 4); Brick 4's
 -- bestiary catalog becomes the mold these are cast from. archetype tag =
 -- 'goblin_grunt'.
-INSERT INTO hostile(entity, archetype, chip) VALUES (7, 'goblin_grunt', 1);
+INSERT INTO hostile(entity, archetype, chip, telegraph_period) VALUES (7, 'goblin_grunt', 1, 2);
 INSERT INTO health(entity, current, max) VALUES (7, 8, 8);
 INSERT INTO name(entity, value) VALUES (7, 'goblin grunt');
 INSERT INTO description(entity, prose) VALUES (7,
   'A scrawny goblin in stolen leathers, one of the invaders come up from the breached lower halls. It bares its teeth and shifts its weight, watching for an opening.');
 INSERT INTO location(entity, container) VALUES (7, 2);
+
+-- Spell catalog: engine-owned constants (REQ-COMBAT-13, -14). Keys are the
+-- lowercase words the parser/resolver lower to. Ward blocks a telegraphed
+-- strike; Stun interrupts it. Elemental keys (Fire/Frost/Dispel/AoE) arrive in
+-- Brick 3. cooldown measured on the global tick clock; never reduced.
+INSERT INTO spell_catalog(spell, element, cooldown, tier, effect) VALUES
+  ('ward', NULL, 2, 1, 'ward'),
+  ('stun', NULL, 3, 1, 'stun');

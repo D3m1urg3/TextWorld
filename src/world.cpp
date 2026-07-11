@@ -23,7 +23,18 @@ CREATE TABLE exits(room INTEGER, direction TEXT, dest INTEGER, PRIMARY KEY(room,
 
 -- combat components (see .lore/work/specs/combat-and-enemies.md)
 CREATE TABLE health(entity INTEGER PRIMARY KEY, current INTEGER, max INTEGER);   -- current clamped [0,max] in code
-CREATE TABLE hostile(entity INTEGER PRIMARY KEY, archetype TEXT, chip INTEGER);  -- archetype tag; per-instance chip constant
+CREATE TABLE hostile(entity INTEGER PRIMARY KEY, archetype TEXT, chip INTEGER,   -- archetype tag; per-instance chip constant
+                     telegraph_period INTEGER);                                  -- winds up a strike every N combat turns (0 = never)
+
+-- combat: spells, cooldowns, telegraph/strike, status effects (engine-owned constants)
+CREATE TABLE spell_catalog(spell TEXT PRIMARY KEY, element TEXT, cooldown INTEGER,
+                           tier INTEGER, effect TEXT);      -- the fixed spell constants
+CREATE TABLE known_spells(entity INTEGER, spell TEXT, PRIMARY KEY(entity, spell));  -- canon: learned = permanent
+CREATE TABLE cooldowns(entity INTEGER, spell TEXT, ready_turn INTEGER,
+                       PRIMARY KEY(entity, spell));         -- cast at T → ready_turn = T + cooldown
+CREATE TABLE pending_strike(entity INTEGER PRIMARY KEY, damage INTEGER, element TEXT);  -- row exists = strike pending
+CREATE TABLE status_effects(entity INTEGER, kind TEXT, magnitude INTEGER,
+                            remaining INTEGER, PRIMARY KEY(entity, kind));  -- DoT / CC, ticks down each tick
 
 -- the event log (append-only)
 CREATE TABLE events(
