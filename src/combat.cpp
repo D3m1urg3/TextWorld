@@ -50,6 +50,14 @@ int64_t chipOf(Db& db, int64_t entity) {
     return s.colInt(0);
 }
 
+// Archetype tag of a hostile ("" if it has no hostile row).
+std::string archetypeOf(Db& db, int64_t entity) {
+    Stmt s = db.prepare("SELECT archetype FROM hostile WHERE entity = ?");
+    s.bind(1, entity);
+    if (!s.step()) return "";
+    return s.colText(0);
+}
+
 }  // namespace
 
 void resolveAttack(Db& db, int64_t player) {
@@ -73,11 +81,19 @@ int64_t tickStartHostile(Db& db, int64_t player) {
 void resolveCombat(Db& db, int64_t player, int64_t hostile) {
     if (hostile == 0) return;  // no hostile was present at tick start → no combat
 
-    // Active iff the tick-start hostile is still alive. A player action that
-    // brought it to 0 ends combat this tick; the enemy takes no turn and deals
-    // no chip (its removal + drop is Step 5).
     const std::optional<int64_t> hp = healthOf(db, hostile);
-    if (!hp || *hp <= 0) return;
+    if (!hp) return;  // already removed (shouldn't happen mid-tick) → no-op
+
+    // The player's action this tick may have felled the tick-start hostile. If
+    // so, combat ends now (REQ-COMBAT-3): the enemy takes NO turn and deals no
+    // chip — it is defeated, removed, and drops its grimoire (REQ-COMBAT-20).
+    if (*hp <= 0) {
+        const int64_t room = roomOf(db, hostile);
+        const std::string archetype = archetypeOf(db, hostile);
+        const int64_t grimoire = dropGrimoire(db, archetype, room);
+        defeatEnemy(db, hostile, grimoire, player);
+        return;
+    }
 
     // The enemy's single turn action (REQ-COMBAT-9). Brick 1: idle — the
     // telegraph/strike lane is Step 8. The system still fires: it is the first
@@ -89,5 +105,14 @@ void resolveCombat(Db& db, int64_t player, int64_t hostile) {
     const int64_t chip = chipOf(db, hostile);
     if (chip > 0) {
         damageEntity(db, player, chip, hostile, "chip");
+    }
+
+    // Did the enemy's turn (chip here; a landed strike from Step 8) drop the
+    // player to 0? Then the player is downed, not dead (REQ-COMBAT-23): they
+    // wake in the dormitory cell at full health, having dropped their carried
+    // items where they fell, and the fight resets.
+    const std::optional<int64_t> playerHp = healthOf(db, player);
+    if (playerHp && *playerHp <= 0) {
+        downPlayer(db, player, hostile, kDormitoryCell, player);
     }
 }

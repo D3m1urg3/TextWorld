@@ -14,6 +14,10 @@
 // -18). Engine-owned constant; the model never sets it.
 inline constexpr int64_t kBasicAttackDamage = 4;
 
+// The seed safe room (dormitory cell). A downed player wakes here at full health
+// (REQ-COMBAT-23). Room 1 by seed convention, in both base.sql and the fixtures.
+inline constexpr int64_t kDormitoryCell = 1;
+
 // Resolve a Verb::Attack for `player`: deal kBasicAttackDamage to the living
 // hostile sharing the player's room. No hostile present → a 'failed' event and
 // no world write. Runs inside the caller's ambient tick transaction; writes

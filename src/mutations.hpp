@@ -53,6 +53,32 @@ void moveEntity(Db& db, int64_t what, int64_t toContainer, int64_t actor,
 void damageEntity(Db& db, int64_t target, int64_t amount, int64_t actor,
                   const char* verb);
 
+// Mint a portable grimoire item into `room`, per a fixed archetype → grimoire
+// flavor map (REQ-COMBAT-20; the archetype → SPELL mapping and the grimoire→spell
+// component are Step 18 — here only the ITEM appears). Mints one entity and
+// writes its portable/name/description/location rows. Emits NO event of its own:
+// its appearance is recorded by the paired 'defeated' event that references it
+// (mirroring writeGeneratedRoom's mint-under-one-event precedent). Returns the
+// minted grimoire's entity id. Never begins/commits.
+int64_t dropGrimoire(Db& db, const std::string& archetype, int64_t room);
+
+// Remove a defeated enemy from play (REQ-COMBAT-20, -30): delete its hostile,
+// health, and location rows — the entity id and its name/description SURVIVE, so
+// "defeated" is the persistent absence of hostile/location, not deletion from
+// `entities`. Appends one 'defeated' event (actor, subject = enemy, object =
+// droppedItem — the grimoire dropGrimoire just minted, so narration can name
+// it). Never begins/commits.
+void defeatEnemy(Db& db, int64_t enemy, int64_t droppedItem, int64_t actor);
+
+// The "downed, not dead" model (REQ-COMBAT-23, -24, -25), inside the caller's
+// transaction. In order: drop every portable the player carries at the fall room
+// (each a 'dropped' event); relocate the player to `safeRoom`; restore the
+// player's health to max; restore `enemy`'s health to max (the fight resets).
+// `known_spells` is never touched (knowledge is permanent). Appends one 'downed'
+// event (actor, subject = player, object = safeRoom). Never begins/commits.
+void downPlayer(Db& db, int64_t player, int64_t enemy, int64_t safeRoom,
+                int64_t actor);
+
 // The SOLE sanctioned write path for a generated room (REQ-ARCH-9), inside the
 // caller's ambient transaction. The model proposes flavor; the engine disposes:
 // this helper MINTS one entity (the first runtime entity mint), writes its

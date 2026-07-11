@@ -672,6 +672,94 @@ static void testCombatChipClock() {
                    "SELECT COUNT(*) FROM events WHERE turn = 3 AND verb = 'chip'") == 1);
 }
 
+// Defeat + grimoire drop (REQ-COMBAT-20, -30). Driving the seed enemy to 0 hp
+// removes it from play (its entity id and name survive) and mints a portable
+// grimoire into the room.
+static void testCombatDefeat() {
+    const TempDbFile worldPath("textworld_combat_defeat_tests.db");
+    Db db = openWorld(worldPath.string(), "tests/combat_fixture.sql");
+
+    const int64_t portablesInCorridorBefore =
+        queryInt(db,
+                 "SELECT COUNT(*) FROM portable p JOIN location l ON l.entity = p.entity "
+                 "WHERE l.container = 2");
+
+    // Into the corridor, then attack until the 8-hp goblin falls (2 hits at 4).
+    CHECK(runTurn(db, "go north").outcome == TurnOutcome::Ticked);
+    CHECK(runTurn(db, "attack").outcome == TurnOutcome::Ticked);  // 8 -> 4, alive
+    CHECK(queryInt(db, "SELECT current FROM health WHERE entity = 7") == 4);
+    CHECK(runTurn(db, "attack").outcome == TurnOutcome::Ticked);  // 4 -> 0, defeated
+
+    // Removed from play: hostile/health/location gone; the entity id and its
+    // name SURVIVE (defeat is absence of hostile/location, not deletion).
+    CHECK(queryInt(db, "SELECT COUNT(*) FROM hostile WHERE entity = 7") == 0);
+    CHECK(queryInt(db, "SELECT COUNT(*) FROM health WHERE entity = 7") == 0);
+    CHECK(queryInt(db, "SELECT COUNT(*) FROM location WHERE entity = 7") == 0);
+    CHECK(queryInt(db, "SELECT COUNT(*) FROM entities WHERE id = 7") == 1);
+    CHECK(queryInt(db, "SELECT COUNT(*) FROM name WHERE entity = 7") == 1);
+
+    // A portable grimoire dropped into the corridor (room 2).
+    CHECK(queryInt(db,
+                   "SELECT COUNT(*) FROM portable p "
+                   "JOIN location l ON l.entity = p.entity "
+                   "JOIN name n ON n.entity = p.entity "
+                   "WHERE l.container = 2 AND n.value LIKE '%grimoire%'") == 1);
+    CHECK(queryInt(db,
+                   "SELECT COUNT(*) FROM portable p "
+                   "JOIN location l ON l.entity = p.entity WHERE l.container = 2") ==
+          portablesInCorridorBefore + 1);
+
+    // One 'defeated' event, subject = the enemy, object = the dropped grimoire
+    // (a portable, so narration can name it in Step 6).
+    CHECK(queryInt(db,
+                   "SELECT COUNT(*) FROM events WHERE verb = 'defeated' AND subject = 7") == 1);
+    CHECK(queryInt(db,
+                   "SELECT COUNT(*) FROM events e JOIN portable p ON p.entity = e.object "
+                   "WHERE e.verb = 'defeated' AND e.subject = 7") == 1);
+}
+
+// The "downed, not dead" model (REQ-COMBAT-23, -24, -25). Chip the player to 0
+// and they wake in the dormitory cell at full health, having dropped their
+// carried items where they fell; the enemy is restored and stays put.
+static void testCombatDowned() {
+    const TempDbFile worldPath("textworld_combat_downed_tests.db");
+    Db db = openWorld(worldPath.string(), "tests/combat_fixture.sql");
+    const int64_t maxHp = queryInt(db, "SELECT max FROM health WHERE entity = 3");
+    const int64_t enemyMax = queryInt(db, "SELECT max FROM health WHERE entity = 7");
+
+    // Pick up the wand (in the cell), carry it into the corridor.
+    CHECK(runTurn(db, "take wand").outcome == TurnOutcome::Ticked);
+    CHECK(queryInt(db, "SELECT container FROM location WHERE entity = 4") == 3);
+    CHECK(runTurn(db, "go north").outcome == TurnOutcome::Ticked);
+    CHECK(queryInt(db, "SELECT container FROM location WHERE entity = 3") == 2);
+
+    // Wait out the chip clock until downed. The downing tick restores HP and
+    // relocates the player, so loop until they are no longer in the corridor.
+    for (int i = 0;
+         i < 100 &&
+         queryInt(db, "SELECT container FROM location WHERE entity = 3") == 2;
+         ++i) {
+        CHECK(runTurn(db, "wait").outcome == TurnOutcome::Ticked);
+    }
+
+    // Downed: relocated to the dormitory cell (room 1) at full health.
+    CHECK(queryInt(db, "SELECT container FROM location WHERE entity = 3") == 1);
+    CHECK(queryInt(db, "SELECT current FROM health WHERE entity = 3") == maxHp);
+
+    // Dropped the wand at the fall room (the corridor, room 2); nothing deleted.
+    CHECK(queryInt(db, "SELECT container FROM location WHERE entity = 4") == 2);
+    CHECK(queryInt(db, "SELECT COUNT(*) FROM entities WHERE id = 4") == 1);
+
+    // The enemy is restored to full health and remains in its room.
+    CHECK(queryInt(db, "SELECT current FROM health WHERE entity = 7") == enemyMax);
+    CHECK(queryInt(db, "SELECT container FROM location WHERE entity = 7") == 2);
+
+    // Exactly one 'downed' event: subject = player, object = the dormitory cell.
+    CHECK(queryInt(db,
+                   "SELECT COUNT(*) FROM events WHERE verb = 'downed' "
+                   "AND subject = 3 AND object = 1") == 1);
+}
+
 // Substring helper for renderer output checks.
 static bool contains(const std::string& haystack, const std::string& needle) {
     return haystack.find(needle) != std::string::npos;
@@ -3418,6 +3506,8 @@ int main() {
     testSystems();
     testCombatAttack();
     testCombatChipClock();
+    testCombatDefeat();
+    testCombatDowned();
     testRender();
     testExitDisplayInvariant();
     testLoop();

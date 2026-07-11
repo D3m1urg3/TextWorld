@@ -4,6 +4,7 @@
 #include <optional>
 #include <stdexcept>
 #include <string>
+#include <vector>
 
 #include "architect.hpp"  // RoomProposal (full definition) + inverseDirection
 
@@ -70,6 +71,127 @@ void damageEntity(Db& db, int64_t target, int64_t amount, int64_t actor,
     // subject = the damaged entity; object carries the amount dealt (a per-event
     // number, read verb-specifically by render, like moved's destination room).
     appendEvent(db, actor, verb, target, amount, nullptr);
+}
+
+namespace {
+
+// A grimoire's flavor (name + description) for a defeated archetype. Fixed,
+// deterministic content (REQ-COMBAT-20). The archetype → learned-SPELL mapping
+// lands in Step 18 as the grimoire→spell component; this is only the item's
+// costume. Unknown archetypes fall back to a plain grimoire.
+struct GrimoireFlavor {
+    const char* name;
+    const char* description;
+};
+GrimoireFlavor grimoireFlavorFor(const std::string& archetype) {
+    if (archetype == "goblin_grunt") {
+        return {"fire grimoire",
+                "A slim grimoire bound in charred leather, its spine lettered in "
+                "embers that never quite go cold. The rune of Fire glows on the "
+                "cover."};
+    }
+    return {"grimoire",
+            "A worn grimoire, its pages dense with a spell you have yet to read."};
+}
+
+}  // namespace
+
+int64_t dropGrimoire(Db& db, const std::string& archetype, int64_t room) {
+    const GrimoireFlavor flavor = grimoireFlavorFor(archetype);
+
+    // Mint one entity (same pattern as writeGeneratedRoom): INSERT DEFAULT then
+    // read the rowid.
+    db.exec("INSERT INTO entities DEFAULT VALUES");
+    int64_t item = 0;
+    {
+        Stmt s = db.prepare("SELECT last_insert_rowid()");
+        if (!s.step()) throw std::runtime_error("dropGrimoire: rowid read failed");
+        item = s.colInt(0);
+    }
+    {
+        Stmt s = db.prepare("INSERT INTO portable(entity) VALUES (?)");
+        s.bind(1, item);
+        s.step();
+    }
+    {
+        Stmt s = db.prepare("INSERT INTO name(entity, value) VALUES (?, ?)");
+        s.bind(1, item);
+        s.bind(2, std::string(flavor.name));
+        s.step();
+    }
+    {
+        Stmt s = db.prepare("INSERT INTO description(entity, prose) VALUES (?, ?)");
+        s.bind(1, item);
+        s.bind(2, std::string(flavor.description));
+        s.step();
+    }
+    {
+        Stmt s = db.prepare("INSERT INTO location(entity, container) VALUES (?, ?)");
+        s.bind(1, item);
+        s.bind(2, room);
+        s.step();
+    }
+    return item;  // no event: the paired 'defeated' event records the drop
+}
+
+void defeatEnemy(Db& db, int64_t enemy, int64_t droppedItem, int64_t actor) {
+    // Remove from play WITHOUT deleting the entity id or its name/description:
+    // defeat is the persistent absence of hostile + location (REQ-COMBAT-30).
+    for (const char* table : {"hostile", "health", "location"}) {
+        Stmt s = db.prepare(
+            ("DELETE FROM " + std::string(table) + " WHERE entity = ?").c_str());
+        s.bind(1, enemy);
+        s.step();
+    }
+    appendEvent(db, actor, "defeated", enemy, droppedItem, nullptr);
+}
+
+void downPlayer(Db& db, int64_t player, int64_t enemy, int64_t safeRoom,
+                int64_t actor) {
+    const int64_t fallRoom = [&] {
+        Stmt s = db.prepare("SELECT container FROM location WHERE entity = ?");
+        s.bind(1, player);
+        if (!s.step()) throw std::runtime_error("downPlayer: player has no location");
+        return s.colInt(0);
+    }();
+
+    // Drop every carried portable at the fall room (REQ-COMBAT-24): knowledge is
+    // permanent, possessions are droppable. Collect ids first, then move — never
+    // mutate a table mid-iteration over it.
+    std::vector<int64_t> carried;
+    {
+        Stmt s = db.prepare(
+            "SELECT p.entity FROM portable p "
+            "JOIN location l ON l.entity = p.entity "
+            "WHERE l.container = ? ORDER BY p.entity");
+        s.bind(1, player);
+        while (s.step()) carried.push_back(s.colInt(0));
+    }
+    for (const int64_t item : carried) {
+        moveEntity(db, item, fallRoom, actor, "dropped");
+    }
+
+    // Relocate the player to the safe room and restore health (a raw location
+    // write recorded by the single 'downed' event below, not a 'moved').
+    {
+        Stmt s = db.prepare("UPDATE location SET container = ? WHERE entity = ?");
+        s.bind(1, safeRoom);
+        s.bind(2, player);
+        s.step();
+    }
+    {
+        Stmt s = db.prepare("UPDATE health SET current = max WHERE entity = ?");
+        s.bind(1, player);
+        s.step();
+    }
+    // The enemy that downed the player is restored to its initial combat state
+    // (REQ-COMBAT-25): full health here; pending-strike reset joins in Step 8.
+    {
+        Stmt s = db.prepare("UPDATE health SET current = max WHERE entity = ?");
+        s.bind(1, enemy);
+        s.step();
+    }
+    appendEvent(db, actor, "downed", player, safeRoom, nullptr);
 }
 
 int64_t writeGeneratedRoom(Db& db, int64_t originRoom,

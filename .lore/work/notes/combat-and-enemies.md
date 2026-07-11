@@ -25,7 +25,7 @@ in `./build/tests`.
 - [x] 2 — seed hand-placed enemy → `testShippedSeedShape` ext. ✅
 - [x] 3 — `Verb::Attack` + `resolveAttack` + `damageEntity` → `testCombatAttack` ✅
 - [x] 4 — enemy-turn system + chip lane → `testCombatChipClock` ✅
-- [ ] 5 — defeat + grimoire drop + downed → `testCombatDefeat`, `testCombatDowned`
+- [x] 5 — defeat + grimoire drop + downed → `testCombatDefeat`, `testCombatDowned` ✅
 - [ ] 6 — narration + template + HP status line → `testCombatRender`
 
 **BRICK 2 — Telegraph / counter / Cast / cooldowns**
@@ -128,5 +128,27 @@ in `./build/tests`.
   turn, actor=enemy→subject=player, and player's event precedes enemy's by id.
 - Gate: build clean; `./build/tests` → 1981 checks, 0 failures. combat.cpp raw-write
   grep still empty.
+
+### Step 5 — defeat + grimoire drop + downed model ✅
+- `mutations.{hpp,cpp}`: `dropGrimoire(archetype, room)` mints a portable grimoire
+  (fixed archetype→flavor map; goblin_grunt → "fire grimoire") and returns its id;
+  `defeatEnemy(enemy, droppedItem, actor)` deletes hostile/health/location (entity
+  + name survive, REQ-COMBAT-30) and emits one 'defeated' event (object=grimoire);
+  `downPlayer(player, enemy, safeRoom, actor)` drops carried portables at the fall
+  room, relocates player to safeRoom, restores player + enemy to full health, emits
+  'downed'.
+- **Event-shape decision:** grimoire drop is recorded by the 'defeated' event
+  (object = minted grimoire), NOT its own verb — mirrors writeGeneratedRoom's
+  mint-under-one-event, and keeps the Brick-1 verb set = {attacked,chip,defeated,
+  downed} exactly as Step 6 enumerates.
+- `combat.hpp`: `kDormitoryCell = 1` (seed safe room). `combat.cpp` resolveCombat
+  now branches: tick-start hostile at 0 hp → defeat+drop (no enemy turn); else
+  idle+chip, then if the player hit 0 → downPlayer. `archetypeOf` reader added.
+- Tests: `testCombatDefeat` (rows gone / entity+name survive / grimoire in corridor
+  / defeated event refs a portable); `testCombatDowned` (carry wand in, chip to 0,
+  wake in cell at full HP, wand at fall room, enemy restored & room-bound, one
+  downed event).
+- Gate: build clean; `./build/tests` → 2052 checks, 0 failures. combat.cpp raw-write
+  grep empty. AI-Validation items 3 & 11 (known_spells clause deferred to Step 18).
 </content>
 </invoke>
