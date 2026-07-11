@@ -6,7 +6,7 @@ A single-player conversational text adventure where a deterministic game engine 
 
 ## Current state
 
-The **engine foundation**, the **AI prose renderer**, the **AI action resolver** — the input-side mirror of narration — and the **AI architect**, which grows the world at its unmapped edges, over a hand-authored starting world.
+The **engine foundation**, the **AI prose renderer**, the **AI action resolver** — the input-side mirror of narration — the **AI architect**, which grows the world at its unmapped edges, and a **deterministic combat system** — enemies as locks, spells as keys — that the architect populates as a self-balancing invasion front, over a hand-authored starting world.
 
 - SQLite is the live world store — the world *is* the database file (`world.db`).
 - One turn = one tick = one SQLite transaction. No world write ever happens outside a tick.
@@ -20,7 +20,9 @@ The **engine foundation**, the **AI prose renderer**, the **AI action resolver**
 
 **AI world generation** is the first *read-write* AI feature — the world is no longer fixed at two rooms. A room's exits are **declared at its birth**: every direction is either a real opening or a wall, fixed when the room is written. An opening whose room does not exist yet is **latent**, and walking it is what triggers generation. With AI enabled, walking a latent exit generates one new room, coherent with the setting (a hand-authored `seed/setting.txt` loaded into canon at init) and with the room you are leaving, writes it to canon, and moves you in. The model co-authors the room's prose *and* the directions that lead onward from it via Claude tool-use; the engine mints the id, adds the reciprocal exit back, plants each declared direction as its own latent exit, and enforces every invariant (invertible directions only, no duplicates, the return exit is the engine's), so the model never invents structure and never sees an id. A generated room is permanent — walk back and forth and it is the same room, never regenerated. A direction the room never declared is a hard wall; a latent exit under a disabled AI or a failed generation falls back to the original `You can't go that way.` while staying open and retryable — so an edge behaves exactly as it does today whenever generation can't run. The write is confined to one sanctioned engine helper; the architect translation unit itself issues no raw SQL.
 
-There are no NPCs and no puzzles yet, and the setting is static — a hand-authored seed, not a live storyteller evolving the world's facts. The fixed-verb parser is no longer a throwaway harness — it is the **permanent deterministic fallback** for input, the input-side analog of the template renderer: it handles every line when the resolver is disabled, declines, or fails.
+**Combat** is a deterministic **puzzle**: enemies are locks, spells are keys, and the engine owns every number — there is no RNG anywhere. It rides the same tick model (one prompt = one tick = one transaction) and the same seams — new verbs, engine-owned mutation helpers, template + AI narration — so a fight is just more events in the same transcript. See [Combat](#combat) below.
+
+There are no NPCs and no dialogue yet, and the setting is static — a hand-authored seed, not a live storyteller evolving the world's facts. The fixed-verb parser is no longer a throwaway harness — it is the **permanent deterministic fallback** for input, the input-side analog of the template renderer: it handles every line when the resolver is disabled, declines, or fails.
 
 ## Building
 
@@ -41,7 +43,7 @@ Run the game from the directory where you want the world file to live:
 ./build/textworld
 ```
 
-On first launch it creates `world.db` and seeds the starting world: a dormitory cell and a night-dark corridor, a white candle, a cold iron key, and an ashwood wand. On later launches it resumes exactly where you left off.
+On first launch it creates `world.db` and seeds the starting world: a dormitory cell and a night-dark corridor, a white candle, a cold iron key, an ashwood wand — and a goblin grunt in the corridor, one of the invaders come up from the breached lower halls. On later launches it resumes exactly where you left off.
 
 ### Commands
 
@@ -52,12 +54,15 @@ On first launch it creates `world.db` and seeds the starting world: a dormitory 
 | `take <item>` | Pick up a portable item in the room |
 | `drop <item>` | Drop a carried item |
 | `inventory` | List carried items |
+| `attack` | Strike the hostile in the room (always available, fixed damage) |
+| `cast <spell>` | Cast a known spell that is off cooldown (e.g. `cast ward`) |
+| `read <grimoire>` | Study a dropped grimoire to learn its spell, permanently |
 | `wait` | Pass time |
 | `quit` | Exit the game |
 
 Every command except `quit` consumes a turn — including failed attempts the world understands, like walking into a wall.
 
-With AI enabled (see below), you can type these as natural phrasings too — `pick up the candle`, `head north`, `grab the key` — and the resolver lowers them to the actions above. Anything it can't map falls through to the fixed verbs, and a line neither can resolve is declined without consuming a turn.
+With AI enabled (see below), you can type these as natural phrasings too — `pick up the candle`, `head north`, `grab the key`, `swing at the goblin`, `burn it` — and the resolver lowers them to the actions above. Anything it can't map falls through to the fixed verbs, and a line neither can resolve is declined without consuming a turn.
 
 With AI enabled you can also walk *off the edge of the map*: the `Exits:` line lists exactly the directions you can act on, and walking one whose room does not exist yet builds it on the spot and steps you through — see [AI world generation](#ai-world-generation) below. Without AI those not-yet-built exits are hidden, and that same move is the usual `You can't go that way.`
 
@@ -89,6 +94,23 @@ The setting lives in `seed/setting.txt` — a freeform prose document describing
 
 Deferred for now: a live storyteller that evolves the setting, coarse-to-fine level-of-detail with background prefetch (generation currently stalls the turn for one round trip), a world-size cap, and de-duplicating rooms that should be the same place. The world grows as a **tree** — every declared exit spawns a brand-new room, so no two openings ever lead to the same place.
 
+### Combat
+
+Combat is a **deterministic puzzle**, not a dice game. Enemies are locks and spells are keys; the engine owns every quantity — damage, health, cooldowns, resistances — and **no RNG** is involved anywhere, so the same inputs always produce the same fight. It needs no AI: the whole system runs in template + fixed-verb mode.
+
+You are in combat implicitly whenever a hostile shares your room. Each tick you take **one** action — `attack`, or `cast` a spell (never both) — and then every hostile present takes its single turn, all inside the one transaction. A **chip** of fixed damage lands every tick regardless, so health is a **clock**: even flawless play costs something, and a fight you can't solve is a fight you'll lose. `attack` always deals a fixed, non-zero amount to any enemy, so no encounter is ever a hard deadlock — but grinding through the wrong way is rarely enough.
+
+Enemies express four kinds of **lock**, each answered by the right key:
+
+- **Telegraph** — the enemy winds up a heavy blow one tick before it lands. Your action in that window is the counter: **Ward** negates the strike, **Stun** cancels it outright and interrupts the enemy.
+- **Element** — a resistance/weakness table (exact integer ratios, no floats). The right element hits for extra; the wrong one is shrugged off. A basic attack ignores the table and always deals its floor.
+- **Defense** — a **barrier** negates all damage until **Dispel** strips it: a two-key sequence.
+- **Multiplicity** — a swarm of low-health bodies answered by area damage or a damage-over-time that reaches each of them.
+
+A defeated enemy **drops a grimoire**; `read` it to add its spell to your book — **permanently**, surviving death and restart. That is the *only* progression: power is **keys known, never numbers grown** — there are no levels, no XP, no growable stat anywhere in the schema. Falling to zero health leaves you **downed, not dead**: you wake in the dormitory cell at full health, having dropped what you carried where you fell (your spellbook is never lost), and the enemy resets to its opening state. You can **flee** through an already-generated exit — the enemy takes one parting turn as you go — but never into an ungenerated one. An engine-authored status line reports your health and each spell's cooldown; it is never left to the model.
+
+The shipped world hand-places one goblin so combat is exercisable immediately, and the **architect grows the rest**. A `bestiary` catalog (seed data, like the rooms) is the mold every enemy is cast from: when the architect generates a room it may place at most one enemy, **selecting** an archetype from an engine-computed eligible menu — the model sees only each archetype's short blurb and picks a costume; the engine mints every number by copying the catalog. The menu is gated so the economy can't deadlock (only locks you can already solve, or easy foes that teach a key you lack), seeded by a bootstrap rule (the first spawn is basic-soluble and drops a starter spell), and shaped by an **invasion front**: rooms near the breached core are contested, the far edges are safe. With AI off or on any generation failure, no enemy is placed — the same silent boundary as room generation.
+
 ### World files
 
 - **Reset:** delete `world.db` and relaunch.
@@ -101,7 +123,7 @@ Deferred for now: a live storyteller that evolves the setting, coarse-to-fine le
 ./build/tests
 ```
 
-Runs the engine test suite against temporary world files. Exit code 0 means all tests passed. Coverage includes world seeding, movement, take/drop, world generation (creation, reciprocal exits, architect-declared onward exits as latent stubs, three-state movement across wall/latent/realized exits, truthful exit display, persistence/no-regeneration, and atomic fallback with no orphan rows), all three failure tiers (including mid-tick fault injection and rollback), persistence across reopen, and file-copy portability. All three AI features — the prose renderer, the input resolver, and the architect — are tested with fake HTTP transports, so the default run needs no network and no API key.
+Runs the engine test suite against temporary world files. Exit code 0 means all tests passed. Coverage includes world seeding, movement, take/drop, world generation (creation, reciprocal exits, architect-declared onward exits as latent stubs, three-state movement across wall/latent/realized exits, truthful exit display, persistence/no-regeneration, and atomic fallback with no orphan rows), the full combat system (the enemy-turn tick, chip clock, telegraph/counter, cooldowns, all four lock categories, status effects, the grimoire→learn economy, the downed model, fleeing, the bestiary catalog, the gated eligible menu, architect enemy spawning, and a determinism replay asserting two identical runs produce byte-identical worlds), all three failure tiers (including mid-tick fault injection and rollback), persistence across reopen, and file-copy portability. All three AI features — the prose renderer, the input resolver, and the architect (including its enemy selection) — are tested with fake HTTP transports, so the default run needs no network and no API key.
 
 Live smoke tests for all three AI features hit the real API and are gated behind `TEXTWORLD_AI_LIVE_TEST=1` (with a real `ANTHROPIC_API_KEY`), skipped otherwise:
 
@@ -112,9 +134,9 @@ TEXTWORLD_AI_LIVE_TEST=1 ANTHROPIC_API_KEY=sk-ant-... ./build/tests
 ## Project layout
 
 ```
-src/        engine sources (built into the twcore static library); prose.cpp is the AI renderer, nlresolve.cpp the AI input resolver, architect.cpp the AI world generator
+src/        engine sources (built into the twcore static library); prose.cpp is the AI renderer, nlresolve.cpp the AI input resolver, architect.cpp the AI world generator, combat.cpp the deterministic combat system
 tests/      test suite (hand-rolled micro-harness, no framework)
-seed/       base.sql — the hand-authored starting world; setting.txt — the freeform setting that guides world generation
+seed/       base.sql — the hand-authored starting world and bestiary catalog; setting.txt — the freeform setting (including the invasion premise) that guides world generation
 vendor/     SQLite and nlohmann/json amalgamations
 .lore/      vision, specs, designs, plans, and retros
 ```
