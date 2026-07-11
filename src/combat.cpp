@@ -4,6 +4,7 @@
 #include <optional>
 #include <stdexcept>
 #include <string>
+#include <vector>
 
 #include "mutations.hpp"
 
@@ -159,10 +160,6 @@ void resolveAttack(Db& db, int64_t player) {
     damageEntity(db, enemy, kBasicAttackDamage, player, "attacked");
 }
 
-int64_t tickStartHostile(Db& db, int64_t player) {
-    return hostileInRoom(db, roomOf(db, player));
-}
-
 std::optional<std::string> castDenialReason(Db& db, int64_t player,
                                             const std::string& spell) {
     if (spell.empty()) return std::string("You don't know that spell.");
@@ -249,8 +246,24 @@ void resolveCast(Db& db, int64_t player, const std::string& spell) {
         // land — the first key of a two-key sequence (Dispel → any damage).
         removeBarrier(db, enemy);
         appendEvent(db, player, "dispelled", enemy, 0, nullptr);
+    } else if (effect == "aoe") {
+        // Multiplicity lock (REQ-COMBAT-17): reach EVERY body in the room in one
+        // tick — fixed AoE damage plus a lingering DoT on each, the keys that
+        // answer a swarm. Deterministic order by id.
+        std::vector<int64_t> bodies;
+        {
+            Stmt s = db.prepare(
+                "SELECT h.entity FROM hostile h "
+                "JOIN location l ON l.entity = h.entity "
+                "WHERE l.container = ? ORDER BY h.entity");
+            s.bind(1, roomOf(db, player));
+            while (s.step()) bodies.push_back(s.colInt(0));
+        }
+        for (const int64_t body : bodies) {
+            damageEntity(db, body, kAoeDamage, player, "aoe");
+            applyStatus(db, body, "dot", kDotDamage, kDotDuration);
+        }
     }
-    // AoE (Step 17) arrives later in Brick 3.
 }
 
 std::string combatStatusLine(Db& db, int64_t player) {
@@ -293,76 +306,82 @@ std::string combatStatusLine(Db& db, int64_t player) {
     return line;
 }
 
-void resolveCombat(Db& db, int64_t player, int64_t hostile) {
-    if (hostile == 0) return;  // no hostile was present at tick start → no combat
+void resolveCombat(Db& db, int64_t player, int64_t startRoom) {
+    if (startRoom == 0) return;
 
-    const std::optional<int64_t> hp = healthOf(db, hostile);
-    if (!hp) return;  // already removed (shouldn't happen mid-tick) → no-op
-
-    // The player's action this tick may have felled the tick-start hostile. If
-    // so, combat ends now (REQ-COMBAT-3): the enemy takes NO turn and deals no
-    // chip — it is defeated, removed, and drops its grimoire (REQ-COMBAT-20).
-    if (*hp <= 0) {
-        defeatHostile(db, hostile, player);
-        return;
+    // Snapshot every hostile in the tick-start room, ordered by id (the swarm
+    // case, REQ-COMBAT-17). Includes bodies the player's action just felled —
+    // their per-body defeat runs below. Ordering is deterministic (no RNG).
+    std::vector<int64_t> bodies;
+    {
+        Stmt s = db.prepare(
+            "SELECT h.entity FROM hostile h "
+            "JOIN location l ON l.entity = h.entity "
+            "WHERE l.container = ? ORDER BY h.entity");
+        s.bind(1, startRoom);
+        while (s.step()) bodies.push_back(s.colInt(0));
     }
+    if (bodies.empty()) return;  // not in combat this tick
 
-    // The enemy's single turn action (REQ-COMBAT-9): the telegraph → strike lane,
-    // driven deterministically by telegraph_period — no RNG. SUPPRESSED entirely
-    // while the enemy is incapacitated by CC (stun or frost's slow, REQ-COMBAT-19).
-    if (!enemyIncapacitated(db, hostile)) {
-        int64_t pendingDamage = 0;
-        if (pendingStrikeDamage(db, hostile, pendingDamage)) {
-            // A wind-up from last turn lands now (REQ-COMBAT-10) — unless the
-            // player's counter this tick was a Ward, which negates it and is
-            // consumed (REQ-COMBAT-11).
-            if (hasStatus(db, player, "ward")) {
-                clearStatus(db, player, "ward");
-                appendEvent(db, hostile, "warded", player, 0, nullptr);
-            } else {
-                damageEntity(db, player, pendingDamage, hostile, "struck");
-            }
-            clearPendingStrike(db, hostile);
-        } else {
-            const int64_t period = telegraphPeriodOf(db, hostile);
-            if (period > 0 && currentTurn(db) % period == 0) {
-                // Telegraph: one-tick wind-up, no damage this tick. The strike
-                // lands next turn (REQ-COMBAT-10). Goblin swing = no element.
-                setPendingStrike(db, hostile, kStrikeDamage, /*element=*/nullptr);
-            }
-            // else idle this turn.
+    for (const int64_t body : bodies) {
+        const std::optional<int64_t> hp = healthOf(db, body);
+        if (!hp) continue;  // already removed
+
+        // Felled by the player's action (attack/AoE) this tick → defeat + drop
+        // now, no turn, no chip (REQ-COMBAT-3, -20). Per body, independently.
+        if (*hp <= 0) {
+            defeatHostile(db, body, player);
+            continue;
         }
+
+        // This body's single turn action (REQ-COMBAT-9): the telegraph → strike
+        // lane, deterministic by telegraph_period. SUPPRESSED while incapacitated
+        // by CC (stun or slow, REQ-COMBAT-19). Swarm bodies (period 0) just idle.
+        if (!enemyIncapacitated(db, body)) {
+            int64_t pendingDamage = 0;
+            if (pendingStrikeDamage(db, body, pendingDamage)) {
+                // A wind-up lands now (REQ-COMBAT-10) — unless a Ward negates it
+                // and is consumed (REQ-COMBAT-11).
+                if (hasStatus(db, player, "ward")) {
+                    clearStatus(db, player, "ward");
+                    appendEvent(db, body, "warded", player, 0, nullptr);
+                } else {
+                    damageEntity(db, player, pendingDamage, body, "struck");
+                }
+                clearPendingStrike(db, body);
+            } else {
+                const int64_t period = telegraphPeriodOf(db, body);
+                if (period > 0 && currentTurn(db) % period == 0) {
+                    setPendingStrike(db, body, kStrikeDamage, /*element=*/nullptr);
+                }
+            }
+        }
+
+        // DoT lane (REQ-COMBAT-19): any DoT on this body burns this tick, before
+        // the countdown removes it. A DoT kill defeats the body now.
+        applyDot(db, body, player);
+        if (const auto dotHp = healthOf(db, body); dotHp && *dotHp <= 0) {
+            defeatHostile(db, body, player);
+            continue;
+        }
+
+        // Count down THIS body's status effects (its CC/DoT durations).
+        tickStatusEffects(db, body);
+
+        // Chip lane (REQ-COMBAT-12): each body deals its fixed chip in addition
+        // to its turn action — the irreducible HP clock.
+        const int64_t chip = chipOf(db, body);
+        if (chip > 0) damageEntity(db, player, chip, body, "chip");
     }
 
-    // DoT lane (REQ-COMBAT-19): any damage-over-time on the enemy burns this
-    // tick, before the countdown removes it. A DoT that fells the enemy defeats
-    // it now — not a tick later — so it never lingers at 0 health.
-    applyDot(db, hostile, player);
-    if (const auto dotHp = healthOf(db, hostile); dotHp && *dotHp <= 0) {
-        defeatHostile(db, hostile, player);
-        return;
-    }
-
-    // Tick down status effects AFTER the enemy turn + DoT, so a Stun/Ward/DoT
-    // cast THIS tick still affects this tick before counting down (an unconsumed
-    // ward expires; stun/slow/DoT durations decrement).
+    // The player's own status effects (a ward) count down once, after all bodies
+    // have had their chance to be blocked by it.
     tickStatusEffects(db, player);
-    tickStatusEffects(db, hostile);
 
-    // Chip lane (REQ-COMBAT-12): every combat tick, in ADDITION to the turn
-    // action, the enemy deals its fixed per-instance chip — the irreducible HP
-    // clock. A land tick therefore deals strike + chip.
-    const int64_t chip = chipOf(db, hostile);
-    if (chip > 0) {
-        damageEntity(db, player, chip, hostile, "chip");
-    }
-
-    // Did the enemy's turn (a landed strike and/or chip) drop the player to 0?
-    // Then the player is downed, not dead (REQ-COMBAT-23): they wake in the
-    // dormitory cell at full health, having dropped their carried items where
-    // they fell, and the fight resets.
+    // Downed check once, after every body's turn (REQ-COMBAT-23). The fight
+    // resets around the first body (the primary foe of the encounter).
     const std::optional<int64_t> playerHp = healthOf(db, player);
     if (playerHp && *playerHp <= 0) {
-        downPlayer(db, player, hostile, kDormitoryCell, player);
+        downPlayer(db, player, bodies.front(), kDormitoryCell, player);
     }
 }

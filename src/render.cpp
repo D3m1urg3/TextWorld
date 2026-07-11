@@ -189,6 +189,10 @@ std::string render(Db& db, int64_t turn) {
             // A barrier stripped by Dispel (subject = the enemy).
             out += "Your dispel tears away the " + nameOf(db, subject) +
                    "'s barrier.\n";
+        } else if (verb == "aoe") {
+            // An area-of-effect hit on one body (subject = that body, object = amount).
+            out += "The blast tears into the " + nameOf(db, subject) + " for " +
+                   std::to_string(object) + " damage.\n";
         } else if (verb == "defeated") {
             // subject = the fallen enemy (name survives), object = its grimoire.
             out += "The " + nameOf(db, subject) + " falls. It drops the " +

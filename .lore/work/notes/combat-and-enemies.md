@@ -41,7 +41,7 @@ in `./build/tests`.
 - [x] 14 — element+resist+Fire/Frost → `testCombatElements` ✅
 - [x] 15 — DoT → `testCombatDoT` ✅
 - [x] 16 — defense lock (barrier/Dispel) → `testCombatDefenseLock` ✅
-- [ ] 17 — multiplicity lock (AoE/swarm) → `testCombatMultiplicity`
+- [x] 17 — multiplicity lock (AoE/swarm) → `testCombatMultiplicity` ✅
 - [ ] 18 — grimoire→Read→learn → `testCombatLearn`
 
 **BRICK 4 — Bestiary catalog / architect spawning / setting**
@@ -345,5 +345,22 @@ in `./build/tests`.
 - Note: the barriered ironhide is correctly excluded from Step 14's floor loop
   (scoped to barrier-free archetypes); re-verified post-strip here.
 - Gate: build clean; `./build/tests` → 2299 checks, 0 failures. combat.cpp clean.
+
+### Step 17 — multiplicity lock: AoE / DoT vs a swarm ✅
+- **resolveCombat refactor:** signature `(player, hostile)` → `(player, startRoom)`;
+  now snapshots and processes EVERY hostile in the tick-start room (id order) —
+  each takes its turn/DoT/chip and is defeated+drops independently; player downed
+  once after all bodies. `loop.cpp` captures `roomOf(player)` at tick start;
+  `tickStartHostile` removed (dead). Single-enemy = one iteration → all prior
+  combat/flee/downed tests stayed green.
+- `resolveCast` 'aoe' (blast): fixed kAoeDamage to every body + a DoT on each — the
+  keys that answer a swarm. render 'aoe' template. `blast` catalog spell (both seeds).
+- `combat_fixture.sql`: library (entity 11) off the cell, holding 3 book-swarm
+  bodies (12/13/14, 10/10, chip 1, telegraph_period 0). Swarm turns are simple
+  (chip only, no telegraph — overlapping telegraphs out of scope).
+- `testCombatMultiplicity`: blast hits all 3 (each -kAoeDamage-kDotDamage), 3 aoe
+  events, DoT reached 3 distinct bodies; basic attack thins one body per tick. With
+  Steps 8/14/16 all four lock categories of REQ-COMBAT-17 are now expressed.
+- Gate: build clean; `./build/tests` → 2324 checks, 0 failures. combat.cpp clean.
 </content>
 </invoke>

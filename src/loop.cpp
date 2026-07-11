@@ -29,6 +29,14 @@ int64_t currentTurn(Db& db) {
     return s.colInt(0);
 }
 
+// The room the player stands in (for the tick-start combat key).
+int64_t roomOf(Db& db, int64_t player) {
+    Stmt s = db.prepare("SELECT container FROM location WHERE entity = ?");
+    s.bind(1, player);
+    if (!s.step()) throw std::runtime_error("player has no location row");
+    return s.colInt(0);
+}
+
 }  // namespace
 
 TurnResult runTurn(Db& db, const std::string& line) {
@@ -61,15 +69,15 @@ TurnResult runTurn(Db& db, const std::string& line) {
     db.begin();
     try {
         const int64_t player = playerId(db);
-        // Capture the hostile present at TICK START, before the player's action
-        // can move them out of the room (micro-decision 2): the enemy still
-        // takes its one turn as the player flees. 0 when not in combat.
-        const int64_t startHostile = tickStartHostile(db, player);
+        // Capture the ROOM the player stands in at TICK START, before the action
+        // can move them out (micro-decision 2): every enemy that was present
+        // still takes its one turn even as the player flees.
+        const int64_t startRoom = roomOf(db, player);
         db.exec("UPDATE meta SET value = value + 1 WHERE key = 'turn'");
         resolve(db, *action, player);
         // The enemy-turn system fires after the player's action, in the SAME
         // transaction (REQ-COMBAT-2): the loop, not resolve, owns the tick.
-        resolveCombat(db, player, startHostile);
+        resolveCombat(db, player, startRoom);
         db.commit();
     } catch (const std::exception& e) {
         // Tier c: engine error. Roll back — turn counter and world state as

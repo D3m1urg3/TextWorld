@@ -994,6 +994,51 @@ static void testCombatElements() {
     }
 }
 
+// Multiplicity lock: AoE and DoT reach every body of a swarm; single-target
+// basic attack thins them one at a time (REQ-COMBAT-17, -19). Deterministic.
+static void testCombatMultiplicity() {
+    const TempDbFile worldPath("textworld_combat_multi_tests.db");
+    Db db = openWorld(worldPath.string(), "tests/combat_fixture.sql");
+    db.exec("INSERT INTO known_spells(entity, spell) VALUES (3, 'blast')");
+
+    auto living = [&] {
+        return queryInt(db,
+                        "SELECT COUNT(*) FROM hostile h JOIN health hp ON hp.entity = h.entity "
+                        "JOIN location l ON l.entity = h.entity "
+                        "WHERE l.container = 11 AND hp.current > 0");
+    };
+
+    // Into the library (off the cell, so the swarm is reached alone).
+    CHECK(runTurn(db, "go down").outcome == TurnOutcome::Ticked);
+    CHECK(queryInt(db, "SELECT container FROM location WHERE entity = 3") == 11);
+    CHECK(living() == 3);
+
+    // AoE reaches EVERY body in one tick — each takes the AoE hit plus its first
+    // DoT tick this same turn.
+    {
+        const std::string out = runTurn(db, "cast blast").output;
+        CHECK(contains(out, "blast tears into"));  // render template
+        // Each body: 10 - kAoeDamage - kDotDamage (the AoE + one DoT tick).
+        for (int64_t body : {12, 13, 14}) {
+            CHECK(queryInt(db, ("SELECT current FROM health WHERE entity = " +
+                                std::to_string(body)).c_str()) ==
+                  10 - kAoeDamage - kDotDamage);
+        }
+        // One AoE event per body; the DoT reached each distinct body.
+        CHECK(queryInt(db, "SELECT COUNT(*) FROM events WHERE verb = 'aoe'") == 3);
+        CHECK(queryInt(db,
+                       "SELECT COUNT(DISTINCT subject) FROM events WHERE verb = 'dot'") == 3);
+        CHECK(living() == 3);  // none felled yet
+    }
+
+    // Single-target basic attack thins the swarm one body at a time.
+    const int64_t before = living();
+    CHECK(runTurn(db, "attack").outcome == TurnOutcome::Ticked);
+    CHECK(living() == before - 1);
+    CHECK(runTurn(db, "attack").outcome == TurnOutcome::Ticked);
+    CHECK(living() == before - 2);
+}
+
 // Defense lock: barrier negates all damage until Dispel strips it — a two-key
 // sequence (REQ-COMBAT-17). The basic-attack floor holds again post-strip
 // (REQ-COMBAT-18). Deterministic.
@@ -4071,6 +4116,7 @@ int main() {
     testCombatElements();
     testCombatDoT();
     testCombatDefenseLock();
+    testCombatMultiplicity();
     testRender();
     testExitDisplayInvariant();
     testLoop();

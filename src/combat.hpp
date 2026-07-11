@@ -44,6 +44,9 @@ inline constexpr int64_t kSlowDuration = 2;
 inline constexpr int64_t kDotDamage = 2;
 inline constexpr int64_t kDotDuration = 2;
 
+// AoE damage dealt to every hostile in the room (REQ-COMBAT-17 multiplicity).
+inline constexpr int64_t kAoeDamage = 3;
+
 // The living hostile (health.current > 0) sharing `room`, or 0 if none (lowest
 // entity id when several). Read-only. Exposed so resolveGo can refuse a flee into
 // an ungenerated exit while an enemy is present (REQ-COMBAT-26).
@@ -69,13 +72,6 @@ std::optional<std::string> castDenialReason(Db& db, int64_t player,
 // Ward/Stun — Step 10). Runs in the tick transaction; writes via mutations only.
 void resolveCast(Db& db, int64_t player, const std::string& spell);
 
-// The living hostile (health.current > 0) sharing `player`'s room right now, or
-// 0 if none. Read-only. The loop captures this at TICK START — before the
-// player's action resolves — so the enemy that was present still takes its one
-// turn even if the player's action moved them out (flee, Step 11); this is
-// micro-decision 2.
-int64_t tickStartHostile(Db& db, int64_t player);
-
 // The engine-authored combat status line (REQ-COMBAT-15), appended by BOTH the
 // template renderer and the AI deterministic-append path — never left to the
 // model. Returns "" outside combat (no living hostile shares the player's room),
@@ -83,12 +79,14 @@ int64_t tickStartHostile(Db& db, int64_t player);
 // cooldown readiness joins in Step 12. Read-only.
 std::string combatStatusLine(Db& db, int64_t player);
 
-// The enemy-turn system (REQ-COMBAT-1, -2, -9, -12): the first non-player actor.
-// Called from runTurn AFTER resolve(), inside the SAME tick transaction, keyed
-// on `hostile` = the foe present at tick start. `hostile == 0`, or a hostile the
-// player's action just brought to 0 health, means no combat this tick (no-op;
-// defeat removal is Step 5). Otherwise the enemy takes its single turn action
-// (Brick 1: idle — the telegraph/strike lane is Step 8) PLUS the always-on chip
-// lane: fixed per-instance chip damage to the player, the irreducible HP clock.
-// Writes only through mutations helpers.
-void resolveCombat(Db& db, int64_t player, int64_t hostile);
+// The enemy-turn system (REQ-COMBAT-1, -2, -9, -12, -17): the first non-player
+// actor. Called from runTurn AFTER resolve(), inside the SAME tick transaction,
+// keyed on `startRoom` = the room the player stood in at TICK START — captured
+// before the player's action resolves, so every enemy that was present still
+// takes its one turn even if the player fled the room (micro-decision 2). It
+// processes EVERY hostile in that room (the multiplicity case, REQ-COMBAT-17):
+// each takes its turn action (telegraph→strike, suppressed under CC), its DoT
+// tick, and its chip; each is defeated + drops independently when felled. The
+// player is downed once, after all bodies, if reduced to 0. `startRoom == 0` or
+// a room with no hostiles is a no-op. Writes only through mutations helpers.
+void resolveCombat(Db& db, int64_t player, int64_t startRoom);

@@ -16,8 +16,11 @@
 --   8: hostile 'rime-touched goblin' (health 10/10, chip 1), in the frost study
 --   9: room 'armory'
 --  10: hostile 'ironhide brute' (health 14/14, chip 1, barriered), in the armory
+--  11: room 'library'
+--  12,13,14: hostile 'book swarm' bodies (health 10/10, chip 1), in the library
 
-INSERT INTO entities(id) VALUES (1), (2), (3), (4), (5), (6), (7), (8), (9), (10);
+INSERT INTO entities(id) VALUES
+  (1), (2), (3), (4), (5), (6), (7), (8), (9), (10), (11), (12), (13), (14);
 
 -- 1: room 'cell'
 INSERT INTO room(entity) VALUES (1);
@@ -39,15 +42,23 @@ INSERT INTO room(entity) VALUES (9);
 INSERT INTO name(entity, value) VALUES (9, 'armory');
 INSERT INTO description(entity, prose) VALUES (9, 'A cramped armory of dull iron.');
 
+-- 11: room 'library' (holds the book-swarm multiplicity lock), off the cell via down
+INSERT INTO room(entity) VALUES (11);
+INSERT INTO name(entity, value) VALUES (11, 'library');
+INSERT INTO description(entity, prose) VALUES (11, 'A vaulted library, shelves stirring.');
+
 -- exits: north 1->2, south 2->1 (realized pair; flee tests use the return leg);
--- east 2->6, west 6->2 (frost study); up 2->9, down 9->2 (armory).
+-- east 2->6, west 6->2 (frost study); up 2->9, down 9->2 (armory);
+-- down 1->11, up 11->1 (library, off the cell so the swarm is reachable alone).
 INSERT INTO exits(room, direction, dest) VALUES
   (1, 'north', 2),
   (2, 'south', 1),
   (2, 'east', 6),
   (6, 'west', 2),
   (2, 'up', 9),
-  (9, 'down', 2);
+  (9, 'down', 2),
+  (1, 'down', 11),
+  (11, 'up', 1);
 -- a latent frontier stub off the corridor (flee-into-the-unknown is refused)
 INSERT INTO exits(room, direction, dest) VALUES
   (2, 'north', NULL);
@@ -86,7 +97,8 @@ INSERT INTO spell_catalog(spell, element, cooldown, tier, effect) VALUES
   ('fire', 'fire', 2, 1, 'damage'),
   ('frost', 'frost', 2, 1, 'frost'),
   ('dispel', NULL, 3, 2, 'dispel'),
-  ('ember', 'fire', 3, 1, 'dot');
+  ('ember', 'fire', 3, 1, 'dot'),
+  ('blast', NULL, 3, 2, 'aoe');
 
 -- Resistance: rime-touched is weak to Fire (2x), resists Frost (1/2x).
 INSERT INTO resistance(archetype, element, multiplier_num, multiplier_den) VALUES
@@ -107,3 +119,17 @@ INSERT INTO name(entity, value) VALUES (10, 'ironhide brute');
 INSERT INTO description(entity, prose) VALUES (10, 'A brute plated in warded iron.');
 INSERT INTO location(entity, container) VALUES (10, 9);
 INSERT INTO barrier(entity) VALUES (10);
+
+-- 12,13,14: book-swarm bodies co-located in the library. Multiplicity lock:
+-- multiple low-HP bodies, chip only, NO telegraph (period 0) — overlapping
+-- telegraphs are out of scope; the answer is AoE/DoT reaching all bodies.
+INSERT INTO hostile(entity, archetype, chip, telegraph_period) VALUES
+  (12, 'book_swarm', 1, 0),
+  (13, 'book_swarm', 1, 0),
+  (14, 'book_swarm', 1, 0);
+INSERT INTO health(entity, current, max) VALUES (12, 10, 10), (13, 10, 10), (14, 10, 10);
+INSERT INTO name(entity, value) VALUES
+  (12, 'snapping folio'), (13, 'snapping folio'), (14, 'snapping folio');
+INSERT INTO description(entity, prose) VALUES
+  (12, 'A book that bites.'), (13, 'A book that bites.'), (14, 'A book that bites.');
+INSERT INTO location(entity, container) VALUES (12, 11), (13, 11), (14, 11);
