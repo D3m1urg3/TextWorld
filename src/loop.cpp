@@ -47,6 +47,16 @@ TurnResult runTurn(Db& db, const std::string& line) {
         return {TurnOutcome::Quit, ""};
     }
 
+    // Cast availability gate (REQ-COMBAT-7/-13): an unknown or still-recharging
+    // spell is not a valid action — declined WITHOUT a tick (no turn, no enemy
+    // turn), mirroring the tier-a no-Action path above. Cooldown gates
+    // availability; it never costs the player a turn.
+    if (action->verb == Verb::Cast) {
+        if (const auto reason = castDenialReason(db, playerId(db), action->spell)) {
+            return {TurnOutcome::NoTick, renderError(*reason)};
+        }
+    }
+
     // The tick: one transaction, one turn increment, resolve, enemy turn, commit.
     db.begin();
     try {

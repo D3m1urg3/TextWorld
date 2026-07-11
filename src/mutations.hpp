@@ -62,6 +62,12 @@ void damageEntity(Db& db, int64_t target, int64_t amount, int64_t actor,
 // minted grimoire's entity id. Never begins/commits.
 int64_t dropGrimoire(Db& db, const std::string& archetype, int64_t room);
 
+// Set `spell`'s cooldown for `entity` to become ready at tick `readyTurn`
+// (REQ-COMBAT-13): upsert the cooldowns row. Event-free bookkeeping — the paired
+// 'cast' event records the cast that set it. Never begins/commits.
+void setCooldown(Db& db, int64_t entity, const std::string& spell,
+                 int64_t readyTurn);
+
 // Record a telegraphed strike on `enemy` (REQ-COMBAT-10): upsert its
 // pending_strike row (damage + element, `element` = nullptr for none) and append
 // one 'telegraph' event (actor = enemy). The row's existence means a strike is

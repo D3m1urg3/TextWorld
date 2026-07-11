@@ -150,6 +150,11 @@ void resolveImpl(Db& db, const Action& action, int64_t player,
         case Verb::Attack:
             resolveAttack(db, player);
             break;
+        case Verb::Cast:
+            // Availability (known + off cooldown) was gated pre-tick by the loop
+            // (REQ-COMBAT-7/-13); reaching here means the cast is valid.
+            resolveCast(db, player, action.spell);
+            break;
         case Verb::Quit:
             // Quit is handled by the game loop BEFORE the tick transaction is
             // opened — it must never reach resolve. Throwing (rather than

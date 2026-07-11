@@ -8,13 +8,16 @@
 
 #include "db.hpp"
 
-enum class Verb { Look, Go, Take, Drop, Inventory, Wait, Quit, Attack };
+enum class Verb { Look, Go, Take, Drop, Inventory, Wait, Quit, Attack, Cast };
 
 struct Action {
     Verb verb;
     int64_t subject = 0;   // entity id for Take/Drop; target enemy for Attack
                            // (0 = the hostile in the room); 0 when unused
     std::string direction; // for Go; empty when unused
+    std::string spell;     // for Cast: the catalogued spell key; empty otherwise
+                           // (spells are string-keyed, not entities, so they
+                           // ride their own field rather than `subject`)
 };
 
 // Parse one input line into an Action, consulting the world db for noun

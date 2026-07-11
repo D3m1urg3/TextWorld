@@ -31,7 +31,7 @@ in `./build/tests`.
 **BRICK 2 — Telegraph / counter / Cast / cooldowns**
 - [x] 7 — schema: telegraph+cooldown+spells → `testCombatSchema` ext. ✅
 - [x] 8 — telegraph→strike lane → `testCombatTelegraph` ✅
-- [ ] 9 — `Verb::Cast` + cooldown gate → `testCombatCastGate`
+- [x] 9 — `Verb::Cast` + cooldown gate → `testCombatCastGate` ✅
 - [ ] 10 — counters Ward/Stun → `testCombatCounter`
 - [ ] 11 — flee → `testCombatFlee`
 - [ ] 12 — status line (cooldowns) → `testCombatStatusLine`
@@ -204,5 +204,26 @@ in `./build/tests`.
 - `testCombatTelegraph`: robustly finds the telegraph tick (chip-only, pending set,
   "winds up" rendered), then the strike tick (strike+chip, pending cleared, "lands
   its blow"). Gate: build clean; 2097 checks, 0 failures. combat.cpp raw-write empty.
+
+### Step 9 — Verb::Cast + cooldown gate ✅
+- `action.hpp`: `Cast` verb + a dedicated `std::string spell` field. **Divergence
+  (noted):** plan said "subject carries the spell" but subject is int64_t and
+  spells are string-keyed (spell_catalog PK is TEXT), so the spell rides its own
+  field — cleaner than overloading subject.
+- `lookup.hpp`: `lookupSpell(db, word)` (catalog recognition, shared by parser +
+  resolver). `parser.cpp`: `cast <spell>` and bare `<spell>` → Cast. `nlresolve`:
+  ninth verb `cast` (enum + ISA clause + subject-is-spell), validateAndLower Cast
+  case resolves subject→spell key.
+- **Pre-tick gate** in `loop.cpp`: `castDenialReason(db, player, spell)` — unknown/
+  unlearned or still-recharging → declined with NoTick (no turn, no enemy turn),
+  mirroring Quit/tier-a. Cooldown gates availability, never costs a turn.
+- `resolveCast` (in-tick): sets `cooldowns.ready_turn = executionTurn + catalog
+  cooldown` (immutable, REQ-COMBAT-14) + 'cast' event. Effect (Ward/Stun) is Step
+  10. `setCooldown` mutation helper. render 'cast' template (standing rule).
+- **Cooldown timing:** gate (pre-tick) ready iff `ready_turn <= currentTurn+1`;
+  resolveCast (post-increment) sets `now + cd`. Both reference the same execution
+  turn — consistent; testCombatCastGate verifies cast at T → ready at T+cd.
+- `testNlResolvePrompt`/`testNlResolveRequestBody` updated to nine verbs.
+- Gate: build clean; `./build/tests` → 2125 checks, 0 failures. combat.cpp clean.
 </content>
 </invoke>

@@ -6,6 +6,8 @@
 #pragma once
 
 #include <cstdint>
+#include <optional>
+#include <string>
 
 #include "db.hpp"
 
@@ -30,6 +32,19 @@ inline constexpr int64_t kStrikeDamage = 5;
 // only through mutations helpers. Defeat handling is the enemy-turn system's
 // job (Step 5), not this function's.
 void resolveAttack(Db& db, int64_t player);
+
+// The cooldown/known gate for a Cast (REQ-COMBAT-7, -13). Returns nullopt when
+// `spell` is castable NOW by `player` — learned and off cooldown — else a
+// player-facing denial reason. Read-only. Called PRE-TICK by the loop so a
+// declined cast consumes no turn (the engine, not the model, owns applicability).
+std::optional<std::string> castDenialReason(Db& db, int64_t player,
+                                            const std::string& spell);
+
+// Resolve a valid Verb::Cast (availability already gated by castDenialReason).
+// Sets the spell's cooldown to ready_turn = now + catalog cooldown (an immutable
+// constant, never reduced — REQ-COMBAT-14) and applies its effect (Brick 2:
+// Ward/Stun — Step 10). Runs in the tick transaction; writes via mutations only.
+void resolveCast(Db& db, int64_t player, const std::string& spell);
 
 // The living hostile (health.current > 0) sharing `player`'s room right now, or
 // 0 if none. Read-only. The loop captures this at TICK START — before the

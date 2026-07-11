@@ -134,6 +134,17 @@ int64_t dropGrimoire(Db& db, const std::string& archetype, int64_t room) {
     return item;  // no event: the paired 'defeated' event records the drop
 }
 
+void setCooldown(Db& db, int64_t entity, const std::string& spell,
+                 int64_t readyTurn) {
+    Stmt s = db.prepare(
+        "INSERT INTO cooldowns(entity, spell, ready_turn) VALUES (?, ?, ?) "
+        "ON CONFLICT(entity, spell) DO UPDATE SET ready_turn = excluded.ready_turn");
+    s.bind(1, entity);
+    s.bind(2, spell);
+    s.bind(3, readyTurn);
+    s.step();
+}
+
 void setPendingStrike(Db& db, int64_t enemy, int64_t damage, const char* element) {
     Stmt s = db.prepare(
         "INSERT INTO pending_strike(entity, damage, element) VALUES (?, ?, ?) "

@@ -19,3 +19,14 @@ inline int64_t lookupNoun(Db& db, const std::string& noun) {
     if (s.step()) return s.colInt(0);
     return 0;
 }
+
+// Look up `word` against the spell catalog keys (stored lowercase; input already
+// lowercased). Returns the canonical spell key if it names a catalogued spell,
+// else "". Recognition only (REQ-COMBAT-38) — whether the player has LEARNED the
+// spell or it is off cooldown stays the engine's resolution decision.
+inline std::string lookupSpell(Db& db, const std::string& word) {
+    Stmt s = db.prepare("SELECT spell FROM spell_catalog WHERE spell = ? LIMIT 1");
+    s.bind(1, word);
+    if (s.step()) return s.colText(0);
+    return "";
+}

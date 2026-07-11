@@ -841,6 +841,72 @@ static void testCombatTelegraph() {
     CHECK(contains(strikeText, "lands its blow"));  // render template
 }
 
+// Cast availability gate (REQ-COMBAT-7, -13, -14). An unknown or cooling spell is
+// declined WITHOUT a tick; a valid cast ticks and sets the cooldown; basic
+// attack is never blocked. Deterministic, AI disabled.
+static void testCombatCastGate() {
+    const TempDbFile worldPath("textworld_combat_castgate_tests.db");
+    Db db = openWorld(worldPath.string(), "tests/combat_fixture.sql");
+
+    auto turn = [&] { return queryInt(db, "SELECT value FROM meta WHERE key = 'turn'"); };
+    auto playerHp = [&] {
+        return queryInt(db, "SELECT current FROM health WHERE entity = 3");
+    };
+
+    CHECK(runTurn(db, "go north").outcome == TurnOutcome::Ticked);  // enter combat
+
+    // --- unknown spell: cataloged but not learned → declined, NO tick ---
+    // Simulate an unlearned-but-cataloged spell by forgetting stun.
+    db.exec("DELETE FROM known_spells WHERE entity = 3 AND spell = 'stun'");
+    {
+        const int64_t turnBefore = turn();
+        const int64_t hpBefore = playerHp();
+        const TurnResult r = runTurn(db, "cast stun");
+        CHECK(r.outcome == TurnOutcome::NoTick);
+        CHECK(turn() == turnBefore);        // no turn consumed
+        CHECK(playerHp() == hpBefore);      // no enemy turn either
+        CHECK(queryInt(db,
+                       "SELECT COUNT(*) FROM cooldowns WHERE spell = 'stun'") == 0);
+    }
+
+    // --- valid cast: ward is known and ready → ticks, sets the cooldown ---
+    const int64_t wardCd =
+        queryInt(db, "SELECT cooldown FROM spell_catalog WHERE spell = 'ward'");
+    {
+        const int64_t turnBefore = turn();
+        CHECK(runTurn(db, "cast ward").outcome == TurnOutcome::Ticked);
+        const int64_t castTurn = turn();
+        CHECK(castTurn == turnBefore + 1);
+        // ready_turn == the cast's execution turn + the immutable cooldown.
+        CHECK(queryInt(db,
+                       "SELECT ready_turn FROM cooldowns WHERE entity = 3 "
+                       "AND spell = 'ward'") == castTurn + wardCd);
+    }
+
+    // --- recast ward while on cooldown → declined, NO tick ---
+    {
+        const int64_t turnBefore = turn();
+        CHECK(runTurn(db, "cast ward").outcome == TurnOutcome::NoTick);
+        CHECK(turn() == turnBefore);
+    }
+
+    // --- basic attack is NEVER blocked, even mid-cooldown ---
+    CHECK(runTurn(db, "attack").outcome == TurnOutcome::Ticked);
+
+    // --- after the cooldown elapses, ward is castable again ---
+    // Wait until currentTurn reaches ready_turn, then the cast should tick.
+    const int64_t readyTurn = queryInt(
+        db, "SELECT ready_turn FROM cooldowns WHERE entity = 3 AND spell = 'ward'");
+    for (int i = 0; i < 20 && turn() + 1 < readyTurn &&
+                    queryInt(db, "SELECT container FROM location WHERE entity = 3") == 2;
+         ++i) {
+        runTurn(db, "wait");
+    }
+    if (queryInt(db, "SELECT container FROM location WHERE entity = 3") == 2) {
+        CHECK(runTurn(db, "cast ward").outcome == TurnOutcome::Ticked);
+    }
+}
+
 // Combat narration via the permanent template path + the HP status line
 // (REQ-COMBAT-37, -15). AI is disabled hermetically, so runTurn renders through
 // the templates; the full Brick-1 loop is playable end to end, deterministically.
@@ -1372,9 +1438,10 @@ static void testNlResolvePrompt() {
     const std::string sys = kResolveSystemPrompt;
     CHECK(!sys.empty());
 
-    // All seven ISA verbs are named.
+    // All nine ISA verbs are named (attack + cast added in the combat brick).
     for (const char* verb :
-         {"look", "go", "take", "drop", "inventory", "wait", "quit"}) {
+         {"look", "go", "take", "drop", "inventory", "wait", "quit", "attack",
+          "cast"}) {
         CHECK(sys.find(verb) != std::string::npos);
     }
 
@@ -1673,15 +1740,15 @@ static void testNlResolveRequestBody() {
         const json& tool = j["tools"][0];
         CHECK(tool["name"] == "emit_action");
 
-        // input schema: object; verb enum is exactly the eight ISA verbs
-        // (attack added in the combat brick, REQ-COMBAT-38).
+        // input schema: object; verb enum is exactly the nine ISA verbs
+        // (attack + cast added in the combat brick, REQ-COMBAT-38).
         const json& schema = tool["input_schema"];
         CHECK(schema["type"] == "object");
         const json& verb = schema["properties"]["verb"];
         CHECK(verb["type"] == "string");
         CHECK(verb["enum"] ==
               json::array({"look", "go", "take", "drop", "inventory", "wait",
-                           "quit", "attack"}));
+                           "quit", "attack", "cast"}));
 
         // subject and direction present; verb is the ONLY required field.
         CHECK(schema["properties"].contains("subject"));
@@ -3638,6 +3705,7 @@ int main() {
     testCombatDowned();
     testCombatRender();
     testCombatTelegraph();
+    testCombatCastGate();
     testRender();
     testExitDisplayInvariant();
     testLoop();

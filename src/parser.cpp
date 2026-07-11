@@ -75,5 +75,24 @@ std::optional<Action> parse(Db& db, const std::string& line) {
         return a;
     }
 
+    // Cast a spell (REQ-COMBAT-7): "cast <spell>". Recognition only — the word
+    // must name a catalogued spell; whether it is learned or off cooldown is the
+    // engine's gate, not the parser's.
+    if (verbWord == "cast") {
+        if (arg.empty()) return std::nullopt;  // bare verb, REQ-PROTO-6a
+        const std::string spell = lookupSpell(db, arg);
+        if (spell.empty()) return std::nullopt;  // not a catalogued spell word
+        Action a{Verb::Cast};
+        a.spell = spell;
+        return a;
+    }
+
+    // Bare spell word ("ward", "fire") → Cast, the natural shorthand.
+    if (const std::string spell = lookupSpell(db, verbWord); !spell.empty()) {
+        Action a{Verb::Cast};
+        a.spell = spell;
+        return a;
+    }
+
     return std::nullopt;  // unknown verb
 }

@@ -89,7 +89,7 @@ std::nullopt_t failClause(char clause, const char* why) {
     return std::nullopt;
 }
 
-// The eight ISA verbs, and nothing else (clause b). nullopt for any other word.
+// The nine ISA verbs, and nothing else (clause b). nullopt for any other word.
 std::optional<Verb> verbFromWord(const std::string& word) {
     if (word == "look") return Verb::Look;
     if (word == "go") return Verb::Go;
@@ -99,6 +99,7 @@ std::optional<Verb> verbFromWord(const std::string& word) {
     if (word == "wait") return Verb::Wait;
     if (word == "quit") return Verb::Quit;
     if (word == "attack") return Verb::Attack;
+    if (word == "cast") return Verb::Cast;
     return std::nullopt;
 }
 
@@ -172,7 +173,7 @@ const char* const kResolveSystemPrompt =
 
 Each user message is a JSON object of scope facts: "input" (the raw line to translate), "room" (the name of the room the player stands in), "exits" (the direction words leading out of it), "items" (the noun words of items visible in the room), and "inventory" (the noun words of items the player carries).
 
-The instruction set has exactly eight verbs. Each is distinct; pick the single one the input means:
+The instruction set has exactly nine verbs. Each is distinct; pick the single one the input means:
 - look: the player surveys their surroundings. No argument.
 - go: the player moves out of the room in a direction. Set "direction" to the movement or compass word (for example north, south, up, in).
 - take: the player picks an item up off the floor into hand. Set "subject" to the item's noun word.
@@ -181,6 +182,7 @@ The instruction set has exactly eight verbs. Each is distinct; pick the single o
 - wait: the player lets a beat of time pass, doing nothing else. No argument.
 - quit: the player ends the session and leaves the game. No argument.
 - attack: the player strikes the hostile creature in the room with a plain weapon blow (for example "hit it", "swing at the goblin", "kill it"). No argument — the engine targets the foe present.
+- cast: the player invokes a spell by name (for example "cast ward", "burn it", "freeze the thing", "shield"). Set "subject" to the spell's name word.
 
 Rules, absolute:
 - Translate the input to exactly one action and emit it with a single emit_action call. Never emit more than one action; if the line asks for several, make no call.
@@ -216,7 +218,7 @@ std::string buildResolveRequestBody(const std::string& contextPayload) {
         (env != nullptr && env[0] != '\0') ? env : "claude-opus-4-8";
 
     // The single emit_action tool (REQ-RESOLVE-8): a schema-enforced verb enum
-    // of exactly the eight ISA verbs, plus optional subject / direction. Only
+    // of exactly the nine ISA verbs, plus optional subject / direction. Only
     // `verb` is required — bare verbs carry neither argument.
     json emitAction;
     emitAction["name"] = "emit_action";
@@ -228,13 +230,13 @@ std::string buildResolveRequestBody(const std::string& contextPayload) {
     properties["verb"] = {
         {"type", "string"},
         {"enum", json::array({"look", "go", "take", "drop", "inventory",
-                              "wait", "quit", "attack"})},
+                              "wait", "quit", "attack", "cast"})},
         {"description", "The single ISA verb the input means."}};
     properties["subject"] = {
         {"type", "string"},
         {"description",
          "For take/drop: the item's noun word, copied verbatim from the "
-         "supplied items or inventory."}};
+         "supplied items or inventory. For cast: the spell's name word."}};
     properties["direction"] = {
         {"type", "string"},
         {"description", "For go: the movement or compass word."}};
@@ -340,6 +342,22 @@ std::optional<Action> validateAndLower(const HttpResponse& response, Db& db) {
                 return failClause('d', "go has no direction");
             }
             action.direction = input["direction"].get<std::string>();
+            break;
+        }
+        case Verb::Cast: {
+            // Clause c (spell variant): subject present and names a catalogued
+            // spell. Recognition only — lookupSpell assigns the canonical key;
+            // whether the player has learned it or it is ready is the engine's
+            // deterministic gate (REQ-COMBAT-7/-38), not this gate's.
+            if (!input.contains("subject") || !input["subject"].is_string()) {
+                return failClause('c', "cast has no subject spell");
+            }
+            const std::string spell =
+                lookupSpell(db, input["subject"].get<std::string>());
+            if (spell.empty()) {
+                return failClause('c', "subject is not a catalogued spell");
+            }
+            action.spell = spell;
             break;
         }
         case Verb::Look:

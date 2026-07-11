@@ -103,6 +103,48 @@ int64_t tickStartHostile(Db& db, int64_t player) {
     return hostileInRoom(db, roomOf(db, player));
 }
 
+std::optional<std::string> castDenialReason(Db& db, int64_t player,
+                                            const std::string& spell) {
+    if (spell.empty()) return std::string("You don't know that spell.");
+
+    // Learned? (REQ-COMBAT-7). known_spells is the canon of what the player can cast.
+    {
+        Stmt s = db.prepare(
+            "SELECT 1 FROM known_spells WHERE entity = ? AND spell = ?");
+        s.bind(1, player);
+        s.bind(2, spell);
+        if (!s.step()) return std::string("You don't know that spell.");
+    }
+    // Off cooldown? (REQ-COMBAT-13). This runs PRE-TICK, so the cast would
+    // execute on the next tick (currentTurn + 1); it is ready iff
+    // ready_turn <= currentTurn + 1.
+    {
+        Stmt s = db.prepare(
+            "SELECT ready_turn FROM cooldowns WHERE entity = ? AND spell = ?");
+        s.bind(1, player);
+        s.bind(2, spell);
+        if (s.step() && s.colInt(0) > currentTurn(db) + 1) {
+            return std::string("That spell is still recharging.");
+        }
+    }
+    return std::nullopt;  // castable now
+}
+
+void resolveCast(Db& db, int64_t player, const std::string& spell) {
+    // Availability was gated pre-tick; here the spell is known and ready. Set
+    // its cooldown (immutable constant, never reduced — REQ-COMBAT-14). now is
+    // the execution turn (meta.turn already incremented): ready_turn = now + cd.
+    int64_t cd = 0;
+    {
+        Stmt s = db.prepare("SELECT cooldown FROM spell_catalog WHERE spell = ?");
+        s.bind(1, spell);
+        if (s.step()) cd = s.colInt(0);
+    }
+    setCooldown(db, player, spell, currentTurn(db) + cd);
+    appendEvent(db, player, "cast", 0, 0, spell.c_str());
+    // The spell's EFFECT (Ward blocks, Stun interrupts, …) is Step 10.
+}
+
 std::string combatStatusLine(Db& db, int64_t player) {
     // Only during combat: a living hostile shares the player's room. Self-gating
     // so both render paths can append it unconditionally.
