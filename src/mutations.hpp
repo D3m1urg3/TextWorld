@@ -41,6 +41,18 @@ void appendEvent(Db& db, int64_t actor, const char* verb, int64_t subj,
 void moveEntity(Db& db, int64_t what, int64_t toContainer, int64_t actor,
                 const char* verb);
 
+// Apply `amount` of damage to `target`'s health AND append the paired combat
+// event, inside the caller's ambient transaction. The health write clamps
+// current to [0, max] in code: current := clamp(current - amount, 0, max)
+// (REQ-COMBAT-4). The event is (actor = attacker, verb, subject = target,
+// object = amount, detail = NULL) — the sole write path for combat damage.
+//
+// Throws std::runtime_error (engine error) if `target` has no health row —
+// before any event is appended — so the log never records damage that did not
+// land. The caller is expected to roll back. Never begins/commits.
+void damageEntity(Db& db, int64_t target, int64_t amount, int64_t actor,
+                  const char* verb);
+
 // The SOLE sanctioned write path for a generated room (REQ-ARCH-9), inside the
 // caller's ambient transaction. The model proposes flavor; the engine disposes:
 // this helper MINTS one entity (the first runtime entity mint), writes its

@@ -5,6 +5,7 @@
 #include <string>
 
 #include "architect.hpp"  // architectGenerate + aiNarrationEnabled (via prose.hpp)
+#include "combat.hpp"      // resolveAttack (the combat verb resolution)
 #include "mutations.hpp"
 
 namespace {
@@ -145,6 +146,9 @@ void resolveImpl(Db& db, const Action& action, int64_t player,
             break;
         case Verb::Wait:
             appendEvent(db, player, "waited", 0, 0, nullptr);
+            break;
+        case Verb::Attack:
+            resolveAttack(db, player);
             break;
         case Verb::Quit:
             // Quit is handled by the game loop BEFORE the tick transaction is

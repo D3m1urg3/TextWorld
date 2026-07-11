@@ -13,6 +13,7 @@
 
 #include "action.hpp"
 #include "architect.hpp"
+#include "combat.hpp"
 #include "db.hpp"
 #include "loop.hpp"
 #include "mutations.hpp"
@@ -576,6 +577,49 @@ static void testSystems() {
         CHECK(queryInt(db, "SELECT value FROM meta WHERE key = 'turn'") == turnBefore);
         CHECK(queryInt(db, "SELECT COUNT(*) FROM events") == eventsBefore);
     }
+}
+
+// Basic attack (REQ-COMBAT-6, -18): the player's offensive verb drives the seed
+// enemy's health down by the fixed floor damage; attacking an empty room is an
+// in-world refusal. Driven through the `tick` helper (direct resolve); the enemy
+// turn / chip lane arrives in Step 4, so the player takes no damage here.
+static void testCombatAttack() {
+    const TempDbFile worldPath("textworld_combat_attack_tests.db");
+    Db db = openWorld(worldPath.string(), "tests/combat_fixture.sql");
+
+    // Player 3 in the cell (room 1); goblin 7 at 8/8 in the corridor (room 2).
+    CHECK(queryInt(db, "SELECT current FROM health WHERE entity = 7") == 8);
+
+    // --- attack with no hostile present (cell) → failed, nothing changes ---
+    tick(db, Action{Verb::Attack, 0, ""});
+    CHECK(queryInt(db, "SELECT current FROM health WHERE entity = 7") == 8);
+    CHECK(queryInt(db, "SELECT current FROM health WHERE entity = 3") == 12);
+    CHECK(queryInt(db,
+                   "SELECT COUNT(*) FROM events WHERE verb = 'failed' "
+                   "AND detail = 'There''s nothing here to attack.'") == 1);
+    CHECK(queryInt(db, "SELECT COUNT(*) FROM events WHERE verb = 'attacked'") == 0);
+
+    // --- move to the corridor, then attack the goblin → exactly one hit ---
+    tick(db, Action{Verb::Go, 0, "north"});
+    CHECK(queryInt(db, "SELECT container FROM location WHERE entity = 3") == 2);
+
+    tick(db, Action{Verb::Attack, 0, ""});
+    // health.current drops by EXACTLY kBasicAttackDamage; one 'attacked' event
+    // carrying subject = enemy, object = the damage dealt.
+    CHECK(queryInt(db, "SELECT current FROM health WHERE entity = 7") ==
+          8 - kBasicAttackDamage);
+    CHECK(queryInt(db,
+                   ("SELECT COUNT(*) FROM events WHERE verb = 'attacked' "
+                    "AND actor = 3 AND subject = 7 AND object = " +
+                    std::to_string(kBasicAttackDamage))
+                       .c_str()) == 1);
+    // No enemy turn yet (Step 4): the player is untouched.
+    CHECK(queryInt(db, "SELECT current FROM health WHERE entity = 3") == 12);
+
+    // --- a second attack stacks deterministically ---
+    tick(db, Action{Verb::Attack, 0, ""});
+    CHECK(queryInt(db, "SELECT current FROM health WHERE entity = 7") ==
+          8 - 2 * kBasicAttackDamage);
 }
 
 // Substring helper for renderer output checks.
@@ -1363,14 +1407,15 @@ static void testNlResolveRequestBody() {
         const json& tool = j["tools"][0];
         CHECK(tool["name"] == "emit_action");
 
-        // input schema: object; verb enum is exactly the seven ISA verbs.
+        // input schema: object; verb enum is exactly the eight ISA verbs
+        // (attack added in the combat brick, REQ-COMBAT-38).
         const json& schema = tool["input_schema"];
         CHECK(schema["type"] == "object");
         const json& verb = schema["properties"]["verb"];
         CHECK(verb["type"] == "string");
         CHECK(verb["enum"] ==
               json::array({"look", "go", "take", "drop", "inventory", "wait",
-                           "quit"}));
+                           "quit", "attack"}));
 
         // subject and direction present; verb is the ONLY required field.
         CHECK(schema["properties"].contains("subject"));
@@ -3321,6 +3366,7 @@ int main() {
     testParser();
     testMutations();
     testSystems();
+    testCombatAttack();
     testRender();
     testExitDisplayInvariant();
     testLoop();

@@ -49,6 +49,29 @@ void moveEntity(Db& db, int64_t what, int64_t toContainer, int64_t actor,
     appendEvent(db, actor, verb, what, toContainer, nullptr);
 }
 
+void damageEntity(Db& db, int64_t target, int64_t amount, int64_t actor,
+                  const char* verb) {
+    // Clamp in code, not DDL: current := clamp(current - amount, 0, max). With
+    // amount >= 0 the upper clamp is a no-op, but MIN(max, …) keeps the helper
+    // correct for any future negative-amount (heal) caller.
+    Stmt upd = db.prepare(
+        "UPDATE health SET current = MAX(0, MIN(max, current - ?)) "
+        "WHERE entity = ?");
+    upd.bind(1, amount);
+    upd.bind(2, target);
+    upd.step();
+    if (db.changes() == 0) {
+        // No health row for `target`: refuse before appendEvent so the log
+        // never records damage that never landed. Engine error; caller rolls
+        // back the ambient transaction.
+        throw std::runtime_error("damageEntity: entity " +
+                                 std::to_string(target) + " has no health row");
+    }
+    // subject = the damaged entity; object carries the amount dealt (a per-event
+    // number, read verb-specifically by render, like moved's destination room).
+    appendEvent(db, actor, verb, target, amount, nullptr);
+}
+
 int64_t writeGeneratedRoom(Db& db, int64_t originRoom,
                            const std::string& direction,
                            const RoomProposal& proposal, int64_t actor) {

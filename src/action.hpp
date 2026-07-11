@@ -8,11 +8,12 @@
 
 #include "db.hpp"
 
-enum class Verb { Look, Go, Take, Drop, Inventory, Wait, Quit };
+enum class Verb { Look, Go, Take, Drop, Inventory, Wait, Quit, Attack };
 
 struct Action {
     Verb verb;
-    int64_t subject = 0;   // entity id for Take/Drop; 0 when unused
+    int64_t subject = 0;   // entity id for Take/Drop; target enemy for Attack
+                           // (0 = the hostile in the room); 0 when unused
     std::string direction; // for Go; empty when unused
 };
 

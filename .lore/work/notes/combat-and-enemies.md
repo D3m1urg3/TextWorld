@@ -23,7 +23,7 @@ in `./build/tests`.
 **BRICK 1 — Foundation**
 - [x] 1 — schema: health + hostile (+ version bump) → `testCombatSchema` ✅
 - [x] 2 — seed hand-placed enemy → `testShippedSeedShape` ext. ✅
-- [ ] 3 — `Verb::Attack` + `resolveAttack` + `damageEntity` → `testCombatAttack`
+- [x] 3 — `Verb::Attack` + `resolveAttack` + `damageEntity` → `testCombatAttack` ✅
 - [ ] 4 — enemy-turn system + chip lane → `testCombatChipClock`
 - [ ] 5 — defeat + grimoire drop + downed → `testCombatDefeat`, `testCombatDowned`
 - [ ] 6 — narration + template + HP status line → `testCombatRender`
@@ -87,5 +87,28 @@ in `./build/tests`.
   `tests/combat_fixture.sql` (two rooms + goblin + player health) so combat
   behavior tests target a controlled world and stay robust as `base.sql` grows more
   enemies in Brick 3 — mirrors the existing fixture.sql/base.sql split.
+
+### Step 3 — Verb::Attack + resolveAttack + damageEntity ✅
+- `action.hpp`: `Attack` added to `Verb`; `subject` doc = target enemy (0 = the
+  hostile in the room).
+- **New TU `src/combat.{hpp,cpp}`** added to `twcore` (micro-decision 3). Owns
+  `resolveAttack` + private `roomOf`/`hostileInRoom` (lowest-id living hostile in
+  a room, deterministic). `kBasicAttackDamage = 4` exposed in the header for tests.
+  `grep -En "INSERT|UPDATE|DELETE" src/combat.cpp` → empty (writes via mutations).
+- `mutations.{hpp,cpp}`: `damageEntity(db, target, amount, actor, verb)` — clamps
+  `current := clamp(current-amount,0,max)`, throws if no health row (before the
+  event), then one paired event `(actor, verb, subject=target, object=amount)`.
+- `systems.cpp`: `#include combat.hpp` + `Attack` case → `resolveAttack`.
+- `parser.cpp`: `attack`/`hit`/`kill`/`fight` → `Verb::Attack` (no noun arg).
+- `nlresolve.cpp`: `verbFromWord` + lowering switch gain `Attack` (argument-free);
+  `emit_action` enum gains `attack`; ISA prompt now "eight verbs" + attack clause.
+- **Event shape decision:** combat damage stores the amount in `events.object`
+  (a per-verb number, read like moved's destination room) with `detail=NULL`.
+- No render template yet — per the plan, Brick-1 verb templates (attacked/chip/
+  defeat/downed) all land in Step 6; render emits nothing for unknown verbs.
+- Tests: `tests/combat_fixture.sql` (new controlled world); `testCombatAttack`
+  (empty-room refusal; exact floor damage; one event; player untouched pre-Step-4;
+  stacking); `testNlResolveRequestBody` enum updated to the eight verbs.
+- Gate: build clean; `./build/tests` → 1952 checks, 0 failures.
 </content>
 </invoke>

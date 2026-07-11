@@ -58,6 +58,14 @@ std::optional<Action> parse(Db& db, const std::string& line) {
         return a;
     }
 
+    // Basic attack (REQ-COMBAT-6). The target is the hostile in the room —
+    // combat is single-enemy per room — so no noun argument is consulted; any
+    // trailing word ("attack goblin") is ignored, and resolution finds the foe.
+    if (verbWord == "attack" || verbWord == "hit" || verbWord == "kill" ||
+        verbWord == "fight") {
+        return Action{Verb::Attack};
+    }
+
     if (verbWord == "take" || verbWord == "drop") {
         if (arg.empty()) return std::nullopt;  // bare verb, REQ-PROTO-6a
         const int64_t entity = lookupNoun(db, arg);
