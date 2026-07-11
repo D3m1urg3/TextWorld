@@ -22,7 +22,7 @@ in `./build/tests`.
 
 **BRICK 1 — Foundation**
 - [x] 1 — schema: health + hostile (+ version bump) → `testCombatSchema` ✅
-- [ ] 2 — seed hand-placed enemy → `testShippedSeedShape` ext.
+- [x] 2 — seed hand-placed enemy → `testShippedSeedShape` ext. ✅
 - [ ] 3 — `Verb::Attack` + `resolveAttack` + `damageEntity` → `testCombatAttack`
 - [ ] 4 — enemy-turn system + chip lane → `testCombatChipClock`
 - [ ] 5 — defeat + grimoire drop + downed → `testCombatDefeat`, `testCombatDowned`
@@ -70,5 +70,22 @@ in `./build/tests`.
 - Gate: `cmake --build build` clean; `./build/tests` → 1926 checks, 0 failures.
 - Note: `pragma_table_info(...)` table-valued function used for column asserts
   (bundled sqlite supports it). No `chip` clamp/logic yet — that's Step 4.
+
+### Step 2 — seed hand-placed enemy ✅
+- `seed/base.sql`: entity 7 `goblin grunt` in the corridor (room 2) —
+  `hostile(7,'goblin_grunt',1)`, `health(7,8,8)`, name, description, location.
+  Tuning literals (micro-decision 4): player `health(3,12,12)`, goblin `8/8`,
+  chip `1`, planned `kBasicAttackDamage=4` (2 hits to kill).
+- **Minor divergence (approved-by-spec):** also added the player's `health(3,12,12)`
+  row to `base.sql`. Plan Step 2 named only entity 7, but REQ-COMBAT-4 requires the
+  player carry health and Step 4's chip gate needs it. Seed canon, not a mechanic.
+- `tests/tests.cpp`: `testShippedSeedShape` extended — corridor has exactly one
+  hostile with health row, chip>0, full health, name+description; player has a
+  health row. Assertions scoped to hostile/player, so room/portable checks unaffected.
+- Gate: build clean; `./build/tests` → 1932 checks, 0 failures.
+- **Decision for behavior tests (Step 3+):** will add a dedicated
+  `tests/combat_fixture.sql` (two rooms + goblin + player health) so combat
+  behavior tests target a controlled world and stay robust as `base.sql` grows more
+  enemies in Brick 3 — mirrors the existing fixture.sql/base.sql split.
 </content>
 </invoke>

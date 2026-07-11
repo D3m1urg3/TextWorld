@@ -6,8 +6,9 @@
 --   4: portable 'candle'
 --   5: portable 'key'
 --   6: portable 'wand'
+--   7: hostile 'goblin grunt' (in the corridor)
 
-INSERT INTO entities(id) VALUES (1), (2), (3), (4), (5), (6);
+INSERT INTO entities(id) VALUES (1), (2), (3), (4), (5), (6), (7);
 
 -- 1: room 'dormitory cell'
 INSERT INTO room(entity) VALUES (1);
@@ -38,6 +39,8 @@ INSERT INTO exits(room, direction, dest) VALUES
 INSERT INTO player(entity) VALUES (3);
 INSERT INTO name(entity, value) VALUES (3, 'player');
 INSERT INTO location(entity, container) VALUES (3, 1);
+-- The player carries health like every combatant (REQ-COMBAT-4). Seed canon.
+INSERT INTO health(entity, current, max) VALUES (3, 12, 12);
 
 -- 4: portable 'candle', in the dormitory cell
 INSERT INTO portable(entity) VALUES (4);
@@ -59,3 +62,15 @@ INSERT INTO name(entity, value) VALUES (6, 'wand');
 INSERT INTO description(entity, prose) VALUES (6,
   'A wand of pale ashwood, smooth where other hands once held it, left on the desk as though someone knew you were coming.');
 INSERT INTO location(entity, container) VALUES (6, 1);
+
+-- 7: hostile 'goblin grunt', hand-placed in the corridor (REQ-COMBAT-39). The
+-- tutorial lock: low health, basic-attack-soluble, a small untelegraphed chip
+-- clock. Numbers are per-instance literals here (micro-decision 4); Brick 4's
+-- bestiary catalog becomes the mold these are cast from. archetype tag =
+-- 'goblin_grunt'.
+INSERT INTO hostile(entity, archetype, chip) VALUES (7, 'goblin_grunt', 1);
+INSERT INTO health(entity, current, max) VALUES (7, 8, 8);
+INSERT INTO name(entity, value) VALUES (7, 'goblin grunt');
+INSERT INTO description(entity, prose) VALUES (7,
+  'A scrawny goblin in stolen leathers, one of the invaders come up from the breached lower halls. It bares its teeth and shifts its weight, watching for an opening.');
+INSERT INTO location(entity, container) VALUES (7, 2);

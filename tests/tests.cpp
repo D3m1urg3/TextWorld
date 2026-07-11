@@ -260,6 +260,27 @@ static void testShippedSeedShape() {
     CHECK(queryInt(db, "SELECT value FROM meta WHERE key = 'turn'") == 0);
     CHECK(queryInt(db,
                    "SELECT length(value) > 0 FROM meta WHERE key = 'setting'") == 1);
+
+    // Combat foundation (REQ-COMBAT-39): the corridor (room 2) hand-places
+    // exactly one hostile, carrying a health row, a non-zero chip, and a
+    // name/description. The player carries a health row too (REQ-COMBAT-4).
+    CHECK(queryInt(db,
+                   "SELECT COUNT(*) FROM hostile h "
+                   "JOIN location l ON l.entity = h.entity "
+                   "WHERE l.container = 2") == 1);
+    CHECK(queryInt(db,
+                   "SELECT COUNT(*) FROM hostile h "
+                   "JOIN location l ON l.entity = h.entity "
+                   "JOIN health hp ON hp.entity = h.entity "
+                   "LEFT JOIN name n ON n.entity = h.entity "
+                   "LEFT JOIN description d ON d.entity = h.entity "
+                   "WHERE l.container = 2 AND h.chip > 0 "
+                   "AND hp.current > 0 AND hp.current = hp.max "
+                   "AND n.value IS NOT NULL AND trim(n.value) <> '' "
+                   "AND d.prose IS NOT NULL AND trim(d.prose) <> ''") == 1);
+    CHECK(queryInt(db,
+                   "SELECT COUNT(*) FROM health hp "
+                   "JOIN player p ON p.entity = hp.entity") == 1);
 }
 
 // Combat schema shape (REQ-COMBAT-4, -5). Grows as later bricks add tables
