@@ -76,6 +76,10 @@ void clearStatus(Db& db, int64_t entity, const char* kind);
 // tick is applied separately by the combat system. Never begins/commits.
 void tickStatusEffects(Db& db, int64_t entity);
 
+// Strip `entity`'s defense-lock barrier (delete the row, if any) so damage can
+// land (REQ-COMBAT-17). Event-free — the paired 'dispelled' event records it.
+void removeBarrier(Db& db, int64_t entity);
+
 // Set `spell`'s cooldown for `entity` to become ready at tick `readyTurn`
 // (REQ-COMBAT-13): upsert the cooldowns row. Event-free bookkeeping — the paired
 // 'cast' event records the cast that set it. Never begins/commits.

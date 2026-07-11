@@ -994,6 +994,51 @@ static void testCombatElements() {
     }
 }
 
+// Defense lock: barrier negates all damage until Dispel strips it — a two-key
+// sequence (REQ-COMBAT-17). The basic-attack floor holds again post-strip
+// (REQ-COMBAT-18). Deterministic.
+static void testCombatDefenseLock() {
+    const TempDbFile worldPath("textworld_combat_defense_tests.db");
+    Db db = openWorld(worldPath.string(), "tests/combat_fixture.sql");
+    db.exec("INSERT INTO known_spells(entity, spell) VALUES (3, 'dispel'), (3, 'fire')");
+
+    auto ironhideHp = [&] {
+        return queryInt(db, "SELECT current FROM health WHERE entity = 10");
+    };
+
+    // To the armory (cell -> corridor -> armory).
+    CHECK(runTurn(db, "go north").outcome == TurnOutcome::Ticked);
+    CHECK(runTurn(db, "go up").outcome == TurnOutcome::Ticked);
+    CHECK(queryInt(db, "SELECT container FROM location WHERE entity = 3") == 9);
+    CHECK(ironhideHp() == 14);
+
+    // Barriered: a basic attack does nothing.
+    {
+        const std::string out = runTurn(db, "attack").output;
+        CHECK(ironhideHp() == 14);  // unchanged
+        CHECK(queryInt(db, "SELECT COUNT(*) FROM events WHERE verb = 'blocked'") >= 1);
+        CHECK(contains(out, "barrier"));  // render template
+    }
+    // Elemental damage is blocked too — nothing lands through the barrier.
+    CHECK(runTurn(db, "cast fire").outcome == TurnOutcome::Ticked);
+    CHECK(ironhideHp() == 14);
+
+    // Dispel strips the barrier (the first key).
+    {
+        const std::string out = runTurn(db, "cast dispel").output;
+        CHECK(queryInt(db, "SELECT COUNT(*) FROM barrier WHERE entity = 10") == 0);
+        CHECK(contains(out, "dispel"));  // render template
+    }
+
+    // Now a basic attack lands — the floor holds post-strip (REQ-COMBAT-18).
+    {
+        const int64_t before = ironhideHp();
+        CHECK(runTurn(db, "attack").outcome == TurnOutcome::Ticked);
+        CHECK(ironhideHp() == before - kBasicAttackDamage);
+        CHECK(ironhideHp() < before);
+    }
+}
+
 // Damage-over-time (REQ-COMBAT-19): a DoT applies its fixed damage for exactly
 // its duration, then stops. Stun keeps the player alive so the DoT can be
 // observed in isolation. Deterministic.
@@ -4025,6 +4070,7 @@ int main() {
     testCombatStatusLine();
     testCombatElements();
     testCombatDoT();
+    testCombatDefenseLock();
     testRender();
     testExitDisplayInvariant();
     testLoop();

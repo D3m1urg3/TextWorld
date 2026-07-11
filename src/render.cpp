@@ -181,6 +181,14 @@ std::string render(Db& db, int64_t turn) {
             // A damage-over-time tick (subject = enemy, object = per-tick amount).
             out += "The " + nameOf(db, subject) + " smoulders, taking " +
                    std::to_string(object) + " damage.\n";
+        } else if (verb == "blocked") {
+            // Damage negated by a defense-lock barrier (subject = the shielded foe).
+            out += "Your attack breaks against the " + nameOf(db, subject) +
+                   "'s barrier, doing nothing.\n";
+        } else if (verb == "dispelled") {
+            // A barrier stripped by Dispel (subject = the enemy).
+            out += "Your dispel tears away the " + nameOf(db, subject) +
+                   "'s barrier.\n";
         } else if (verb == "defeated") {
             // subject = the fallen enemy (name survives), object = its grimoire.
             out += "The " + nameOf(db, subject) + " falls. It drops the " +

@@ -244,8 +244,13 @@ void resolveCast(Db& db, int64_t player, const std::string& spell) {
         // a fixed duration. The 'cast' event records the application; the per-tick
         // 'dot' damage is applied by resolveCombat's DoT lane.
         applyStatus(db, enemy, "dot", kDotDamage, kDotDuration);
+    } else if (effect == "dispel") {
+        // Defense lock (REQ-COMBAT-17): strip the enemy's barrier so damage can
+        // land — the first key of a two-key sequence (Dispel → any damage).
+        removeBarrier(db, enemy);
+        appendEvent(db, player, "dispelled", enemy, 0, nullptr);
     }
-    // Dispel (Step 16) and AoE (Step 17) effects arrive later in Brick 3.
+    // AoE (Step 17) arrives later in Brick 3.
 }
 
 std::string combatStatusLine(Db& db, int64_t player) {

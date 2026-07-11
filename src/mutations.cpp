@@ -52,6 +52,19 @@ void moveEntity(Db& db, int64_t what, int64_t toContainer, int64_t actor,
 
 void damageEntity(Db& db, int64_t target, int64_t amount, int64_t actor,
                   const char* verb) {
+    // Defense lock (REQ-COMBAT-17): while a barrier shields the target, ALL
+    // damage is negated — a 'blocked' event records the deflection and health is
+    // untouched, until Dispel strips the barrier. The player never carries a
+    // barrier, so this only ever guards enemies.
+    {
+        Stmt b = db.prepare("SELECT 1 FROM barrier WHERE entity = ?");
+        b.bind(1, target);
+        if (b.step()) {
+            appendEvent(db, actor, "blocked", target, 0, nullptr);
+            return;
+        }
+    }
+
     // Clamp in code, not DDL: current := clamp(current - amount, 0, max). With
     // amount >= 0 the upper clamp is a no-op, but MIN(max, …) keeps the helper
     // correct for any future negative-amount (heal) caller.
@@ -168,6 +181,12 @@ void tickStatusEffects(Db& db, int64_t entity) {
         s.bind(1, entity);
         s.step();
     }
+}
+
+void removeBarrier(Db& db, int64_t entity) {
+    Stmt s = db.prepare("DELETE FROM barrier WHERE entity = ?");
+    s.bind(1, entity);
+    s.step();
 }
 
 void setCooldown(Db& db, int64_t entity, const std::string& spell,

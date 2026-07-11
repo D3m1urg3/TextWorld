@@ -14,8 +14,10 @@
 --   6: room 'frost study'
 --   7: hostile 'goblin grunt' (health 8/8, chip 1), in the corridor
 --   8: hostile 'rime-touched goblin' (health 10/10, chip 1), in the frost study
+--   9: room 'armory'
+--  10: hostile 'ironhide brute' (health 14/14, chip 1, barriered), in the armory
 
-INSERT INTO entities(id) VALUES (1), (2), (3), (4), (5), (6), (7), (8);
+INSERT INTO entities(id) VALUES (1), (2), (3), (4), (5), (6), (7), (8), (9), (10);
 
 -- 1: room 'cell'
 INSERT INTO room(entity) VALUES (1);
@@ -32,13 +34,20 @@ INSERT INTO room(entity) VALUES (6);
 INSERT INTO name(entity, value) VALUES (6, 'frost study');
 INSERT INTO description(entity, prose) VALUES (6, 'A frost-rimed study.');
 
+-- 9: room 'armory' (holds the ironhide defense lock), off the corridor via up
+INSERT INTO room(entity) VALUES (9);
+INSERT INTO name(entity, value) VALUES (9, 'armory');
+INSERT INTO description(entity, prose) VALUES (9, 'A cramped armory of dull iron.');
+
 -- exits: north 1->2, south 2->1 (realized pair; flee tests use the return leg);
--- east 2->6, west 6->2 (realized pair to the frost study).
+-- east 2->6, west 6->2 (frost study); up 2->9, down 9->2 (armory).
 INSERT INTO exits(room, direction, dest) VALUES
   (1, 'north', 2),
   (2, 'south', 1),
   (2, 'east', 6),
-  (6, 'west', 2);
+  (6, 'west', 2),
+  (2, 'up', 9),
+  (9, 'down', 2);
 -- a latent frontier stub off the corridor (flee-into-the-unknown is refused)
 INSERT INTO exits(room, direction, dest) VALUES
   (2, 'north', NULL);
@@ -90,3 +99,11 @@ INSERT INTO health(entity, current, max) VALUES (8, 10, 10);
 INSERT INTO name(entity, value) VALUES (8, 'rime-touched goblin');
 INSERT INTO description(entity, prose) VALUES (8, 'A goblin sheathed in creeping frost.');
 INSERT INTO location(entity, container) VALUES (8, 6);
+
+-- 10: hostile 'ironhide brute', in the armory (defense lock: barriered until Dispel)
+INSERT INTO hostile(entity, archetype, chip, telegraph_period) VALUES (10, 'ironhide', 1, 4);
+INSERT INTO health(entity, current, max) VALUES (10, 14, 14);
+INSERT INTO name(entity, value) VALUES (10, 'ironhide brute');
+INSERT INTO description(entity, prose) VALUES (10, 'A brute plated in warded iron.');
+INSERT INTO location(entity, container) VALUES (10, 9);
+INSERT INTO barrier(entity) VALUES (10);

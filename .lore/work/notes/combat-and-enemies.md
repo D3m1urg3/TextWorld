@@ -40,7 +40,7 @@ in `./build/tests`.
 - [x] 13 — schema: elements+locks+grimoire → `testCombatSchema` ext. ✅
 - [x] 14 — element+resist+Fire/Frost → `testCombatElements` ✅
 - [x] 15 — DoT → `testCombatDoT` ✅
-- [ ] 16 — defense lock (barrier/Dispel) → `testCombatDefenseLock`
+- [x] 16 — defense lock (barrier/Dispel) → `testCombatDefenseLock` ✅
 - [ ] 17 — multiplicity lock (AoE/swarm) → `testCombatMultiplicity`
 - [ ] 18 — grimoire→Read→learn → `testCombatLearn`
 
@@ -329,5 +329,21 @@ in `./build/tests`.
   exactly kDotDuration 'dot' events each of magnitude kDotDamage. With Step 10's CC
   this closes AI-Validation item 9.
 - Gate: build clean; `./build/tests` → 2276 checks, 0 failures. combat.cpp clean.
+
+### Step 16 — defense lock: barrier + Dispel ✅
+- `damageEntity` gains a barrier check at the top: a barriered target negates ALL
+  damage (basic/elemental/DoT), emitting 'blocked' and leaving health untouched
+  (player never has a barrier, so only enemies are guarded). `removeBarrier`
+  mutation. `resolveCast` 'dispel' → removeBarrier + 'dispelled'. render 'blocked'
+  + 'dispelled' templates.
+- `combat_fixture.sql`: armory (entity 9) off the corridor via up/down, holding an
+  ironhide brute (entity 10, 14/14, `barrier(10)`, telegraph_period 4). Barrier row
+  lives with the instance (deferred from Step 13 per plan).
+- `testCombatDefenseLock`: attack blocked (barrier, "barrier" line); fire blocked;
+  dispel strips barrier ("dispel" line); attack then lands for kBasicAttackDamage —
+  floor holds post-strip. Two-key sequence proven (Dispel → damage).
+- Note: the barriered ironhide is correctly excluded from Step 14's floor loop
+  (scoped to barrier-free archetypes); re-verified post-strip here.
+- Gate: build clean; `./build/tests` → 2299 checks, 0 failures. combat.cpp clean.
 </content>
 </invoke>
