@@ -262,6 +262,37 @@ static void testShippedSeedShape() {
                    "SELECT length(value) > 0 FROM meta WHERE key = 'setting'") == 1);
 }
 
+// Combat schema shape (REQ-COMBAT-4, -5). Grows as later bricks add tables
+// (Steps 7, 13); Step 1 asserts the health + hostile foundation and that a
+// fresh world opens at the bumped SCHEMA_VERSION. Deterministic, no network.
+static void testCombatSchema() {
+    const TempDbFile worldPath("textworld_combat_schema_tests.db");
+
+    Db db = openWorld(worldPath.string(), "tests/fixture.sql");
+
+    // Fresh world opened at the current (bumped) schema version.
+    CHECK(queryInt(db, "SELECT value FROM meta WHERE key = 'schema_version'") ==
+          SCHEMA_VERSION);
+
+    // health(entity, current, max) exists with exactly those columns.
+    CHECK(queryInt(db,
+                   "SELECT COUNT(*) FROM sqlite_master "
+                   "WHERE type='table' AND name='health'") == 1);
+    CHECK(queryInt(db, "SELECT COUNT(*) FROM pragma_table_info('health')") == 3);
+    CHECK(queryInt(db,
+                   "SELECT COUNT(*) FROM pragma_table_info('health') "
+                   "WHERE name IN ('entity','current','max')") == 3);
+
+    // hostile(entity, archetype, chip) exists with exactly those columns.
+    CHECK(queryInt(db,
+                   "SELECT COUNT(*) FROM sqlite_master "
+                   "WHERE type='table' AND name='hostile'") == 1);
+    CHECK(queryInt(db, "SELECT COUNT(*) FROM pragma_table_info('hostile')") == 3);
+    CHECK(queryInt(db,
+                   "SELECT COUNT(*) FROM pragma_table_info('hostile') "
+                   "WHERE name IN ('entity','archetype','chip')") == 3);
+}
+
 static void testParser() {
     const TempDbFile worldPath("textworld_parser_tests.db");
 
@@ -3265,6 +3296,7 @@ int main() {
     testDb();
     testWorld();
     testShippedSeedShape();
+    testCombatSchema();
     testParser();
     testMutations();
     testSystems();

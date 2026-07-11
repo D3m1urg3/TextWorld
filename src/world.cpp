@@ -21,12 +21,16 @@ CREATE TABLE description(entity INTEGER PRIMARY KEY, prose TEXT); -- canon: row 
 CREATE TABLE location(entity INTEGER PRIMARY KEY, container INTEGER);
 CREATE TABLE exits(room INTEGER, direction TEXT, dest INTEGER, PRIMARY KEY(room, direction));
 
+-- combat components (see .lore/work/specs/combat-and-enemies.md)
+CREATE TABLE health(entity INTEGER PRIMARY KEY, current INTEGER, max INTEGER);   -- current clamped [0,max] in code
+CREATE TABLE hostile(entity INTEGER PRIMARY KEY, archetype TEXT, chip INTEGER);  -- archetype tag; per-instance chip constant
+
 -- the event log (append-only)
 CREATE TABLE events(
   id INTEGER PRIMARY KEY,
   turn INTEGER NOT NULL,
   actor INTEGER,            -- who did it (player entity for now)
-  verb TEXT NOT NULL,       -- 'moved','took','dropped','looked','waited','failed'
+  verb TEXT NOT NULL,       -- 'moved','took','dropped','looked','waited','failed'; combat: 'attacked','chip',…
   subject INTEGER,          -- primary entity acted on
   object INTEGER,           -- secondary entity (destination room, container…)
   detail TEXT               -- human-readable fragment or NULL
