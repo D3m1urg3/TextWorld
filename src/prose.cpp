@@ -16,11 +16,19 @@
 
 #include <curl/curl.h>
 
+#include "combat.hpp"  // combatStatusLine() — the engine-authored HP/cooldown tail
 #include "json.hpp"
 
 namespace {
 
 using nlohmann::json;
+
+// The player entity (singleton by convention). Read-only.
+int64_t playerEntity(Db& db) {
+    Stmt s = db.prepare("SELECT entity FROM player LIMIT 1");
+    if (!s.step()) throw std::runtime_error("prose: world has no player entity");
+    return s.colInt(0);
+}
 
 // --- read-only lookups ------------------------------------------------------
 
@@ -134,6 +142,11 @@ std::string deterministicAppends(Db& db, int64_t turn) {
             out += inventoryLine(db, actor);
         }
     }
+
+    // Engine-authored combat status line (REQ-COMBAT-15), the SAME helper the
+    // template renderer appends — so the line is byte-identical on both paths
+    // (the exits/inventory-append seam, now carrying HP/cooldowns). Self-gating.
+    out += combatStatusLine(db, playerEntity(db));
 
     return out;
 }

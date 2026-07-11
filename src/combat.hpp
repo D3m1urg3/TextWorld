@@ -32,6 +32,13 @@ void resolveAttack(Db& db, int64_t player);
 // micro-decision 2.
 int64_t tickStartHostile(Db& db, int64_t player);
 
+// The engine-authored combat status line (REQ-COMBAT-15), appended by BOTH the
+// template renderer and the AI deterministic-append path — never left to the
+// model. Returns "" outside combat (no living hostile shares the player's room),
+// else a single trailing-newline line. Brick 1: "HP: current/max"; per-spell
+// cooldown readiness joins in Step 12. Read-only.
+std::string combatStatusLine(Db& db, int64_t player);
+
 // The enemy-turn system (REQ-COMBAT-1, -2, -9, -12): the first non-player actor.
 // Called from runTurn AFTER resolve(), inside the SAME tick transaction, keyed
 // on `hostile` = the foe present at tick start. `hostile == 0`, or a hostile the

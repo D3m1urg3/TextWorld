@@ -8,6 +8,7 @@
 #include <vector>
 
 #include "architect.hpp"  // architectEnabled() — the latent-exit DISPLAY gate
+#include "combat.hpp"      // combatStatusLine() — the engine-authored HP/cooldown tail
 
 namespace {
 
@@ -19,6 +20,13 @@ std::string nameOf(Db& db, int64_t entity) {
     s.bind(1, entity);
     if (!s.step()) return "something";
     return s.colText(0);
+}
+
+// The player entity (singleton by convention). Read-only.
+int64_t playerEntity(Db& db) {
+    Stmt s = db.prepare("SELECT entity FROM player LIMIT 1");
+    if (!s.step()) throw std::runtime_error("render: world has no player entity");
+    return s.colInt(0);
 }
 
 // Room the actor currently stands in (for 'looked' with no destination).
@@ -132,11 +140,34 @@ std::string render(Db& db, int64_t turn) {
             out += "Time passes.\n";
         } else if (verb == "failed") {
             out += detail + "\n";
+        } else if (verb == "attacked") {
+            // Combat (REQ-COMBAT-37): the permanent template fallback. object
+            // carries the engine-owned damage number; the model never sets it.
+            out += "You strike the " + nameOf(db, subject) + " for " +
+                   std::to_string(object) + " damage.\n";
+        } else if (verb == "chip") {
+            // actor is the enemy; subject is the player (whom it wounds).
+            out += "The " + nameOf(db, actor) + " wounds you for " +
+                   std::to_string(object) + " damage.\n";
+        } else if (verb == "defeated") {
+            // subject = the fallen enemy (name survives), object = its grimoire.
+            out += "The " + nameOf(db, subject) + " falls. It drops the " +
+                   nameOf(db, object) + ".\n";
+        } else if (verb == "downed") {
+            // subject = player, object = the dormitory cell they wake in.
+            out += "The world tips and goes black. You wake on the cold floor "
+                   "of the dormitory cell.\n";
+            out += roomBlock(db, object);
         }
         // Unrecognized verbs (e.g. the architect's 'generated', REQ-ARCH-10)
         // render nothing: the template emits output only for the verbs it knows,
         // so a world-gen turn shows as its 'moved' block with no extra line.
     }
+
+    // Engine-authored combat status line (REQ-COMBAT-15): appended whenever a
+    // hostile shares the player's room. Self-gating (empty otherwise), so this
+    // is unconditional here and byte-identical to the AI path's append.
+    out += combatStatusLine(db, playerEntity(db));
 
     return out;
 }

@@ -78,6 +78,20 @@ int64_t tickStartHostile(Db& db, int64_t player) {
     return hostileInRoom(db, roomOf(db, player));
 }
 
+std::string combatStatusLine(Db& db, int64_t player) {
+    // Only during combat: a living hostile shares the player's room. Self-gating
+    // so both render paths can append it unconditionally.
+    if (hostileInRoom(db, roomOf(db, player)) == 0) return "";
+
+    Stmt s = db.prepare("SELECT current, max FROM health WHERE entity = ?");
+    s.bind(1, player);
+    if (!s.step()) return "";
+    const int64_t cur = s.colInt(0);
+    const int64_t mx = s.colInt(1);
+    // Brick 1: HP only. Step 12 prepends per-spell cooldown readiness.
+    return "HP: " + std::to_string(cur) + "/" + std::to_string(mx) + "\n";
+}
+
 void resolveCombat(Db& db, int64_t player, int64_t hostile) {
     if (hostile == 0) return;  // no hostile was present at tick start → no combat
 

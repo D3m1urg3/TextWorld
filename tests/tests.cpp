@@ -765,6 +765,58 @@ static bool contains(const std::string& haystack, const std::string& needle) {
     return haystack.find(needle) != std::string::npos;
 }
 
+// Combat narration via the permanent template path + the HP status line
+// (REQ-COMBAT-37, -15). AI is disabled hermetically, so runTurn renders through
+// the templates; the full Brick-1 loop is playable end to end, deterministically.
+static void testCombatRender() {
+    const TempDbFile worldPath("textworld_combat_render_tests.db");
+    Db db = openWorld(worldPath.string(), "tests/combat_fixture.sql");
+
+    // Non-combat tick (in the cell, no hostile): NO status line.
+    CHECK(!contains(runTurn(db, "look").output, "HP:"));
+
+    // Walk into the corridor: a hostile now shares the room, so the status line
+    // appears (full HP, no chip this tick — the player was in the cell at tick
+    // start).
+    CHECK(contains(runTurn(db, "go north").output, "HP: 12/12"));
+
+    // Attack tick: the 'attacked' + 'chip' combat lines render, plus the status
+    // line reflecting the chip already taken.
+    {
+        const std::string out = runTurn(db, "attack").output;
+        CHECK(contains(out, "You strike the goblin grunt for"));
+        CHECK(contains(out, "damage"));
+        CHECK(contains(out, "goblin grunt wounds you for"));  // chip line
+        CHECK(contains(out, "HP: 11/12"));
+    }
+
+    // Killing blow: the 'defeated' line names the fallen foe and its dropped
+    // grimoire; combat is over, so NO status line follows.
+    {
+        const std::string out = runTurn(db, "attack").output;
+        CHECK(contains(out, "goblin grunt falls"));
+        CHECK(contains(out, "grimoire"));
+        CHECK(!contains(out, "HP:"));
+    }
+
+    // The downed template (a fresh world; chip the player to 0). The downing
+    // tick renders the wake-in-cell line and the dormitory room block.
+    {
+        const TempDbFile downPath("textworld_combat_render_down_tests.db");
+        Db db2 = openWorld(downPath.string(), "tests/combat_fixture.sql");
+        CHECK(runTurn(db2, "go north").outcome == TurnOutcome::Ticked);
+        std::string downText;
+        for (int i = 0;
+             i < 100 &&
+             queryInt(db2, "SELECT container FROM location WHERE entity = 3") == 2;
+             ++i) {
+            downText = runTurn(db2, "wait").output;
+        }
+        CHECK(contains(downText, "wake on the cold floor"));
+        CHECK(queryInt(db2, "SELECT container FROM location WHERE entity = 3") == 1);
+    }
+}
+
 static void testRender() {
     const TempDbFile worldPath("textworld_render_tests.db");
 
@@ -3508,6 +3560,7 @@ int main() {
     testCombatChipClock();
     testCombatDefeat();
     testCombatDowned();
+    testCombatRender();
     testRender();
     testExitDisplayInvariant();
     testLoop();

@@ -26,7 +26,7 @@ in `./build/tests`.
 - [x] 3 — `Verb::Attack` + `resolveAttack` + `damageEntity` → `testCombatAttack` ✅
 - [x] 4 — enemy-turn system + chip lane → `testCombatChipClock` ✅
 - [x] 5 — defeat + grimoire drop + downed → `testCombatDefeat`, `testCombatDowned` ✅
-- [ ] 6 — narration + template + HP status line → `testCombatRender`
+- [x] 6 — narration + template + HP status line → `testCombatRender` ✅ **(Brick 1 done)**
 
 **BRICK 2 — Telegraph / counter / Cast / cooldowns**
 - [ ] 7 — schema: telegraph+cooldown+spells → `testCombatSchema` ext.
@@ -150,5 +150,26 @@ in `./build/tests`.
   downed event).
 - Gate: build clean; `./build/tests` → 2052 checks, 0 failures. combat.cpp raw-write
   grep empty. AI-Validation items 3 & 11 (known_spells clause deferred to Step 18).
+
+### Step 6 — combat narration + template fallback + HP status line ✅ (Brick 1 done)
+- `combat.{hpp,cpp}`: `combatStatusLine(db, player)` — "" outside combat, else
+  "HP: cur/max\n" (self-gating on a living hostile in the room). Cooldowns join
+  Step 12.
+- `render.cpp`: templates for `attacked`/`chip`/`defeated`/`downed` (object carries
+  the engine-owned number; the model never sets it). Appends `combatStatusLine`
+  unconditionally at the end (self-gating). Read-only preserved.
+- `prose.cpp`: `deterministicAppends` appends the SAME `combatStatusLine` helper →
+  byte-identical status line on template + AI paths (Step 12 verifies). buildFacts
+  needed NO change — its `verb <> 'generated'` filter already surfaces combat events,
+  and `object`(amount) is already excluded so the model never sees numbers.
+- **Standing template rule now in force** (binds Steps 8–18): every step adding a
+  combat event verb adds its render template + AI-disabled render assertion in the
+  same commit.
+- `testCombatRender`: no HP line out of combat; HP line on entering combat; attacked
+  + chip lines + HP on an attack tick; defeated line + no HP after the kill; downed
+  wake-line on the downing tick. Full Brick-1 loop playable end to end, AI-disabled.
+- Gate: build clean; `./build/tests` → 2078 checks, 0 failures.
+
+## BRICK 1 COMPLETE — the loop exists, someone can die, fully deterministic/offline.
 </content>
 </invoke>
