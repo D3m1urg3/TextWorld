@@ -46,7 +46,7 @@ in `./build/tests`.
 
 **BRICK 4 — Bestiary catalog / architect spawning / setting**
 - [x] 19 — bestiary catalog + refactor placement → `testBestiaryCatalog` ✅
-- [ ] 20 — eligible menu + gating + bootstrap + front → `testCombatGating`
+- [x] 20 — eligible menu + gating + bootstrap + front → `testCombatGating` ✅
 - [ ] 21 — setting.txt invasion → `testArchitectSettingLoad`-style
 - [ ] 22 — architect enemy spawn [HIGH — live LLM] → `testArchitectSpawn` (+ gated live)
 - [ ] 23 — final validation sweep → `testCombatDeterminismReplay` + sweeps
@@ -418,5 +418,46 @@ in `./build/tests`.
   reopen (entity survives, hostile/location gone). `testCombatSchema` extended with
   bestiary/drop_table column shapes. Covers AI-Validation item 13 (det. parts).
 - Gate: build clean; `./build/tests` → 2380 checks, 0 failures.
+
+### Step 20 — eligible menu + gating + bootstrap + front intensity ✅
+- `combat.{hpp,cpp}`: `eligibleArchetypes(db, room)` — read-only, deterministic,
+  no LLM. `kFrontRadius = 2` constant. Three composed gates:
+  - **Front (REQ-COMBAT-34):** `distanceFromSeed(room)` = BFS hop-distance from
+    kDormitoryCell over REALIZED exits (latent stubs are not edges). `> kFrontRadius`
+    → empty menu (safe edge). The single invasion knob; graph distance is the
+    repeatable metric.
+  - **Bootstrap (REQ-COMBAT-33):** `architectSpawnCount(db)` reads a `meta`
+    `architect_spawn_count` row (absent → 0). While 0, the menu is only
+    basic-soluble archetypes dropping a **tier-1** spell (goblin only). Ledger is
+    incremented ONLY by architect placement (Step 22) — the seed goblin never
+    counts, so a fresh world with the seed enemy still bootstraps.
+  - **Gating (REQ-COMBAT-32):** otherwise offer archetypes whose lock the player
+    can solve = `knowsAllRequiredKeys`: a barrier archetype needs a known
+    `effect='dispel'` spell; each weakness element (resistance `num>den`) needs a
+    known spell of that element. Basic-soluble archetypes require none → always
+    offered. Iterated `ORDER BY archetype` (stable, no RNG).
+- **Key design decision (the crux of gating):** `basicSoluble` = NOT barriered
+  AND NOT element-weak. This is what makes the gate meaningful — an element-lock
+  archetype (rime_touched, weak fire) is treated as REQUIRING its weakness key
+  even though REQ-COMBAT-18's floor means basic attack *could* grind it down. The
+  spec's two-branch "(solvable) OR (basic-soluble AND drops a lacked key)" union
+  collapses to "knows every required key" because basic-soluble ⟹ no required keys
+  ⟹ solvable; drop_table/tier are used by the BOOTSTRAP branch (which does need
+  them), not the general branch. This is the only reading consistent with the gate
+  ("lacking fire → no fire-locked archetype offered").
+- **required keys are DERIVED from data**, not hardcoded: barrier flag → dispel;
+  resistance weakness rows → element spells. So new archetypes gate correctly with
+  zero code change.
+- `combat_fixture.sql`: added **room 15 'outer hall'** off the frost study (6→15),
+  graph distance 3 from the seed — a safe edge beyond kFrontRadius, so the
+  empty-menu front check is self-contained. No existing test pins the fixture's
+  room/exit/entity counts (verified), so this is non-breaking.
+- `testCombatGating`: bootstrap menu = {goblin} (seed goblin ignored by the
+  ledger); post-bootstrap, lacking fire/dispel excludes rime/ironhide, includes
+  goblin/swarm; learning fire → rime eligible; learning dispel → ironhide eligible
+  (all four); the distance-3 outer hall yields an empty menu while the corridor
+  stays contested. Covers AI-Validation item 14.
+- `combat.cpp` raw-write grep still empty (all reads). Gate: build clean;
+  `./build/tests` → 2392 checks, 0 failures.
 </content>
 </invoke>

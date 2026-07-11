@@ -2,8 +2,10 @@
 
 #include <cctype>
 #include <optional>
+#include <queue>
 #include <stdexcept>
 #include <string>
+#include <unordered_set>
 #include <vector>
 
 #include "mutations.hpp"
@@ -135,6 +137,129 @@ void applyDot(Db& db, int64_t entity, int64_t actor) {
         const int64_t mag = s.colInt(0);
         if (mag > 0) damageEntity(db, entity, mag, actor, "dot");
     }
+}
+
+// --- eligible-menu gating (REQ-COMBAT-32, -33, -34) — read-only, deterministic --
+
+// The player entity (singleton by convention).
+int64_t playerEntity(Db& db) {
+    Stmt s = db.prepare("SELECT entity FROM player LIMIT 1");
+    if (!s.step()) throw std::runtime_error("combat: world has no player entity");
+    return s.colInt(0);
+}
+
+// Count of enemies the ARCHITECT has ever placed (REQ-COMBAT-33 ledger). A meta
+// row incremented only by architect placement (Step 22), NOT by the seed's
+// hand-placed enemy — absent row means zero (no architect spawn yet → bootstrap).
+int64_t architectSpawnCount(Db& db) {
+    Stmt s = db.prepare("SELECT value FROM meta WHERE key = 'architect_spawn_count'");
+    if (!s.step()) return 0;
+    return s.colInt(0);
+}
+
+// BFS hop-distance from the seed room (kDormitoryCell) to `room` over REALIZED
+// exits (dest non-NULL), or a large sentinel if unreachable — the deterministic
+// front-intensity metric (REQ-COMBAT-34). Latent (ungenerated) exits are not
+// edges: an unrealized frontier does not shorten the front.
+int64_t distanceFromSeed(Db& db, int64_t room) {
+    if (room == kDormitoryCell) return 0;
+    std::unordered_set<int64_t> visited{kDormitoryCell};
+    std::queue<int64_t> frontier;
+    frontier.push(kDormitoryCell);
+    int64_t depth = 0;
+    while (!frontier.empty()) {
+        ++depth;
+        for (size_t level = frontier.size(); level > 0; --level) {
+            const int64_t cur = frontier.front();
+            frontier.pop();
+            Stmt s = db.prepare(
+                "SELECT dest FROM exits WHERE room = ? AND dest IS NOT NULL");
+            s.bind(1, cur);
+            while (s.step()) {
+                const int64_t next = s.colInt(0);
+                if (visited.insert(next).second) {
+                    if (next == room) return depth;
+                    frontier.push(next);
+                }
+            }
+        }
+    }
+    return INT64_MAX;  // unreachable → treat as maximally far (a safe edge)
+}
+
+// A barriered archetype (defense lock, REQ-COMBAT-17): its bestiary barrier flag.
+bool barrierArchetype(Db& db, const std::string& archetype) {
+    Stmt s = db.prepare("SELECT barrier FROM bestiary WHERE archetype = ?");
+    s.bind(1, archetype);
+    if (!s.step()) return false;
+    return s.colInt(0) != 0;
+}
+
+// The element(s) an archetype is WEAK to (resistance ratio > 1, i.e. num > den) —
+// the keys of an element lock. A resistance (num < den) is not a weakness and
+// imposes no key.
+std::vector<std::string> weaknessElements(Db& db, const std::string& archetype) {
+    std::vector<std::string> elems;
+    Stmt s = db.prepare(
+        "SELECT element FROM resistance "
+        "WHERE archetype = ? AND multiplier_num > multiplier_den");
+    s.bind(1, archetype);
+    while (s.step()) elems.push_back(s.colText(0));
+    return elems;
+}
+
+// Basic-attack-soluble (REQ-COMBAT-18 floor, gating sense): no hard lock a basic
+// attack cannot answer — neither a barrier (negates basic damage entirely) nor an
+// element weakness (which the gating treats as requiring its element key). Pure
+// telegraph/multiplicity archetypes are basic-soluble.
+bool basicSoluble(Db& db, const std::string& archetype) {
+    return !barrierArchetype(db, archetype) &&
+           weaknessElements(db, archetype).empty();
+}
+
+// The tier of the spell this archetype drops (drop_table → spell_catalog), or 0
+// if it drops nothing — the ordinal the bootstrap rule keys on (REQ-COMBAT-33).
+int64_t dropTier(Db& db, const std::string& archetype) {
+    Stmt s = db.prepare(
+        "SELECT sc.tier FROM drop_table d "
+        "JOIN spell_catalog sc ON sc.spell = d.spell WHERE d.archetype = ?");
+    s.bind(1, archetype);
+    if (!s.step()) return 0;
+    return s.colInt(0);
+}
+
+// Whether `player` knows a spell whose catalog `effect` matches (e.g. 'dispel').
+bool knowsSpellWithEffect(Db& db, int64_t player, const char* effect) {
+    Stmt s = db.prepare(
+        "SELECT 1 FROM known_spells ks JOIN spell_catalog sc ON sc.spell = ks.spell "
+        "WHERE ks.entity = ? AND sc.effect = ? LIMIT 1");
+    s.bind(1, player);
+    s.bind(2, std::string(effect));
+    return s.step();
+}
+
+// Whether `player` knows any spell of catalog `element` (the element lock key).
+bool knowsSpellOfElement(Db& db, int64_t player, const std::string& element) {
+    Stmt s = db.prepare(
+        "SELECT 1 FROM known_spells ks JOIN spell_catalog sc ON sc.spell = ks.spell "
+        "WHERE ks.entity = ? AND sc.element = ? LIMIT 1");
+    s.bind(1, player);
+    s.bind(2, element);
+    return s.step();
+}
+
+// Whether `player` knows EVERY key `archetype`'s lock requires (REQ-COMBAT-32): a
+// dispel for a barrier, and a spell of each weakness element. A basic-soluble
+// archetype requires none, so this is trivially true for it.
+bool knowsAllRequiredKeys(Db& db, int64_t player, const std::string& archetype) {
+    if (barrierArchetype(db, archetype) &&
+        !knowsSpellWithEffect(db, player, "dispel")) {
+        return false;
+    }
+    for (const std::string& elem : weaknessElements(db, archetype)) {
+        if (!knowsSpellOfElement(db, player, elem)) return false;
+    }
+    return true;
 }
 
 }  // namespace
@@ -426,4 +551,37 @@ void resolveCombat(Db& db, int64_t player, int64_t startRoom) {
     if (playerHp && *playerHp <= 0) {
         downPlayer(db, player, bodies.front(), kDormitoryCell, player);
     }
+}
+
+std::vector<std::string> eligibleArchetypes(Db& db, int64_t room) {
+    std::vector<std::string> menu;
+
+    // Front intensity (REQ-COMBAT-34): a safe-edge room — beyond the front radius
+    // from the seed — offers nothing, before any other gate is consulted.
+    if (distanceFromSeed(db, room) > kFrontRadius) return menu;
+
+    const int64_t player = playerEntity(db);
+    const bool bootstrap = architectSpawnCount(db) == 0;
+
+    // Archetype names in a stable order (no RNG) — the menu is replayable.
+    Stmt s = db.prepare("SELECT archetype FROM bestiary ORDER BY archetype");
+    while (s.step()) {
+        const std::string archetype = s.colText(0);
+        if (bootstrap) {
+            // Bootstrap (REQ-COMBAT-33): the first architect enemy must be
+            // basic-soluble and drop a tier-1 (starter) spell, so the key chain
+            // can start from an empty spellbook. The seed enemy does not count.
+            if (basicSoluble(db, archetype) && dropTier(db, archetype) == 1) {
+                menu.push_back(archetype);
+            }
+        } else {
+            // Gating (REQ-COMBAT-32): offer only archetypes whose lock the player
+            // can already solve — knows every required key. No deadlock by
+            // construction (basic-soluble archetypes require none).
+            if (knowsAllRequiredKeys(db, player, archetype)) {
+                menu.push_back(archetype);
+            }
+        }
+    }
+    return menu;
 }

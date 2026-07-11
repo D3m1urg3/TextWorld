@@ -8,6 +8,7 @@
 #include <cstdint>
 #include <optional>
 #include <string>
+#include <vector>
 
 #include "db.hpp"
 
@@ -47,6 +48,13 @@ inline constexpr int64_t kDotDuration = 2;
 // AoE damage dealt to every hostile in the room (REQ-COMBAT-17 multiplicity).
 inline constexpr int64_t kAoeDamage = 3;
 
+// Front intensity (REQ-COMBAT-34): the single invasion-front knob. Rooms within
+// this many hops of the seed room (kDormitoryCell) are contested — eligible for
+// architect-spawned enemies — and rooms beyond are safe edges with an empty menu.
+// Graph distance from the seed is the deterministic, repeatable metric; the exact
+// radius is engine-owned tuning. Near the breached core = contested, far = safe.
+inline constexpr int64_t kFrontRadius = 2;
+
 // The living hostile (health.current > 0) sharing `room`, or 0 if none (lowest
 // entity id when several). Read-only. Exposed so resolveGo can refuse a flee into
 // an ungenerated exit while an enemy is present (REQ-COMBAT-26).
@@ -85,6 +93,24 @@ void resolveCast(Db& db, int64_t player, const std::string& spell);
 // else a single trailing-newline line. Brick 1: "HP: current/max"; per-spell
 // cooldown readiness joins in Step 12. Read-only.
 std::string combatStatusLine(Db& db, int64_t player);
+
+// The engine-computed eligible archetype menu for `room` (REQ-COMBAT-32, -33,
+// -34), wholly deterministic — no RNG, no LLM. Returns the archetype names the
+// architect may select from when generating this room (Step 22), ordered by name
+// for determinism, or an EMPTY vector when the room is a safe edge (beyond the
+// front radius from the seed) or nothing qualifies. Three gates compose:
+//   - Front intensity (REQ-COMBAT-34): safe-edge rooms offer nothing.
+//   - Bootstrap (REQ-COMBAT-33): while no architect enemy has ever been placed,
+//     the menu is only the basic-attack-soluble archetypes that drop a tier-1
+//     spell — so the key chain can start. The seed's hand-placed enemy does NOT
+//     count against this ledger (architect_spawn_count in meta, incremented only
+//     by architect placement).
+//   - Gating (REQ-COMBAT-32): otherwise offer only archetypes whose lock the
+//     player can already solve — knows EVERY required key (a barrier archetype
+//     needs a dispel spell; each element weakness needs a spell of that element).
+//     Basic-soluble archetypes require no keys, so they are always offered.
+// Read-only.
+std::vector<std::string> eligibleArchetypes(Db& db, int64_t room);
 
 // The enemy-turn system (REQ-COMBAT-1, -2, -9, -12, -17): the first non-player
 // actor. Called from runTurn AFTER resolve(), inside the SAME tick transaction,

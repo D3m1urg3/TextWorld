@@ -18,9 +18,11 @@
 --  10: hostile 'ironhide brute' (health 14/14, chip 1, barriered), in the armory
 --  11: room 'library'
 --  12,13,14: hostile 'book swarm' bodies (health 10/10, chip 1), in the library
+--  15: room 'outer hall' — a safe edge, graph distance 3 from the seed (room 1),
+--      beyond the front radius: its eligible-enemy menu is empty (REQ-COMBAT-34)
 
 INSERT INTO entities(id) VALUES
-  (1), (2), (3), (4), (5), (6), (7), (8), (9), (10), (11), (12), (13), (14);
+  (1), (2), (3), (4), (5), (6), (7), (8), (9), (10), (11), (12), (13), (14), (15);
 
 -- 1: room 'cell'
 INSERT INTO room(entity) VALUES (1);
@@ -47,6 +49,12 @@ INSERT INTO room(entity) VALUES (11);
 INSERT INTO name(entity, value) VALUES (11, 'library');
 INSERT INTO description(entity, prose) VALUES (11, 'A vaulted library, shelves stirring.');
 
+-- 15: room 'outer hall', off the frost study via east — distance 3 from the seed
+-- (1 → 2 → 6 → 15), a safe edge beyond the front radius (REQ-COMBAT-34).
+INSERT INTO room(entity) VALUES (15);
+INSERT INTO name(entity, value) VALUES (15, 'outer hall');
+INSERT INTO description(entity, prose) VALUES (15, 'A still hall at the quiet edge.');
+
 -- exits: north 1->2, south 2->1 (realized pair; flee tests use the return leg);
 -- east 2->6, west 6->2 (frost study); up 2->9, down 9->2 (armory);
 -- down 1->11, up 11->1 (library, off the cell so the swarm is reachable alone).
@@ -58,7 +66,9 @@ INSERT INTO exits(room, direction, dest) VALUES
   (2, 'up', 9),
   (9, 'down', 2),
   (1, 'down', 11),
-  (11, 'up', 1);
+  (11, 'up', 1),
+  (6, 'east', 15),
+  (15, 'west', 6);
 -- a latent frontier stub off the corridor (flee-into-the-unknown is refused)
 INSERT INTO exits(room, direction, dest) VALUES
   (2, 'north', NULL);

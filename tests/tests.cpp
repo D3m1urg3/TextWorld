@@ -1142,6 +1142,75 @@ static void testBestiaryCatalog() {
     }
 }
 
+// The engine-computed eligible menu (REQ-COMBAT-32, -33, -34): gated by the
+// player's known keys, the bootstrap ledger, and front intensity — wholly
+// deterministic, no network. A helper: does the menu contain an archetype?
+static bool menuHas(const std::vector<std::string>& menu, const char* archetype) {
+    return std::find(menu.begin(), menu.end(), std::string(archetype)) != menu.end();
+}
+
+static void testCombatGating() {
+    const TempDbFile worldPath("textworld_combat_gating_tests.db");
+    Db db = openWorld(worldPath.string(), "tests/combat_fixture.sql");
+
+    // The corridor (room 2, distance 1 from the seed) is contested. The player
+    // (entity 3) starts knowing {ward, stun}; it lacks fire and dispel.
+
+    // Bootstrap (REQ-COMBAT-33): architect_spawn_count is absent (→ 0), so the
+    // menu is the bootstrap menu — basic-soluble archetypes dropping a tier-1
+    // spell. Only the goblin qualifies (basic-soluble, drops tier-1 fire): the
+    // rime/ironhide aren't basic-soluble, the swarm drops tier-2 blast. The seed's
+    // hand-placed goblin does NOT count against the ledger — the menu is non-empty
+    // even though a goblin already stands in this world (the ledger ignores it).
+    {
+        const std::vector<std::string> menu = eligibleArchetypes(db, 2);
+        CHECK(menu.size() == 1);
+        CHECK(menuHas(menu, "goblin_grunt"));
+    }
+
+    // Mark the world as already-bootstrapped (an architect enemy has been placed),
+    // so the general gating applies from here.
+    db.exec("INSERT INTO meta(key, value) VALUES ('architect_spawn_count', 1)");
+
+    // Gating (REQ-COMBAT-32): lacking fire, the fire-locked rime_touched is NOT
+    // offered; lacking dispel, the barriered ironhide is NOT offered. The two
+    // keyless archetypes (goblin, swarm) are offered.
+    {
+        const std::vector<std::string> menu = eligibleArchetypes(db, 2);
+        CHECK(!menuHas(menu, "rime_touched"));
+        CHECK(!menuHas(menu, "ironhide"));
+        CHECK(menuHas(menu, "goblin_grunt"));
+        CHECK(menuHas(menu, "book_swarm"));
+    }
+
+    // Learn fire → the fire-weak rime_touched becomes eligible; ironhide still
+    // gated (no dispel).
+    db.exec("INSERT INTO known_spells(entity, spell) VALUES (3, 'fire')");
+    {
+        const std::vector<std::string> menu = eligibleArchetypes(db, 2);
+        CHECK(menuHas(menu, "rime_touched"));
+        CHECK(!menuHas(menu, "ironhide"));
+    }
+
+    // Learn dispel → the barriered ironhide becomes eligible; now all four are.
+    db.exec("INSERT INTO known_spells(entity, spell) VALUES (3, 'dispel')");
+    {
+        const std::vector<std::string> menu = eligibleArchetypes(db, 2);
+        CHECK(menuHas(menu, "ironhide"));
+        CHECK(menu.size() == 4);
+    }
+
+    // Front intensity (REQ-COMBAT-34): the outer hall (room 15, distance 3 from
+    // the seed — beyond kFrontRadius) is a safe edge; its menu is empty regardless
+    // of player keys.
+    {
+        const std::vector<std::string> menu = eligibleArchetypes(db, 15);
+        CHECK(menu.empty());
+    }
+    // And the seed-adjacent corridor stays contested (non-empty) for contrast.
+    CHECK(!eligibleArchetypes(db, 2).empty());
+}
+
 // Multiplicity lock: AoE and DoT reach every body of a swarm; single-target
 // basic attack thins them one at a time (REQ-COMBAT-17, -19). Deterministic.
 static void testCombatMultiplicity() {
@@ -4267,6 +4336,7 @@ int main() {
     testCombatMultiplicity();
     testCombatLearn();
     testBestiaryCatalog();
+    testCombatGating();
     testRender();
     testExitDisplayInvariant();
     testLoop();
