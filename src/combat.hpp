@@ -112,6 +112,21 @@ std::string combatStatusLine(Db& db, int64_t player);
 // Read-only.
 std::vector<std::string> eligibleArchetypes(Db& db, int64_t room);
 
+// The eligible enemy choices for the room the architect is about to create beyond
+// `originRoom` (REQ-COMBAT-31), each rendered as its BLURB — the only archetype
+// field the model ever sees (REQ-COMBAT-29). The prospective room is one hop past
+// the origin, so its front distance (REQ-COMBAT-34) is the origin's plus one.
+// Empty when that room is a safe edge or nothing qualifies → the architect's
+// enemy field is omitted entirely. Read-only.
+std::vector<std::string> eligibleEnemyBlurbs(Db& db, int64_t originRoom);
+
+// Resolve a model-selected `blurb` back to its archetype tag, but ONLY if it is a
+// currently-eligible choice for the room beyond `originRoom` — the engine
+// re-checks the menu authoritatively (REQ-COMBAT-31), so a hallucinated, stale,
+// or empty selection resolves to "" and places nothing. Read-only.
+std::string archetypeForEnemyBlurb(Db& db, int64_t originRoom,
+                                   const std::string& blurb);
+
 // The enemy-turn system (REQ-COMBAT-1, -2, -9, -12, -17): the first non-player
 // actor. Called from runTurn AFTER resolve(), inside the SAME tick transaction,
 // keyed on `startRoom` = the room the player stood in at TICK START — captured

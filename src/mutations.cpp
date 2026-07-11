@@ -405,6 +405,15 @@ void downPlayer(Db& db, int64_t player, int64_t enemy, int64_t safeRoom,
     appendEvent(db, actor, "downed", player, safeRoom, nullptr);
 }
 
+void recordArchitectSpawn(Db& db) {
+    // Upsert the bootstrap ledger (REQ-COMBAT-33): create at 1 on the first
+    // architect placement, increment thereafter. A meta bookkeeping row like
+    // meta.turn — no event, no component write.
+    db.exec(
+        "INSERT INTO meta(key, value) VALUES ('architect_spawn_count', 1) "
+        "ON CONFLICT(key) DO UPDATE SET value = value + 1");
+}
+
 int64_t writeGeneratedRoom(Db& db, int64_t originRoom,
                            const std::string& direction,
                            const RoomProposal& proposal, int64_t actor) {

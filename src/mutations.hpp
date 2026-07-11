@@ -132,6 +132,15 @@ void downPlayer(Db& db, int64_t player, int64_t enemy, int64_t safeRoom,
 // instance's entity id. Never begins/commits.
 int64_t placeEnemy(Db& db, const std::string& archetype, int64_t room);
 
+// Record that the ARCHITECT placed an enemy — increment the bootstrap ledger
+// (REQ-COMBAT-33), upserting meta.architect_spawn_count (absent → 1, else +1).
+// Called by architectGenerate right after a placeEnemy on the generated room, so
+// the "first-ever architect spawn" rule fires exactly once. NOT called by the
+// seed's hand-placed enemy (which uses SQL, never this path), so the seed goblin
+// never counts against the ledger. Event-free bookkeeping (like meta.turn); the
+// enemy's appearance is recorded by the room's 'generated' event. Never begins/commits.
+void recordArchitectSpawn(Db& db);
+
 // The SOLE sanctioned write path for a generated room (REQ-ARCH-9), inside the
 // caller's ambient transaction. The model proposes flavor; the engine disposes:
 // this helper MINTS one entity (the first runtime entity mint), writes its

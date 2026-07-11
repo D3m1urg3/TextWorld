@@ -30,6 +30,11 @@ struct RoomProposal {
     // The cleaned set of invertible onward directions the model declared, minus
     // the entry-return direction (REQ-EXITS-7). Empty = a dead end.
     std::vector<std::string> exits;
+    // The enemy BLURB the model optionally selected (REQ-COMBAT-31): the raw,
+    // trimmed string from the `enemy` field, or "" for none. Extracted LENIENTLY
+    // at the gate; the engine re-checks it against the eligible menu and maps it
+    // to an archetype before placing (a hallucinated blurb places nothing).
+    std::string enemyBlurb;
 };
 
 // The architect's system prompt (REQ-ARCH-7c) — git-versioned, like the
@@ -63,7 +68,16 @@ std::string buildArchitectContext(Db& db, int64_t room,
 // TEXTWORLD_MODEL if set and non-empty (else claude-opus-4-8; shared with the
 // renderer/resolver), max_tokens 1024, system = kArchitectPrompt, one user
 // message carrying the context payload. No thinking, no stream, no cache keys.
-std::string buildArchitectRequestBody(const std::string& contextPayload);
+//
+// `enemyBlurbs` (REQ-COMBAT-31): when non-empty, the create_room schema gains one
+// OPTIONAL `enemy` string constrained to a schema-enforced ENUM of exactly these
+// blurbs — the eligible archetype choices the engine computed (REQ-COMBAT-29/-32:
+// blurbs only, never ids/numbers/stats). The model may select at most one or omit
+// it. Empty (the default) → no `enemy` field at all, so a non-combat world's body
+// is byte-identical to before.
+std::string buildArchitectRequestBody(
+    const std::string& contextPayload,
+    const std::vector<std::string>& enemyBlurbs = {});
 
 // DISPLAY / ontology gate for latent exits (REQ-EXITS-4, micro-decision #2).
 // Whether a latent (NULL-dest) exit is an attemptable direction at all — an

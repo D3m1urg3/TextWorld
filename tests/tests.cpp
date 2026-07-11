@@ -3337,6 +3337,80 @@ static void testArchitectLiveSmoke() {
     CHECK(!verdict.empty());  // structural only — a human reads the yes/no + line
 }
 
+// Combat live smoke (REQ-COMBAT-31, live half of -35/-37/-38): gated behind
+// TEXTWORLD_AI_LIVE_TEST=1, never run by default. Mechanical assertions ONLY —
+// never model wording, never a prompt-tune loop ([[verification-must-be-bounded]]).
+// It drives ONE real generation into a contested room and asserts that IF the
+// model placed an enemy, that instance's stats equal the catalog (the model wrote
+// no number); a model that places nothing is a clean fallback, not a failure.
+static void testCombatLiveSmoke() {
+    const char* live = std::getenv("TEXTWORLD_AI_LIVE_TEST");
+    if (live == nullptr || std::string(live) != "1") {
+        return;  // default run: no-op, no network.
+    }
+    const char* key = std::getenv("ANTHROPIC_API_KEY");
+    if (key == nullptr || key[0] == '\0') {
+        std::fprintf(stderr,
+                     "COMBAT LIVE SMOKE SKIPPED: TEXTWORLD_AI_LIVE_TEST=1 but "
+                     "ANTHROPIC_API_KEY is unset/empty.\n");
+        return;
+    }
+    std::fprintf(stderr,
+                 "COMBAT LIVE SMOKE: generating a contested room through the "
+                 "Anthropic API (this makes a network call)...\n");
+
+    const TempDbFile worldPath("textworld_combat_live_smoke.db");
+    Db db = openWorld(worldPath.string(), "seed/base.sql");
+
+    // Clear the seed goblin from the corridor so the latent frontier off it is no
+    // longer flee-guarded (REQ-COMBAT-26) — these ticks make NO network call.
+    CHECK(runTurn(db, "go north").outcome == TurnOutcome::Ticked);   // cell -> corridor
+    CHECK(runTurn(db, "attack").outcome == TurnOutcome::Ticked);     // 8 -> 4
+    CHECK(runTurn(db, "attack").outcome == TurnOutcome::Ticked);     // 4 -> 0, defeated
+    CHECK(queryInt(db, "SELECT COUNT(*) FROM hostile WHERE archetype = 'goblin_grunt' "
+                       "AND entity = 7") == 0);
+    // The seed goblin never counted against the architect ledger (REQ-COMBAT-33).
+    CHECK(queryInt(db, "SELECT COUNT(*) FROM meta WHERE key = 'architect_spawn_count'") == 0);
+
+    const int64_t before = queryInt(db, "SELECT container FROM location WHERE entity = 3");
+    // Walk a latent exit off the now-clear corridor → a room at graph distance 2
+    // (contested): the model is offered the bootstrap menu and MAY place an enemy.
+    const std::string out = runTurn(db, "go up").output;
+    const int64_t after = queryInt(db, "SELECT container FROM location WHERE entity = 3");
+
+    if (after == before) {
+        std::fprintf(stderr,
+                     "  (generation declined — clean fallback, smoke stops)\n");
+        return;
+    }
+
+    // A room was generated and entered. If the model placed an enemy in it, the
+    // instance's stats MUST equal its catalog row — the model selected a costume,
+    // the engine minted every number (REQ-COMBAT-29/-31).
+    const int64_t hostiles = queryInt(
+        db, ("SELECT COUNT(*) FROM hostile h JOIN location l ON l.entity = h.entity "
+             "WHERE l.container = " + std::to_string(after)).c_str());
+    if (hostiles == 0) {
+        std::fprintf(stderr, "  (model placed no enemy — a clear room, allowed)\n");
+    } else {
+        std::fprintf(stderr, "  (model placed %lld enemy/enemies — checking catalog "
+                             "equality)\n", static_cast<long long>(hostiles));
+        // Every placed body equals its bestiary row; zero mismatches.
+        CHECK(queryInt(db,
+                       ("SELECT COUNT(*) FROM hostile h "
+                        "JOIN bestiary b ON b.archetype = h.archetype "
+                        "JOIN health hp ON hp.entity = h.entity "
+                        "JOIN location l ON l.entity = h.entity "
+                        "WHERE l.container = " + std::to_string(after) + " AND ("
+                        "h.chip <> b.chip OR h.telegraph_period <> b.telegraph_period "
+                        "OR hp.max <> b.health OR hp.current <> b.health)").c_str()) == 0);
+        // The bootstrap enemy is basic-soluble and dropped a tier-1 key: the
+        // ledger advanced (REQ-COMBAT-33). Mechanical, not wording.
+        CHECK(queryInt(db,
+                       "SELECT value FROM meta WHERE key = 'architect_spawn_count'") >= 1);
+    }
+}
+
 // --- persistence after play (REQ-PROTO-12 item 8, REQ-PROTO-10): a played
 // world survives a full close/reopen with turn counter, entity positions, and
 // the complete event transcript intact — and is still playable afterward. ---
@@ -3661,7 +3735,7 @@ static void testArchitectRequestBody() {
 // documented structure, NEVER a network probe.
 static HttpResponse cannedCreateRoom(
     const std::string& name, const std::string& description,
-    const std::vector<std::string>& exits = {}) {
+    const std::vector<std::string>& exits = {}, const std::string& enemy = "") {
     nlohmann::json input;
     input["name"] = name;
     input["description"] = description;
@@ -3669,6 +3743,10 @@ static HttpResponse cannedCreateRoom(
     // cannedToolUse carries optional fields (REQ-EXITS-7 fixture).
     if (!exits.empty()) {
         input["exits"] = exits;
+    }
+    // Optional enemy selection (REQ-COMBAT-31): a blurb the model "chose".
+    if (!enemy.empty()) {
+        input["enemy"] = enemy;
     }
 
     nlohmann::json block;
@@ -4010,6 +4088,157 @@ static void testArchitectGenerate() {
     }
 }
 
+// Architect enemy spawning (REQ-COMBAT-31, -35): the deterministic half, driven
+// by a fake transport (cannedCreateRoom with an optional enemy blurb). The model
+// SELECTS a costume from the engine's eligible enum; the engine mints the
+// instance from the catalog. No network. The live half is testCombatLiveSmoke,
+// gated behind TEXTWORLD_AI_LIVE_TEST=1.
+static void testArchitectSpawn() {
+    const int64_t player = 3;
+
+    // Helper: count / read the lone hostile in a room.
+    auto hostilesIn = [](Db& db, int64_t room) {
+        return queryInt(db, ("SELECT COUNT(*) FROM hostile h JOIN location l "
+                             "ON l.entity = h.entity WHERE l.container = " +
+                             std::to_string(room)).c_str());
+    };
+
+    // --- (a) bootstrap spawn: the model selects the goblin blurb → the room is
+    //     made AND a catalog-equal goblin instance is placed; the ledger ticks. ---
+    {
+        const TempDbFile worldPath("textworld_arch_spawn_ok.db");
+        Db db = openWorld(worldPath.string(), "tests/combat_fixture.sql");
+        const std::string goblinBlurb = queryText(
+            db, "SELECT blurb FROM bestiary WHERE archetype = 'goblin_grunt'");
+
+        int calls = 0;
+        std::string sentBody;
+        HttpTransport fake = [&](const std::string& body) {
+            ++calls;
+            sentBody = body;
+            return cannedCreateRoom("breached study", "A study with a broken door.",
+                                    {}, goblinBlurb);
+        };
+
+        // Generate east off the cell (room 1, distance 0) → new room distance 1,
+        // contested; bootstrap (ledger 0) offers only the goblin.
+        db.begin();
+        const bool ok = architectGenerate(db, 1, "east", player, fake);
+        db.commit();
+        CHECK(ok);
+        CHECK(calls == 1);
+
+        // The request offered an `enemy` enum — blurbs only — containing exactly
+        // the one bootstrap choice.
+        {
+            const nlohmann::json j = nlohmann::json::parse(sentBody);
+            const nlohmann::json& props =
+                j["tools"][0]["input_schema"]["properties"];
+            CHECK(props.contains("enemy"));
+            CHECK(props["enemy"]["type"] == "string");
+            const nlohmann::json& en = props["enemy"]["enum"];
+            CHECK(en.is_array() && en.size() == 1);
+            CHECK(std::find(en.begin(), en.end(), goblinBlurb) != en.end());
+            // enemy is optional — not in the required set.
+            CHECK(j["tools"][0]["input_schema"]["required"] ==
+                  nlohmann::json::array({"name", "description"}));
+        }
+
+        const int64_t newRoom = queryInt(
+            db, "SELECT dest FROM exits WHERE room = 1 AND direction = 'east'");
+        CHECK(newRoom > 15);  // engine-minted, beyond the seeded ids
+        CHECK(hostilesIn(db, newRoom) == 1);
+
+        // The placed instance is a catalog-equal goblin (the model wrote no
+        // number — placeEnemy copies every stat from the bestiary).
+        CHECK(queryInt(db,
+                       ("SELECT (h.archetype = 'goblin_grunt' AND h.chip = b.chip "
+                        "AND h.telegraph_period = b.telegraph_period "
+                        "AND hp.max = b.health AND hp.current = b.health) "
+                        "FROM hostile h JOIN bestiary b ON b.archetype = h.archetype "
+                        "JOIN health hp ON hp.entity = h.entity "
+                        "JOIN location l ON l.entity = h.entity "
+                        "WHERE l.container = " + std::to_string(newRoom)).c_str()) == 1);
+        // The bootstrap ledger ticked exactly once.
+        CHECK(queryInt(db,
+                       "SELECT value FROM meta WHERE key = 'architect_spawn_count'") == 1);
+    }
+
+    // --- (b) no enemy selected → room made, no hostile, ledger never created. ---
+    {
+        const TempDbFile worldPath("textworld_arch_spawn_none.db");
+        Db db = openWorld(worldPath.string(), "tests/combat_fixture.sql");
+        HttpTransport fake = [&](const std::string&) {
+            return cannedCreateRoom("empty study", "A quiet, empty study.");
+        };
+        db.begin();
+        CHECK(architectGenerate(db, 1, "east", player, fake));
+        db.commit();
+        const int64_t newRoom = queryInt(
+            db, "SELECT dest FROM exits WHERE room = 1 AND direction = 'east'");
+        CHECK(hostilesIn(db, newRoom) == 0);
+        CHECK(queryInt(db,
+                       "SELECT COUNT(*) FROM meta WHERE key = 'architect_spawn_count'") == 0);
+    }
+
+    // --- (c) ineligible / hallucinated blurb → no spawn, room still made. ---
+    {
+        const TempDbFile worldPath("textworld_arch_spawn_bad.db");
+        Db db = openWorld(worldPath.string(), "tests/combat_fixture.sql");
+        HttpTransport fake = [&](const std::string&) {
+            return cannedCreateRoom("study", "A study.", {},
+                                    "a dragon of pure invention");
+        };
+        db.begin();
+        CHECK(architectGenerate(db, 1, "east", player, fake));
+        db.commit();
+        const int64_t newRoom = queryInt(
+            db, "SELECT dest FROM exits WHERE room = 1 AND direction = 'east'");
+        CHECK(hostilesIn(db, newRoom) == 0);
+        CHECK(queryInt(db,
+                       "SELECT COUNT(*) FROM meta WHERE key = 'architect_spawn_count'") == 0);
+    }
+
+    // --- (d) safe-edge target room → the schema offers NO enemy field at all. ---
+    // Generate north off the outer hall (room 15, distance 3) → new room distance
+    // 4, beyond the front radius: an empty menu, so no `enemy` property exists.
+    {
+        const TempDbFile worldPath("textworld_arch_spawn_edge.db");
+        Db db = openWorld(worldPath.string(), "tests/combat_fixture.sql");
+        std::string sentBody;
+        HttpTransport fake = [&](const std::string& body) {
+            sentBody = body;
+            return cannedCreateRoom("far room", "A far, still room.");
+        };
+        db.begin();
+        CHECK(architectGenerate(db, 15, "north", player, fake));
+        db.commit();
+        const nlohmann::json j = nlohmann::json::parse(sentBody);
+        CHECK(!j["tools"][0]["input_schema"]["properties"].contains("enemy"));
+    }
+
+    // --- (e) generation FAILURE (transport error) → no room, no enemy, no ledger
+    //     (REQ-COMBAT-35): the same silent-fallback boundary as room generation. ---
+    {
+        const TempDbFile worldPath("textworld_arch_spawn_fail.db");
+        Db db = openWorld(worldPath.string(), "tests/combat_fixture.sql");
+        const int64_t hostiles0 = queryInt(db, "SELECT COUNT(*) FROM hostile");
+        HttpTransport err = [&](const std::string&) {
+            HttpResponse r;
+            r.transportError = true;
+            return r;
+        };
+        db.begin();
+        CHECK(!architectGenerate(db, 1, "east", player, err));
+        db.commit();
+        CHECK(queryInt(db, "SELECT COUNT(*) FROM hostile") == hostiles0);
+        CHECK(queryInt(db,
+                       "SELECT COUNT(*) FROM exits WHERE room = 1 AND direction = 'east'") == 0);
+        CHECK(queryInt(db,
+                       "SELECT COUNT(*) FROM meta WHERE key = 'architect_spawn_count'") == 0);
+    }
+}
+
 // Tick helper that injects the architect's transport into resolve (Go world-gen
 // seam), mirroring the production tick but with NO network.
 static void tickT(Db& db, const Action& a, const HttpTransport& transport,
@@ -4335,6 +4564,7 @@ int main() {
     testProseLiveSmoke();
     testNlResolveLiveSmoke();
     testArchitectLiveSmoke();  // MUST be here — before the hermetic key unset below
+    testCombatLiveSmoke();     // likewise: gated live network, before the key unset
 
     // Hermetic run: clear both AI env vars for the whole suite (guards
     // restore the developer's values on exit). Otherwise a developer shell
@@ -4399,6 +4629,7 @@ int main() {
     testArchitectInvertible();
     testWriteGeneratedRoom();
     testArchitectGenerate();
+    testArchitectSpawn();
     testResolveGoGenerate();
     testCombatFlee();
     testGeneratedEventInvisible();

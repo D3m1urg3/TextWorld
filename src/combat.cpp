@@ -262,6 +262,48 @@ bool knowsAllRequiredKeys(Db& db, int64_t player, const std::string& archetype) 
     return true;
 }
 
+// The gated archetype menu given whether the target room is `contested` by the
+// front (REQ-COMBAT-32, -33). Shared by the existing-room and prospective-room
+// entry points. Empty when not contested. Ordered by archetype (deterministic).
+std::vector<std::string> gatedMenu(Db& db, bool contested) {
+    std::vector<std::string> menu;
+    if (!contested) return menu;
+    const int64_t player = playerEntity(db);
+    const bool bootstrap = architectSpawnCount(db) == 0;
+    Stmt s = db.prepare("SELECT archetype FROM bestiary ORDER BY archetype");
+    while (s.step()) {
+        const std::string archetype = s.colText(0);
+        if (bootstrap) {
+            if (basicSoluble(db, archetype) && dropTier(db, archetype) == 1) {
+                menu.push_back(archetype);
+            }
+        } else if (knowsAllRequiredKeys(db, player, archetype)) {
+            menu.push_back(archetype);
+        }
+    }
+    return menu;
+}
+
+// The eligible menu for the room the architect is ABOUT to create beyond
+// `originRoom`. The prospective room's only initial link is back to the origin,
+// so its front distance is one hop past the origin's (REQ-COMBAT-34). Used to
+// build the architect's enemy enum and to re-check a selection authoritatively.
+std::vector<std::string> eligibleArchetypesForNewRoom(Db& db, int64_t originRoom) {
+    const int64_t originDist = distanceFromSeed(db, originRoom);
+    const int64_t newDist =
+        (originDist == INT64_MAX) ? INT64_MAX : originDist + 1;
+    return gatedMenu(db, newDist <= kFrontRadius);
+}
+
+// An archetype's blurb — the ONLY archetype field the model ever sees
+// (REQ-COMBAT-29). "" if the archetype has no bestiary row.
+std::string blurbOf(Db& db, const std::string& archetype) {
+    Stmt s = db.prepare("SELECT blurb FROM bestiary WHERE archetype = ?");
+    s.bind(1, archetype);
+    if (!s.step()) return "";
+    return s.colText(0);
+}
+
 }  // namespace
 
 // The living hostile sharing `room` (health.current > 0), or 0 if none. Lowest
@@ -554,34 +596,27 @@ void resolveCombat(Db& db, int64_t player, int64_t startRoom) {
 }
 
 std::vector<std::string> eligibleArchetypes(Db& db, int64_t room) {
-    std::vector<std::string> menu;
+    // The menu for an EXISTING room: contested iff within the front radius of the
+    // seed (REQ-COMBAT-34). Front, bootstrap, and gating compose in gatedMenu.
+    return gatedMenu(db, distanceFromSeed(db, room) <= kFrontRadius);
+}
 
-    // Front intensity (REQ-COMBAT-34): a safe-edge room — beyond the front radius
-    // from the seed — offers nothing, before any other gate is consulted.
-    if (distanceFromSeed(db, room) > kFrontRadius) return menu;
-
-    const int64_t player = playerEntity(db);
-    const bool bootstrap = architectSpawnCount(db) == 0;
-
-    // Archetype names in a stable order (no RNG) — the menu is replayable.
-    Stmt s = db.prepare("SELECT archetype FROM bestiary ORDER BY archetype");
-    while (s.step()) {
-        const std::string archetype = s.colText(0);
-        if (bootstrap) {
-            // Bootstrap (REQ-COMBAT-33): the first architect enemy must be
-            // basic-soluble and drop a tier-1 (starter) spell, so the key chain
-            // can start from an empty spellbook. The seed enemy does not count.
-            if (basicSoluble(db, archetype) && dropTier(db, archetype) == 1) {
-                menu.push_back(archetype);
-            }
-        } else {
-            // Gating (REQ-COMBAT-32): offer only archetypes whose lock the player
-            // can already solve — knows every required key. No deadlock by
-            // construction (basic-soluble archetypes require none).
-            if (knowsAllRequiredKeys(db, player, archetype)) {
-                menu.push_back(archetype);
-            }
-        }
+std::vector<std::string> eligibleEnemyBlurbs(Db& db, int64_t originRoom) {
+    std::vector<std::string> blurbs;
+    for (const std::string& archetype : eligibleArchetypesForNewRoom(db, originRoom)) {
+        blurbs.push_back(blurbOf(db, archetype));
     }
-    return menu;
+    return blurbs;
+}
+
+std::string archetypeForEnemyBlurb(Db& db, int64_t originRoom,
+                                   const std::string& blurb) {
+    if (blurb.empty()) return "";
+    // Re-check eligibility authoritatively (REQ-COMBAT-31): a blurb the model
+    // returns is placed ONLY if it is a currently-eligible choice for this room.
+    // A hallucinated or stale selection resolves to "" → no spawn.
+    for (const std::string& archetype : eligibleArchetypesForNewRoom(db, originRoom)) {
+        if (blurbOf(db, archetype) == blurb) return archetype;
+    }
+    return "";
 }

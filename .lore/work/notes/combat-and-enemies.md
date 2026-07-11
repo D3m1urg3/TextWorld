@@ -48,7 +48,7 @@ in `./build/tests`.
 - [x] 19 — bestiary catalog + refactor placement → `testBestiaryCatalog` ✅
 - [x] 20 — eligible menu + gating + bootstrap + front → `testCombatGating` ✅
 - [x] 21 — setting.txt invasion → `testCombatSetting` ✅
-- [ ] 22 — architect enemy spawn [HIGH — live LLM] → `testArchitectSpawn` (+ gated live)
+- [x] 22 — architect enemy spawn [HIGH — live LLM] → `testArchitectSpawn` (+ gated `testCombatLiveSmoke`) ✅
 - [ ] 23 — final validation sweep → `testCombatDeterminismReplay` + sweeps
 
 ## Log
@@ -475,5 +475,50 @@ in `./build/tests`.
   contains invasion anchors (goblin/breach/front/contested/edge) AND tone anchors
   (Thornmere/hushed/Vigil Lamps); a `GLOB '*[0-9]*'` sweep confirms no numeric stat.
 - Gate: build clean; `./build/tests` → 2403 checks, 0 failures.
+
+### Step 22 — architect enemy spawning + combat NL/narration parity (live tail) ✅
+- **combat.cpp** (read-only): refactored the Step-20 gate into an anon `gatedMenu`
+  + `eligibleArchetypesForNewRoom` (front distance = origin+1, since the new room's
+  only initial link is back to origin) + `blurbOf`. Two new public fns:
+  `eligibleEnemyBlurbs(db, originRoom)` (the enum offered — BLURBS only, the sole
+  model-facing field) and `archetypeForEnemyBlurb(db, originRoom, blurb)` (maps a
+  selection back to an archetype, **re-checking eligibility** so a hallucinated/
+  stale blurb → "" → no spawn).
+- **mutations.cpp:** `recordArchitectSpawn(db)` — upsert `meta.architect_spawn_count`
+  (absent→1, else +1), the bootstrap ledger. Event-free (like meta.turn). Seed
+  placement uses SQL, never this path → the seed goblin never counts.
+- **architect.cpp** (still raw-write-free — grep empty):
+  - `buildArchitectRequestBody(ctx, enemyBlurbs={})` — when the menu is non-empty,
+    the create_room schema gains an OPTIONAL `enemy` string constrained to a
+    schema-enforced ENUM of those blurbs (never id/number/stat). Empty menu → no
+    `enemy` field → body byte-identical to before (existing request-body test
+    `properties.size()==3` still passes).
+  - `validateRoomProposal` extracts the `enemy` blurb LENIENTLY (trim only, like
+    exits) into `RoomProposal.enemyBlurb`; a missing/blank/non-string enemy = none.
+  - `architectGenerate`: computes `eligibleEnemyBlurbs(db, room)` before the call;
+    in Phase 2, after `writeGeneratedRoom`, resolves the selection via
+    `archetypeForEnemyBlurb` and, if valid, `placeEnemy(db, archetype, newRoom)` +
+    `recordArchitectSpawn`. Disabled/failed generation → no room, no enemy, no
+    ledger (REQ-COMBAT-35) — same silent-fallback boundary as room gen.
+  - `kArchitectPrompt`: one clause on the optional enemy (select exactly one listed
+    value or omit; never invent; let a placed one show in the prose).
+- **The model→engine boundary holds:** the model picks a costume (blurb); the
+  engine mints every number by copying the catalog (placeEnemy). No stat, id, or
+  number is ever on the wire in either direction.
+- `testArchitectSpawn` (deterministic, fake transport): (a) bootstrap — model
+  selects the goblin blurb → catalog-equal goblin placed in the new room, request
+  enum = {goblin blurb}, `enemy` optional (not required), ledger→1; (b) no enemy →
+  room made, no hostile, ledger absent; (c) hallucinated blurb → no spawn, room
+  made; (d) safe-edge target (room 15, dist 3 → new dist 4) → NO `enemy` field
+  offered; (e) transport error → no room, no hostile, no ledger.
+- `testCombatLiveSmoke` (gated `TEXTWORLD_AI_LIVE_TEST=1`, no-op by default,
+  mechanical-only per [[verification-must-be-bounded]]): kills the seed goblin to
+  clear the flee-guarded frontier, generates one real room off the corridor
+  (contested, dist 2), asserts IF an enemy was placed its stats equal the catalog
+  (model wrote no number) + ledger advanced; a clear room is an allowed clean
+  fallback. No prompt-tune loop, no wording assertions.
+- Covers AI-Validation item 15 + the deterministic half of 13. Gate: build clean;
+  `./build/tests` → 2441 checks, 0 failures. architect.cpp + combat.cpp raw-write
+  greps both empty.
 </content>
 </invoke>

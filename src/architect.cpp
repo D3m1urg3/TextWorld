@@ -18,8 +18,9 @@
 
 #include <curl/curl.h>
 
+#include "combat.hpp"     // eligibleEnemyBlurbs / archetypeForEnemyBlurb — the gated menu
 #include "json.hpp"
-#include "mutations.hpp"  // writeGeneratedRoom — the SOLE sanctioned write path
+#include "mutations.hpp"  // writeGeneratedRoom / placeEnemy — the SOLE sanctioned write path
 
 namespace {
 
@@ -174,7 +175,8 @@ Rules, absolute:
 - Call create_room exactly once. Write no prose outside the tool call.
 - The description is of THIS room only. Declare in exits the directions that lead onward, and describe those declared exits in the prose; name no opening you did not declare. EXCLUDE the direction back the way the player came - the engine adds that return exit itself. Do NOT narrate the player's arrival, movement, or the act of entering ("you step into...") - describe the standing room, not the journey to it.
 - Invent no ids, numbers, or identifiers of any kind. You name, describe, and declare exit directions; the engine assigns everything else.
-- Introduce nothing that contradicts the setting or the origin room.)";
+- Introduce nothing that contradicts the setting or the origin room.
+- If (and only if) the create_room tool offers an "enemy" field, you may place one of the invaders described there by setting enemy to exactly one of its listed values, choosing the one that best fits this room and the setting - or omit it to leave the room clear. Never invent an enemy or any of its powers; the choices offered are the only ones, and the engine owns everything about the creature but the fact that it is here. When you place one, let it show in the description.)";
 
 std::string buildArchitectContext(Db& db, int64_t room,
                                   const std::string& direction) {
@@ -190,7 +192,9 @@ std::string buildArchitectContext(Db& db, int64_t room,
     return payload.dump();
 }
 
-std::string buildArchitectRequestBody(const std::string& contextPayload) {
+std::string buildArchitectRequestBody(
+    const std::string& contextPayload,
+    const std::vector<std::string>& enemyBlurbs) {
     // Model: TEXTWORLD_MODEL (set AND non-empty) else claude-opus-4-8 — the same
     // rule the renderer/resolver use, so all AI features share one override.
     const char* env = std::getenv("TEXTWORLD_MODEL");
@@ -223,11 +227,27 @@ std::string buildArchitectRequestBody(const std::string& contextPayload) {
         {"description",
          "the invertible directions that lead onward from this room, "
          "excluding the way the player entered"}};
+    // Optional `enemy` field (REQ-COMBAT-31): present ONLY when the engine offered
+    // eligible archetypes. A schema-enforced ENUM of their blurbs — the sole
+    // model-facing archetype field (REQ-COMBAT-29) — so the model may SELECT at
+    // most one costume or omit it, and can neither invent an archetype nor see any
+    // id, number, or stat. Absent menu → no `enemy` field, byte-identical to the
+    // pre-combat body.
+    if (!enemyBlurbs.empty()) {
+        properties["enemy"] = {
+            {"type", "string"},
+            {"enum", enemyBlurbs},
+            {"description",
+             "Optional. One invader to place in this room, chosen from these "
+             "descriptions, or omit for none. Pick the one that best fits the "
+             "room and setting; you may place at most one."}};
+    }
+
     json inputSchema;
     inputSchema["type"] = "object";
     inputSchema["properties"] = std::move(properties);
-    // exits is OPTIONAL — absent/empty is a dead end; only name+description
-    // are required (REQ-EXITS-5).
+    // exits and enemy are OPTIONAL — absent/empty exits is a dead end, absent
+    // enemy is a clear room; only name+description are required (REQ-EXITS-5).
     inputSchema["required"] = json::array({"name", "description"});
     createRoom["input_schema"] = std::move(inputSchema);
 
@@ -377,15 +397,39 @@ std::optional<RoomProposal> validateRoomProposal(
         }
     }
 
+    // --- enemy selection (REQ-COMBAT-31): LENIENT, like exits. Extract the raw
+    // blurb string only; the engine re-checks it against the eligible menu and
+    // maps it to an archetype before placing. A missing/blank/non-string enemy is
+    // simply "no enemy". No number, id, or stat is ever read here.
+    if (input.contains("enemy") && input["enemy"].is_string()) {
+        const std::string raw = input["enemy"].get<std::string>();
+        if (!blankAfterTrim(raw)) {
+            size_t begin = 0;
+            size_t end = raw.size();
+            auto isWs = [](unsigned char c) {
+                return c == ' ' || c == '\t' || c == '\n' || c == '\r' ||
+                       c == '\f' || c == '\v';
+            };
+            while (begin < end && isWs(static_cast<unsigned char>(raw[begin]))) ++begin;
+            while (end > begin && isWs(static_cast<unsigned char>(raw[end - 1]))) --end;
+            proposal.enemyBlurb = raw.substr(begin, end - begin);
+        }
+    }
+
     return proposal;
 }
 
 bool architectGenerate(Db& db, int64_t room, const std::string& direction,
                        int64_t actor, const HttpTransport& transport) {
+    // The eligible enemy menu for the room ABOUT to be created beyond this exit
+    // (REQ-COMBAT-31/-34): the model's costume choices, blurbs only. Read-only.
+    // Computed before the call so the tool schema can constrain the enemy field.
+    const std::vector<std::string> enemyBlurbs = eligibleEnemyBlurbs(db, room);
+
     std::optional<RoomProposal> proposal;
     try {  // ── Phase 1 (AI side): NO database write happens in here ──
         const std::string ctx = buildArchitectContext(db, room, direction);
-        const std::string body = buildArchitectRequestBody(ctx);
+        const std::string body = buildArchitectRequestBody(ctx, enemyBlurbs);
         const HttpResponse resp = transport(body);  // at most once, no retries
         proposal = validateRoomProposal(resp, direction);  // never throws
     } catch (const std::exception& e) {
@@ -400,7 +444,20 @@ bool architectGenerate(Db& db, int64_t room, const std::string& direction,
     // ── Phase 2 (the write): OUTSIDE the catch. Runs only on a validated
     // proposal; a genuine DB fault propagates out to runTurn's tick rollback
     // (REQ-ARCH-5), never downgraded to a wall.
-    writeGeneratedRoom(db, room, direction, *proposal, actor);
+    const int64_t newRoom =
+        writeGeneratedRoom(db, room, direction, *proposal, actor);
+
+    // Enemy placement (REQ-COMBAT-31): if the model selected a blurb, re-check it
+    // against the eligible menu and, when valid, cast the instance from the
+    // catalog into the new room and tick the bootstrap ledger. A hallucinated,
+    // stale, or absent selection resolves to "" → no spawn (REQ-COMBAT-35), room
+    // still made. The model picked the costume; the engine mints every number.
+    const std::string archetype =
+        archetypeForEnemyBlurb(db, room, proposal->enemyBlurb);
+    if (!archetype.empty()) {
+        placeEnemy(db, archetype, newRoom);
+        recordArchitectSpawn(db);
+    }
     return true;
 }
 
