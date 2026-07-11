@@ -1246,6 +1246,87 @@ static void testCombatSetting() {
           0);
 }
 
+// Run a fixed combat script from a fresh combat-fixture world and return a
+// canonical dump of the event stream. Db closes at scope exit → the file on disk
+// is the full committed state. Shared by the determinism replay.
+static std::string replayCombatDump(const std::filesystem::path& path) {
+    Db db = openWorld(path.string(), "tests/combat_fixture.sql");
+    const char* script[] = {
+        "go north",            // into the corridor with the goblin
+        "cast stun",           // CC the goblin (status + cooldown)
+        "attack",              // 8 -> 4
+        "cast ward",           // a defensive beat (status + cooldown)
+        "attack",              // 4 -> 0, defeated → drops a fire grimoire
+        "read fire grimoire",  // learn fire (canon)
+        "wait",
+    };
+    for (const char* cmd : script) runTurn(db, cmd);
+
+    std::string dump;
+    Stmt s = db.prepare(
+        "SELECT turn, actor, verb, subject, object, COALESCE(detail,'') "
+        "FROM events ORDER BY id");
+    while (s.step()) {
+        dump += std::to_string(s.colInt(0)) + "|" + std::to_string(s.colInt(1)) +
+                "|" + s.colText(2) + "|" + std::to_string(s.colInt(3)) + "|" +
+                std::to_string(s.colInt(4)) + "|" + s.colText(5) + "\n";
+    }
+    return dump;
+}
+
+// Determinism replay (REQ-COMBAT-1, AI-Validation item 1): the SAME scripted
+// combat from a fresh seed twice produces byte-identical combat event streams AND
+// byte-identical world.db files. The engine owns every number; no RNG anywhere.
+static void testCombatDeterminismReplay() {
+    const TempDbFile pathA("textworld_replay_a.db");
+    const TempDbFile pathB("textworld_replay_b.db");
+    const std::string dumpA = replayCombatDump(pathA);
+    const std::string dumpB = replayCombatDump(pathB);
+
+    CHECK(!dumpA.empty());
+    CHECK(dumpA == dumpB);                                 // event streams identical
+    CHECK(readFileBytes(pathA) == readFileBytes(pathB));   // final world.db identical
+}
+
+// The final spec sweep (REQ-COMBAT-1, -22, -37): guards that survive the whole
+// combat surface — no growable stat at the final schema, no RNG in the source, a
+// render template for every combat verb. Deterministic, no network.
+static void testCombatFinalSweep() {
+    const TempDbFile worldPath("textworld_final_sweep.db");
+    Db db = openWorld(worldPath.string(), "tests/combat_fixture.sql");
+
+    // (1) REQ-COMBAT-22 anti-goal at the FINAL schema (after bestiary/drop_table/
+    // tier landed): no XP/level/growable numeric column anywhere. tier is a fixed
+    // ordinal, not a per-entity growable, and is deliberately NOT in the ban set.
+    CHECK(queryInt(db,
+                   "SELECT COUNT(*) FROM sqlite_master m "
+                   "JOIN pragma_table_info(m.name) p "
+                   "WHERE m.type = 'table' AND lower(p.name) IN "
+                   "('xp','level','levels','experience','exp','rank','growth',"
+                   "'skillpoints','power')") == 0);
+
+    // (2) REQ-COMBAT-1 no-RNG guard: the combat surface source carries no RNG call
+    // (rand/random/seeding) — a durable guard against a future regression.
+    for (const char* src : {"src/combat.cpp", "src/combat.hpp", "src/mutations.cpp"}) {
+        const std::string code = readFileBytes(src);
+        CHECK(!contains(code, "rand("));
+        CHECK(!contains(code, "srand"));
+        CHECK(!contains(code, "random_device"));
+        CHECK(!contains(code, "mt19937"));
+    }
+
+    // (3) REQ-COMBAT-37 exhaustive template: EVERY combat event verb the engine
+    // can emit has a render() branch, so none falls through to empty output on the
+    // AI-disabled path. The list mirrors the verbs emitted in combat.cpp/mutations.cpp.
+    const std::string render = readFileBytes("src/render.cpp");
+    for (const char* verb : {"attacked", "chip", "struck", "telegraph", "cast",
+                             "warded", "stunned", "burned", "froze", "dot", "aoe",
+                             "blocked", "dispelled", "learned", "reread",
+                             "defeated", "downed"}) {
+        CHECK(contains(render, std::string("verb == \"") + verb + "\""));
+    }
+}
+
 // Multiplicity lock: AoE and DoT reach every body of a swarm; single-target
 // basic attack thins them one at a time (REQ-COMBAT-17, -19). Deterministic.
 static void testCombatMultiplicity() {
@@ -4603,6 +4684,8 @@ int main() {
     testBestiaryCatalog();
     testCombatGating();
     testCombatSetting();
+    testCombatDeterminismReplay();
+    testCombatFinalSweep();
     testRender();
     testExitDisplayInvariant();
     testLoop();

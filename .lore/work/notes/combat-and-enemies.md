@@ -1,7 +1,7 @@
 ---
 title: "Implementation notes: combat-and-enemies"
 date: 2026-07-11
-status: in_progress
+status: complete
 tags: [implementation, notes, combat, enemies, spells, determinism]
 source: .lore/work/plans/combat-and-enemies.md
 modules: [systems, mutations, action, architect, render, prose, seed, combat]
@@ -49,7 +49,7 @@ in `./build/tests`.
 - [x] 20 — eligible menu + gating + bootstrap + front → `testCombatGating` ✅
 - [x] 21 — setting.txt invasion → `testCombatSetting` ✅
 - [x] 22 — architect enemy spawn [HIGH — live LLM] → `testArchitectSpawn` (+ gated `testCombatLiveSmoke`) ✅
-- [ ] 23 — final validation sweep → `testCombatDeterminismReplay` + sweeps
+- [x] 23 — final validation sweep → `testCombatDeterminismReplay` + `testCombatFinalSweep` ✅
 
 ## Log
 
@@ -520,5 +520,50 @@ in `./build/tests`.
 - Covers AI-Validation item 15 + the deterministic half of 13. Gate: build clean;
   `./build/tests` → 2441 checks, 0 failures. architect.cpp + combat.cpp raw-write
   greps both empty.
+
+### Step 23 — final validation sweep against the spec checklist ✅ (Brick 4 done)
+- `testCombatDeterminismReplay` (REQ-COMBAT-1, AI-Val 1): runs one fixed combat
+  script (go north / cast stun / attack / cast ward / attack / read fire grimoire /
+  wait) from a fresh seed on TWO separate world files; asserts the combat event
+  streams are byte-identical AND the two `world.db` FILES are byte-identical
+  (raw bytes, both fully committed + closed). Confirms no RNG / no hidden state.
+- `testCombatFinalSweep` (REQ-COMBAT-1, -22, -37): three durable guards against
+  the whole combat surface — (1) `sqlite_master` sweep at the FINAL schema finds
+  no XP/level/growable column (tier is a fixed ordinal, deliberately not banned);
+  (2) source guard: combat.cpp/combat.hpp/mutations.cpp contain no `rand(` /
+  `srand` / `random_device` / `mt19937`; (3) exhaustive template: all 17 combat
+  verbs have a `render()` branch (enumerated, matched against render.cpp).
+- **AI-Validation coverage map (all 15 → a named green test):**
+
+  | # | Item | Test(s) |
+  |---|------|---------|
+  | 1 | Determinism replay | `testCombatDeterminismReplay` |
+  | 2 | Tick integrity | `testCombatChipClock` |
+  | 3 | Foundation loop | `testCombatAttack`, `testCombatDefeat` |
+  | 4 | Chip clock | `testCombatChipClock` |
+  | 5 | Telegraph/counter | `testCombatCounter` |
+  | 6 | Offense XOR defense | `testCombatCounter` |
+  | 7 | Cooldowns | `testCombatCastGate`, `testCombatStatusLine` |
+  | 8 | Elements & resistance | `testCombatElements` |
+  | 9 | Status effects (DoT+CC) | `testCombatDoT`, `testCombatCounter` |
+  | 10 | Progression & persistence | `testCombatLearn` |
+  | 11 | Downed model | `testCombatDowned` |
+  | 12 | Fleeing | `testCombatFlee` |
+  | 13 | Bestiary boundary | `testBestiaryCatalog`, `testArchitectSpawn` |
+  | 14 | Gating | `testCombatGating` |
+  | 15 | AI-path fallback parity | `testCombatRender`+`testLoop` (AI-off playable), `testArchitectSpawn` (no-spawn on disabled/failure), gated `testCombatLiveSmoke` |
+
+- Manual sweeps (authoritative, this step): RNG grep across combat.cpp/hpp,
+  mutations.cpp, systems.cpp, architect.cpp → none; growable-column grep of
+  SCHEMA_DDL → none; every one of the 17 emitted combat verbs has a render branch.
+- Gate: build clean; `./build/tests` → 2475 checks, 0 failures.
+
+## BRICK 4 COMPLETE — bestiary catalog, gated architect spawning, invasion setting.
+
+## IMPLEMENTATION COMPLETE — all 23 steps, all 39 COMBAT requirements, Bricks 1–4.
+Deterministic skeleton (Steps 1–21, 23) is fully offline/unit-tested; the single
+live-LLM tail (Step 22) is isolated, gated (`TEXTWORLD_AI_LIVE_TEST=1`), and
+mechanical-only. combat.cpp + architect.cpp remain raw-write-free (all writes via
+mutations.cpp). No RNG, no growable stat, no id/number on the wire.
 </content>
 </invoke>
