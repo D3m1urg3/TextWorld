@@ -19,21 +19,6 @@ int64_t roomOf(Db& db, int64_t entity) {
     return s.colInt(0);
 }
 
-// The living hostile sharing `room` (health.current > 0), or 0 if none. Lowest
-// entity id when several share a room — deterministic; the swarm case (Brick 3)
-// relies on this stable ordering.
-int64_t hostileInRoom(Db& db, int64_t room) {
-    Stmt s = db.prepare(
-        "SELECT h.entity FROM hostile h "
-        "JOIN location l ON l.entity = h.entity "
-        "JOIN health hp ON hp.entity = h.entity "
-        "WHERE l.container = ? AND hp.current > 0 "
-        "ORDER BY h.entity LIMIT 1");
-    s.bind(1, room);
-    if (!s.step()) return 0;
-    return s.colInt(0);
-}
-
 // health.current of an entity, or nullopt if it has no health row.
 std::optional<int64_t> healthOf(Db& db, int64_t entity) {
     Stmt s = db.prepare("SELECT current FROM health WHERE entity = ?");
@@ -94,6 +79,21 @@ bool hasStatus(Db& db, int64_t entity, const char* kind) {
 }
 
 }  // namespace
+
+// The living hostile sharing `room` (health.current > 0), or 0 if none. Lowest
+// entity id when several share a room — deterministic; the swarm case (Brick 3)
+// relies on this stable ordering. Public so resolveGo can consult it.
+int64_t hostileInRoom(Db& db, int64_t room) {
+    Stmt s = db.prepare(
+        "SELECT h.entity FROM hostile h "
+        "JOIN location l ON l.entity = h.entity "
+        "JOIN health hp ON hp.entity = h.entity "
+        "WHERE l.container = ? AND hp.current > 0 "
+        "ORDER BY h.entity LIMIT 1");
+    s.bind(1, room);
+    if (!s.step()) return 0;
+    return s.colInt(0);
+}
 
 void resolveAttack(Db& db, int64_t player) {
     const int64_t room = roomOf(db, player);

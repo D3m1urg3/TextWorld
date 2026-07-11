@@ -33,7 +33,7 @@ in `./build/tests`.
 - [x] 8 — telegraph→strike lane → `testCombatTelegraph` ✅
 - [x] 9 — `Verb::Cast` + cooldown gate → `testCombatCastGate` ✅
 - [x] 10 — counters Ward/Stun → `testCombatCounter` ✅
-- [ ] 11 — flee → `testCombatFlee`
+- [x] 11 — flee → `testCombatFlee` ✅
 - [ ] 12 — status line (cooldowns) → `testCombatStatusLine`
 
 **BRICK 3 — Elements / four-lock closure / learning economy**
@@ -246,5 +246,23 @@ in `./build/tests`.
   strike lands (strike+chip), stun cancels+suppresses for the duration then resumes.
 - Gate: build clean; `./build/tests` → 2173 checks, 0 failures. combat.cpp clean.
   Covers AI-Validation items 5, 6, and the CC half of 9.
+
+### Step 11 — fleeing + room-bound enemies ✅
+- `combat.{hpp,cpp}`: `hostileInRoom` promoted to public (moved out of the anon
+  namespace) so `resolveGo` can consult it.
+- `systems.cpp` `resolveGo`: a **latent** exit with a hostile present is refused
+  BEFORE any architect call ("You can't flee into the unknown…") — no mid-combat
+  generation (REQ-COMBAT-26). A **realized** exit needs no special code: the
+  enemy's single parting turn falls out of resolveCombat keying on the tick-start
+  hostile (micro-decision 2). Guard triggers only with a hostile → hostile-free
+  worlds unchanged.
+- Room-bound (REQ-COMBAT-27) is emergent: nothing moves the enemy, so it stays
+  put and is re-engageable, unchanged, on return.
+- `testCombatFlee`: (1) AI-ON + fake transport → latent flee refused, transport
+  never called (calls==0), no move/no new room; (2) AI-off → realized flee moves
+  the player, one chip event marks the parting turn, enemy stays in the corridor
+  at unchanged health across return.
+- Gate: build clean; `./build/tests` → 2201 checks, 0 failures. Covers
+  AI-Validation item 12 (generation-disabled parts).
 </content>
 </invoke>

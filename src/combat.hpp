@@ -30,6 +30,11 @@ inline constexpr int64_t kStrikeDamage = 5;
 // Engine-owned constant. The enemy resumes acting after this many ticks.
 inline constexpr int64_t kStunDuration = 2;
 
+// The living hostile (health.current > 0) sharing `room`, or 0 if none (lowest
+// entity id when several). Read-only. Exposed so resolveGo can refuse a flee into
+// an ungenerated exit while an enemy is present (REQ-COMBAT-26).
+int64_t hostileInRoom(Db& db, int64_t room);
+
 // Resolve a Verb::Attack for `player`: deal kBasicAttackDamage to the living
 // hostile sharing the player's room. No hostile present → a 'failed' event and
 // no world write. Runs inside the caller's ambient tick transaction; writes

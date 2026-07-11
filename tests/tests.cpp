@@ -3640,6 +3640,65 @@ static void testResolveGoGenerate() {
     }
 }
 
+// Fleeing + room-bound enemies (REQ-COMBAT-26, -27). A latent (ungenerated)
+// exit is refused while a hostile is present — the architect is NEVER called
+// mid-combat; a realized exit lets the player flee, the enemy takes its single
+// parting turn, and the room-bound enemy stays put, unchanged on return.
+static void testCombatFlee() {
+    // --- latent flee refused: no generation, no move (AI ON + fake transport) ---
+    {
+        const ScopedEnvVar keyGuard("ANTHROPIC_API_KEY");
+        const ScopedEnvVar aiGuard("TEXTWORLD_AI");
+        setenv("ANTHROPIC_API_KEY", "test-key-never-used", 1);
+        unsetenv("TEXTWORLD_AI");  // AI enabled: the guard, not AI-off, must refuse
+
+        const TempDbFile p("textworld_combat_flee_latent.db");
+        Db db = openWorld(p.string(), "tests/combat_fixture.sql");
+        int calls = 0;
+        HttpTransport fake = [&](const std::string&) {
+            ++calls;
+            return cannedCreateRoom("cavern", "A dark cavern.");
+        };
+        // Into the corridor (realized), then attempt to flee via the latent north.
+        tickT(db, Action{Verb::Go, 0, "north"}, fake, 3);
+        CHECK(queryInt(db, "SELECT container FROM location WHERE entity = 3") == 2);
+        const int64_t roomsBefore = queryInt(db, "SELECT COUNT(*) FROM room");
+
+        tickT(db, Action{Verb::Go, 0, "north"}, fake, 3);  // latent + hostile present
+        CHECK(calls == 0);  // the architect is NEVER called mid-combat
+        CHECK(queryInt(db, "SELECT container FROM location WHERE entity = 3") == 2);  // no move
+        CHECK(queryInt(db, "SELECT COUNT(*) FROM room") == roomsBefore);             // no new room
+        CHECK(queryText(db, "SELECT verb FROM events ORDER BY id DESC LIMIT 1") == "failed");
+        CHECK(contains(
+            queryText(db, "SELECT detail FROM events ORDER BY id DESC LIMIT 1"), "flee"));
+    }
+
+    // --- realized flee succeeds: enemy takes one parting turn; room-bound ---
+    {
+        // AI restored to hermetic-off by the guards above → runTurn uses templates.
+        const TempDbFile p("textworld_combat_flee_realized.db");
+        Db db = openWorld(p.string(), "tests/combat_fixture.sql");
+        CHECK(runTurn(db, "go north").outcome == TurnOutcome::Ticked);  // into corridor
+        const int64_t fleeTurn =
+            queryInt(db, "SELECT value FROM meta WHERE key = 'turn'") + 1;
+
+        CHECK(runTurn(db, "go south").outcome == TurnOutcome::Ticked);  // flee via realized
+        CHECK(queryInt(db, "SELECT container FROM location WHERE entity = 3") == 1);  // fled
+        // The enemy took exactly one parting turn: a chip event on the flee tick.
+        CHECK(queryInt(db,
+                       ("SELECT COUNT(*) FROM events WHERE turn = " +
+                        std::to_string(fleeTurn) + " AND verb = 'chip'").c_str()) == 1);
+        // Room-bound (REQ-COMBAT-27): the enemy stays in the corridor, unchanged.
+        CHECK(queryInt(db, "SELECT container FROM location WHERE entity = 7") == 2);
+        CHECK(queryInt(db, "SELECT current FROM health WHERE entity = 7") == 8);
+
+        // Return: combat re-engages; the enemy's state is unchanged.
+        CHECK(runTurn(db, "go north").outcome == TurnOutcome::Ticked);
+        CHECK(queryInt(db, "SELECT container FROM location WHERE entity = 3") == 2);
+        CHECK(queryInt(db, "SELECT current FROM health WHERE entity = 7") == 8);
+    }
+}
+
 // --- Step 9, REQ-ARCH-10: the 'generated' verb is renderer-invisible. A turn
 // carrying a 'generated' event (alongside 'moved') shows as the moved room
 // block, and 'generated' is absent from BOTH buildFacts payload keys. ---
@@ -3813,6 +3872,7 @@ int main() {
     testWriteGeneratedRoom();
     testArchitectGenerate();
     testResolveGoGenerate();
+    testCombatFlee();
     testGeneratedEventInvisible();
 
     std::printf("%d checks, %d failures\n", g_checks, g_failures);

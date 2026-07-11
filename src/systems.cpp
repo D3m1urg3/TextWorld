@@ -76,6 +76,19 @@ void resolveGo(Db& db, const Action& action, int64_t player,
         return;
     }
 
+    // Flee guard (REQ-COMBAT-26): a realized exit (case a) lets the player flee —
+    // the enemy's single parting turn falls out of resolveCombat keying on the
+    // tick-start hostile (micro-decision 2), no special code here. But a LATENT
+    // exit must NOT generate a room mid-combat: with a hostile present, refuse
+    // before any architect call, so the world never grows while an enemy is at
+    // the player's back. Room-bound enemies (REQ-COMBAT-27) never follow, so this
+    // only blocks fleeing INTO the unknown.
+    if (state == ExitState::Latent && hostileInRoom(db, room) != 0) {
+        appendEvent(db, player, "failed", 0, 0,
+                    "You can't flee into the unknown with an enemy at your back.");
+        return;
+    }
+
     // (b) Latent AND generation enabled → realize it, then move through the
     // now-realized exit. Every latent row is invertible by construction
     // (REQ-EXITS-1), so no invertibility guard is needed here. On Phase-1
