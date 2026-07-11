@@ -134,6 +134,42 @@ int64_t dropGrimoire(Db& db, const std::string& archetype, int64_t room) {
     return item;  // no event: the paired 'defeated' event records the drop
 }
 
+void applyStatus(Db& db, int64_t entity, const char* kind, int64_t magnitude,
+                 int64_t remaining) {
+    Stmt s = db.prepare(
+        "INSERT INTO status_effects(entity, kind, magnitude, remaining) "
+        "VALUES (?, ?, ?, ?) ON CONFLICT(entity, kind) DO UPDATE SET "
+        "magnitude = excluded.magnitude, remaining = excluded.remaining");
+    s.bind(1, entity);
+    s.bind(2, std::string(kind));
+    s.bind(3, magnitude);
+    s.bind(4, remaining);
+    s.step();
+}
+
+void clearStatus(Db& db, int64_t entity, const char* kind) {
+    Stmt s = db.prepare(
+        "DELETE FROM status_effects WHERE entity = ? AND kind = ?");
+    s.bind(1, entity);
+    s.bind(2, std::string(kind));
+    s.step();
+}
+
+void tickStatusEffects(Db& db, int64_t entity) {
+    {
+        Stmt s = db.prepare(
+            "UPDATE status_effects SET remaining = remaining - 1 WHERE entity = ?");
+        s.bind(1, entity);
+        s.step();
+    }
+    {
+        Stmt s = db.prepare(
+            "DELETE FROM status_effects WHERE entity = ? AND remaining <= 0");
+        s.bind(1, entity);
+        s.step();
+    }
+}
+
 void setCooldown(Db& db, int64_t entity, const std::string& spell,
                  int64_t readyTurn) {
     Stmt s = db.prepare(
@@ -223,6 +259,15 @@ void downPlayer(Db& db, int64_t player, int64_t enemy, int64_t safeRoom,
         s.step();
     }
     clearPendingStrike(db, enemy);
+    // Being downed clears the player's active status effects (REQ-COMBAT-23) and
+    // the enemy's (fight reset) — a clean opening position on return.
+    {
+        Stmt s = db.prepare(
+            "DELETE FROM status_effects WHERE entity IN (?, ?)");
+        s.bind(1, player);
+        s.bind(2, enemy);
+        s.step();
+    }
     appendEvent(db, actor, "downed", player, safeRoom, nullptr);
 }
 

@@ -907,6 +907,85 @@ static void testCombatCastGate() {
     }
 }
 
+// Counter resolution: Ward blocks, Stun interrupts (REQ-COMBAT-11, -19, -8).
+// The counter window is the single player action on the tick the strike resolves.
+static void testCombatCounter() {
+    auto pending = [](Db& db) {
+        return queryInt(db, "SELECT COUNT(*) FROM pending_strike WHERE entity = 7");
+    };
+    auto hp = [](Db& db) {
+        return queryInt(db, "SELECT current FROM health WHERE entity = 3");
+    };
+    auto inCorridor = [](Db& db) {
+        return queryInt(db, "SELECT container FROM location WHERE entity = 3") == 2;
+    };
+    // Advance (waiting) into combat and up to a telegraph, so the NEXT tick is
+    // the strike (the counter window). Leaves a pending strike set.
+    auto advanceToTelegraph = [&](Db& db) {
+        CHECK(runTurn(db, "go north").outcome == TurnOutcome::Ticked);
+        for (int i = 0; i < 6 && pending(db) == 0; ++i) runTurn(db, "wait");
+        CHECK(pending(db) == 1);
+    };
+
+    // --- Ward: the strike deals 0 (blocked); only chip lands ---
+    {
+        const TempDbFile p("textworld_combat_counter_ward.db");
+        Db db = openWorld(p.string(), "tests/combat_fixture.sql");
+        const int64_t chip = queryInt(db, "SELECT chip FROM hostile WHERE entity = 7");
+        advanceToTelegraph(db);
+        const int64_t hpBefore = hp(db);
+        const std::string out = runTurn(db, "cast ward").output;
+        CHECK(pending(db) == 0);                    // the strike resolved
+        CHECK(hp(db) == hpBefore - chip);           // blocked: chip only, no strike
+        const int64_t wardTurn = queryInt(db, "SELECT value FROM meta WHERE key = 'turn'");
+        CHECK(queryInt(db,
+                       ("SELECT COUNT(*) FROM events WHERE turn = " +
+                        std::to_string(wardTurn) + " AND verb = 'warded'").c_str()) == 1);
+        // Offense XOR defense: no attack-damage event shares this tick (REQ-COMBAT-8).
+        CHECK(queryInt(db,
+                       ("SELECT COUNT(*) FROM events WHERE turn = " +
+                        std::to_string(wardTurn) + " AND verb = 'attacked'").c_str()) == 0);
+        CHECK(contains(out, "against your ward"));  // render template
+    }
+
+    // --- No counter (Attack): the strike lands for its fixed damage ---
+    {
+        const TempDbFile p("textworld_combat_counter_attack.db");
+        Db db = openWorld(p.string(), "tests/combat_fixture.sql");
+        const int64_t chip = queryInt(db, "SELECT chip FROM hostile WHERE entity = 7");
+        advanceToTelegraph(db);
+        const int64_t hpBefore = hp(db);
+        CHECK(runTurn(db, "attack").outcome == TurnOutcome::Ticked);
+        CHECK(pending(db) == 0);
+        CHECK(hp(db) == hpBefore - kStrikeDamage - chip);  // strike + chip landed
+    }
+
+    // --- Stun: cancels the pending strike, suppresses the enemy for the CC
+    // duration, then it resumes ---
+    {
+        const TempDbFile p("textworld_combat_counter_stun.db");
+        Db db = openWorld(p.string(), "tests/combat_fixture.sql");
+        advanceToTelegraph(db);
+        const std::string out = runTurn(db, "cast stun").output;
+        CHECK(pending(db) == 0);                                     // cancelled
+        CHECK(queryInt(db, "SELECT COUNT(*) FROM status_effects "
+                           "WHERE entity = 7 AND kind = 'stun' AND remaining > 0") == 1);
+        CHECK(contains(out, "bind"));                                // render template
+        // Still stunned next tick → no new telegraph created.
+        if (inCorridor(db)) {
+            CHECK(runTurn(db, "wait").outcome == TurnOutcome::Ticked);
+            CHECK(pending(db) == 0);
+        }
+        // After the CC lapses the enemy resumes telegraphing within a few ticks.
+        bool resumed = false;
+        for (int i = 0; i < 6 && !resumed && inCorridor(db); ++i) {
+            runTurn(db, "wait");
+            if (pending(db) == 1) resumed = true;
+        }
+        CHECK(resumed);
+    }
+}
+
 // Combat narration via the permanent template path + the HP status line
 // (REQ-COMBAT-37, -15). AI is disabled hermetically, so runTurn renders through
 // the templates; the full Brick-1 loop is playable end to end, deterministically.
@@ -3706,6 +3785,7 @@ int main() {
     testCombatRender();
     testCombatTelegraph();
     testCombatCastGate();
+    testCombatCounter();
     testRender();
     testExitDisplayInvariant();
     testLoop();

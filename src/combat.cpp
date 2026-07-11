@@ -83,6 +83,16 @@ bool pendingStrikeDamage(Db& db, int64_t enemy, int64_t& damage) {
     return true;
 }
 
+// True if `entity` currently carries an active (remaining > 0) status of `kind`.
+bool hasStatus(Db& db, int64_t entity, const char* kind) {
+    Stmt s = db.prepare(
+        "SELECT 1 FROM status_effects WHERE entity = ? AND kind = ? "
+        "AND remaining > 0");
+    s.bind(1, entity);
+    s.bind(2, std::string(kind));
+    return s.step();
+}
+
 }  // namespace
 
 void resolveAttack(Db& db, int64_t player) {
@@ -135,14 +145,35 @@ void resolveCast(Db& db, int64_t player, const std::string& spell) {
     // its cooldown (immutable constant, never reduced — REQ-COMBAT-14). now is
     // the execution turn (meta.turn already incremented): ready_turn = now + cd.
     int64_t cd = 0;
+    std::string effect;
     {
-        Stmt s = db.prepare("SELECT cooldown FROM spell_catalog WHERE spell = ?");
+        Stmt s = db.prepare(
+            "SELECT cooldown, effect FROM spell_catalog WHERE spell = ?");
         s.bind(1, spell);
-        if (s.step()) cd = s.colInt(0);
+        if (s.step()) {
+            cd = s.colInt(0);
+            effect = s.colText(1);
+        }
     }
     setCooldown(db, player, spell, currentTurn(db) + cd);
     appendEvent(db, player, "cast", 0, 0, spell.c_str());
-    // The spell's EFFECT (Ward blocks, Stun interrupts, …) is Step 10.
+
+    // Apply the spell's effect. Brick 2: Ward (block) and Stun (interrupt/CC).
+    // Fire/Frost/Dispel/AoE effects arrive in Brick 3.
+    if (effect == "ward") {
+        // A one-tick block flag: consumed when the pending strike resolves this
+        // tick, else it expires in this tick's status countdown (REQ-COMBAT-11).
+        applyStatus(db, player, "ward", 0, 1);
+    } else if (effect == "stun") {
+        // Interrupt: cancel the pending strike and CC the enemy for a fixed
+        // duration (REQ-COMBAT-19). Needs a hostile present to bind.
+        const int64_t enemy = hostileInRoom(db, roomOf(db, player));
+        if (enemy != 0) {
+            applyStatus(db, enemy, "stun", 0, kStunDuration);
+            clearPendingStrike(db, enemy);
+            appendEvent(db, player, "stunned", enemy, 0, nullptr);
+        }
+    }
 }
 
 std::string combatStatusLine(Db& db, int64_t player) {
@@ -177,22 +208,37 @@ void resolveCombat(Db& db, int64_t player, int64_t hostile) {
     }
 
     // The enemy's single turn action (REQ-COMBAT-9): the telegraph → strike lane,
-    // driven deterministically by telegraph_period — no RNG.
-    int64_t pendingDamage = 0;
-    if (pendingStrikeDamage(db, hostile, pendingDamage)) {
-        // A wind-up from last turn lands now (REQ-COMBAT-10). Counters that
-        // block/cancel it are Step 10; here, uncountered, it always lands.
-        damageEntity(db, player, pendingDamage, hostile, "struck");
-        clearPendingStrike(db, hostile);
-    } else {
-        const int64_t period = telegraphPeriodOf(db, hostile);
-        if (period > 0 && currentTurn(db) % period == 0) {
-            // Telegraph: one-tick wind-up, no damage this tick. The strike lands
-            // on the enemy's next turn (REQ-COMBAT-10). Goblin swing = no element.
-            setPendingStrike(db, hostile, kStrikeDamage, /*element=*/nullptr);
+    // driven deterministically by telegraph_period — no RNG. SUPPRESSED entirely
+    // while the enemy is stunned (the CC interrupt, REQ-COMBAT-19).
+    if (!hasStatus(db, hostile, "stun")) {
+        int64_t pendingDamage = 0;
+        if (pendingStrikeDamage(db, hostile, pendingDamage)) {
+            // A wind-up from last turn lands now (REQ-COMBAT-10) — unless the
+            // player's counter this tick was a Ward, which negates it and is
+            // consumed (REQ-COMBAT-11).
+            if (hasStatus(db, player, "ward")) {
+                clearStatus(db, player, "ward");
+                appendEvent(db, hostile, "warded", player, 0, nullptr);
+            } else {
+                damageEntity(db, player, pendingDamage, hostile, "struck");
+            }
+            clearPendingStrike(db, hostile);
+        } else {
+            const int64_t period = telegraphPeriodOf(db, hostile);
+            if (period > 0 && currentTurn(db) % period == 0) {
+                // Telegraph: one-tick wind-up, no damage this tick. The strike
+                // lands next turn (REQ-COMBAT-10). Goblin swing = no element.
+                setPendingStrike(db, hostile, kStrikeDamage, /*element=*/nullptr);
+            }
+            // else idle this turn.
         }
-        // else idle this turn.
     }
+
+    // Tick down status effects AFTER the enemy turn, so a Stun/Ward cast THIS
+    // tick still affects this tick before counting down (an unconsumed ward
+    // expires; a stun's duration decrements). DoT damage-on-tick is Step 15.
+    tickStatusEffects(db, player);
+    tickStatusEffects(db, hostile);
 
     // Chip lane (REQ-COMBAT-12): every combat tick, in ADDITION to the turn
     // action, the enemy deals its fixed per-instance chip — the irreducible HP

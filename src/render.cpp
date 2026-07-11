@@ -159,8 +159,16 @@ std::string render(Db& db, int64_t turn) {
                    std::to_string(object) + " damage.\n";
         } else if (verb == "cast") {
             // A cast spell (detail = the spell key). Effect-specific lines
-            // (ward block, stun interrupt) arrive in Step 10.
+            // (warded/stunned) render below when the effect resolves.
             out += "You cast " + detail + ".\n";
+        } else if (verb == "warded") {
+            // A telegraphed strike blocked by a ward (actor = the thwarted enemy).
+            out += "The " + nameOf(db, actor) +
+                   "'s strike breaks against your ward.\n";
+        } else if (verb == "stunned") {
+            // A telegraphed strike interrupted by a stun (subject = the enemy).
+            out += "You bind the " + nameOf(db, subject) +
+                   ", its strike collapsing mid-swing.\n";
         } else if (verb == "defeated") {
             // subject = the fallen enemy (name survives), object = its grimoire.
             out += "The " + nameOf(db, subject) + " falls. It drops the " +

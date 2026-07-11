@@ -26,6 +26,10 @@ inline constexpr int64_t kDormitoryCell = 1;
 // bestiary. Written into the pending_strike row at telegraph time.
 inline constexpr int64_t kStrikeDamage = 5;
 
+// How many ticks a Stun suppresses the enemy's turn action (REQ-COMBAT-19).
+// Engine-owned constant. The enemy resumes acting after this many ticks.
+inline constexpr int64_t kStunDuration = 2;
+
 // Resolve a Verb::Attack for `player`: deal kBasicAttackDamage to the living
 // hostile sharing the player's room. No hostile present → a 'failed' event and
 // no world write. Runs inside the caller's ambient tick transaction; writes

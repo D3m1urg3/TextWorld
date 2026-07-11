@@ -32,7 +32,7 @@ in `./build/tests`.
 - [x] 7 — schema: telegraph+cooldown+spells → `testCombatSchema` ext. ✅
 - [x] 8 — telegraph→strike lane → `testCombatTelegraph` ✅
 - [x] 9 — `Verb::Cast` + cooldown gate → `testCombatCastGate` ✅
-- [ ] 10 — counters Ward/Stun → `testCombatCounter`
+- [x] 10 — counters Ward/Stun → `testCombatCounter` ✅
 - [ ] 11 — flee → `testCombatFlee`
 - [ ] 12 — status line (cooldowns) → `testCombatStatusLine`
 
@@ -225,5 +225,26 @@ in `./build/tests`.
   turn — consistent; testCombatCastGate verifies cast at T → ready at T+cd.
 - `testNlResolvePrompt`/`testNlResolveRequestBody` updated to nine verbs.
 - Gate: build clean; `./build/tests` → 2125 checks, 0 failures. combat.cpp clean.
+
+### Step 10 — counters: Ward (block) + Stun (interrupt/CC) ✅
+- `mutations`: `applyStatus`/`clearStatus`/`tickStatusEffects` (event-free status
+  bookkeeping, shared with DoT in Step 15); `downPlayer` now clears both combatants'
+  status_effects (completes REQ-COMBAT-23).
+- `resolveCast` dispatches on `spell_catalog.effect`: `ward` → one-tick `ward`
+  status on the player; `stun` → `stun` status (kStunDuration=2) on the enemy +
+  cancel its pending strike + `stunned` event.
+- `resolveCombat`: enemy turn action SUPPRESSED while `hasStatus(enemy,'stun')`;
+  a landing strike is negated + consumed if `hasStatus(player,'ward')` (`warded`
+  event), else lands. `tickStatusEffects(player)`+`(enemy)` after the enemy turn
+  (a same-tick ward/stun still applies this tick, then counts down). Chip always,
+  even while stunned (REQ-COMBAT-12 irreducibility).
+- **Timing model:** telegraph on tick T-1, strike resolves in resolveCombat on
+  tick T (after the player's tick-T action) → the counter is the tick-T cast. Ward
+  is set and consumed within tick T (no cross-tick persistence needed).
+- render `warded` + `stunned` templates (standing rule). `testCombatCounter`: ward
+  blocks (chip only, no attacked event same tick — offense XOR defense), no-counter
+  strike lands (strike+chip), stun cancels+suppresses for the duration then resumes.
+- Gate: build clean; `./build/tests` → 2173 checks, 0 failures. combat.cpp clean.
+  Covers AI-Validation items 5, 6, and the CC half of 9.
 </content>
 </invoke>

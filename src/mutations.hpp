@@ -62,6 +62,20 @@ void damageEntity(Db& db, int64_t target, int64_t amount, int64_t actor,
 // minted grimoire's entity id. Never begins/commits.
 int64_t dropGrimoire(Db& db, const std::string& archetype, int64_t room);
 
+// Apply (upsert) a status effect on `entity` (REQ-COMBAT-19): a DoT or CC of
+// `magnitude`, lasting `remaining` ticks. Event-free bookkeeping — the caller
+// emits the player-facing event (the 'cast'/'stunned'/… event). Never begins/commits.
+void applyStatus(Db& db, int64_t entity, const char* kind, int64_t magnitude,
+                 int64_t remaining);
+
+// Remove one status-effect `kind` from `entity` (delete the row). Event-free.
+void clearStatus(Db& db, int64_t entity, const char* kind);
+
+// Tick down every status effect on `entity` by one (decrement remaining; delete
+// rows that reach 0). Event-free countdown of CC/ward duration. DoT damage-on-
+// tick is applied separately by the combat system. Never begins/commits.
+void tickStatusEffects(Db& db, int64_t entity);
+
 // Set `spell`'s cooldown for `entity` to become ready at tick `readyTurn`
 // (REQ-COMBAT-13): upsert the cooldowns row. Event-free bookkeeping — the paired
 // 'cast' event records the cast that set it. Never begins/commits.
