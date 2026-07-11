@@ -171,6 +171,87 @@ int64_t dropGrimoire(Db& db, const std::string& archetype, int64_t room) {
     return item;  // no event: the paired 'defeated' event records the drop
 }
 
+int64_t placeEnemy(Db& db, const std::string& archetype, int64_t room) {
+    // Read the frozen catalog row — the mold every instance is cast from
+    // (REQ-COMBAT-29). An unknown archetype is an engine fault: the only callers
+    // are the seed (fixed names) and the architect (constrained to catalog names).
+    std::string name;
+    std::string blurb;
+    int64_t health = 0;
+    int64_t chip = 0;
+    int64_t telegraphPeriod = 0;
+    int64_t barrier = 0;
+    {
+        Stmt s = db.prepare(
+            "SELECT name, blurb, health, chip, telegraph_period, barrier "
+            "FROM bestiary WHERE archetype = ?");
+        s.bind(1, archetype);
+        if (!s.step()) {
+            throw std::runtime_error("placeEnemy: no bestiary row for archetype '" +
+                                     archetype + "'");
+        }
+        name = s.colText(0);
+        blurb = s.colText(1);
+        health = s.colInt(2);
+        chip = s.colInt(3);
+        telegraphPeriod = s.colInt(4);
+        barrier = s.colInt(5);
+    }
+
+    // Mint one entity (same pattern as dropGrimoire / writeGeneratedRoom).
+    db.exec("INSERT INTO entities DEFAULT VALUES");
+    int64_t enemy = 0;
+    {
+        Stmt s = db.prepare("SELECT last_insert_rowid()");
+        if (!s.step()) throw std::runtime_error("placeEnemy: rowid read failed");
+        enemy = s.colInt(0);
+    }
+
+    // Component rows: the stats are COPIED from the catalog, never authored here.
+    {
+        Stmt s = db.prepare(
+            "INSERT INTO hostile(entity, archetype, chip, telegraph_period) "
+            "VALUES (?, ?, ?, ?)");
+        s.bind(1, enemy);
+        s.bind(2, archetype);
+        s.bind(3, chip);
+        s.bind(4, telegraphPeriod);
+        s.step();
+    }
+    {
+        Stmt s = db.prepare(
+            "INSERT INTO health(entity, current, max) VALUES (?, ?, ?)");
+        s.bind(1, enemy);
+        s.bind(2, health);  // spawns at full health
+        s.bind(3, health);
+        s.step();
+    }
+    {
+        Stmt s = db.prepare("INSERT INTO name(entity, value) VALUES (?, ?)");
+        s.bind(1, enemy);
+        s.bind(2, name);
+        s.step();
+    }
+    {
+        Stmt s = db.prepare("INSERT INTO description(entity, prose) VALUES (?, ?)");
+        s.bind(1, enemy);
+        s.bind(2, blurb);  // the archetype blurb is the spawned instance's canon prose
+        s.step();
+    }
+    if (barrier != 0) {
+        Stmt s = db.prepare("INSERT INTO barrier(entity) VALUES (?)");
+        s.bind(1, enemy);
+        s.step();
+    }
+    {
+        Stmt s = db.prepare("INSERT INTO location(entity, container) VALUES (?, ?)");
+        s.bind(1, enemy);
+        s.bind(2, room);
+        s.step();
+    }
+    return enemy;  // no event: seed placement has none; architect placement rides 'generated'
+}
+
 void learnSpell(Db& db, int64_t player, const std::string& spell) {
     // Canon, permanent (REQ-COMBAT-21): add to known_spells, idempotent — reading
     // an already-known grimoire is a no-op. Never removed by any mechanic.

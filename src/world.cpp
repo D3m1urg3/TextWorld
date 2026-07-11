@@ -42,6 +42,13 @@ CREATE TABLE resistance(archetype TEXT, element TEXT, multiplier_num INTEGER,
 CREATE TABLE barrier(entity INTEGER PRIMARY KEY);              -- defense-lock state (row exists = warded)
 CREATE TABLE grimoire(entity INTEGER PRIMARY KEY, spell TEXT); -- the dropped item → spell it teaches
 
+-- combat: the bestiary catalog — one frozen record per archetype (the mold every
+-- instance is cast from; the engine owns every number, the model sees only blurb)
+CREATE TABLE bestiary(archetype TEXT PRIMARY KEY, name TEXT, blurb TEXT,          -- name = instance handle; blurb = the ONLY model-facing field
+                      health INTEGER, chip INTEGER, telegraph_period INTEGER,     -- engine-owned stat constants
+                      tier INTEGER, barrier INTEGER);                             -- tier = front-intensity rank; barrier = 1 → a defense-lock archetype
+CREATE TABLE drop_table(archetype TEXT PRIMARY KEY, spell TEXT);                  -- the fixed archetype → grimoire-spell it drops (REQ-COMBAT-20)
+
 -- the event log (append-only)
 CREATE TABLE events(
   id INTEGER PRIMARY KEY,

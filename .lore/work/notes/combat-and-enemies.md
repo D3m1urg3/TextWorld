@@ -45,7 +45,7 @@ in `./build/tests`.
 - [x] 18 — grimoire→Read→learn → `testCombatLearn` ✅ **(Brick 3 done)**
 
 **BRICK 4 — Bestiary catalog / architect spawning / setting**
-- [ ] 19 — bestiary catalog + refactor placement → `testBestiaryCatalog`
+- [x] 19 — bestiary catalog + refactor placement → `testBestiaryCatalog` ✅
 - [ ] 20 — eligible menu + gating + bootstrap + front → `testCombatGating`
 - [ ] 21 — setting.txt invasion → `testArchitectSettingLoad`-style
 - [ ] 22 — architect enemy spawn [HIGH — live LLM] → `testArchitectSpawn` (+ gated live)
@@ -378,5 +378,45 @@ in `./build/tests`.
 - Gate: build clean; `./build/tests` → 2344 checks, 0 failures. combat.cpp clean.
 
 ## BRICK 3 COMPLETE — all four lock categories, DoT, and the learning economy.
+
+### Step 19 — bestiary catalog + refactor placement to copy constants ✅
+- `world.cpp` SCHEMA_DDL: `bestiary(archetype PK, name, blurb, health, chip,
+  telegraph_period, tier, barrier)` + `drop_table(archetype PK, spell)`. Version
+  4 → 5 (Brick 4's one bump; Step 20's `architect_spawn_count` is a meta ROW, no
+  bump — like meta.setting).
+- **Divergence in `barrier` column (noted):** plan enumerated bestiary scalars as
+  health/chip/telegraph_period/tier/blurb. Added `barrier INTEGER` (0/1) so
+  `placeEnemy` can reproduce a defense-lock archetype (the ironhide) — barrier is a
+  per-archetype mechanical trait that MUST be catalog-owned, same rationale as the
+  other stats. Also added `name` (instance handle) so placement copies it too.
+- **`blurb` vs `description`:** `blurb` is the ONLY model-facing archetype field
+  (REQ-COMBAT-29) — short, no numbers. Seed instances keep their own hand-authored
+  canon `description` prose (richer); `placeEnemy` uses the blurb as the spawned
+  instance's description (architect-spawned foes have no hand-authored prose).
+- `mutations.{hpp,cpp}`: `placeEnemy(db, archetype, room)` — reads the frozen
+  bestiary row, mints an entity, COPIES name/chip/telegraph_period/health into
+  hostile+health+name, writes description=blurb, a barrier row iff `barrier=1`, and
+  a location row. Event-free (like dropGrimoire); throws on unknown archetype
+  (engine fault — callers offer only catalog names). Returns the instance id.
+  `grep INSERT|UPDATE|DELETE src/combat.cpp` still empty (placeEnemy is in mutations).
+- **Seed re-expression (catalog-copy SQL):** both `base.sql` and
+  `combat_fixture.sql` now seed the full 4-row bestiary + drop_table, and every
+  instance is CAST FROM the catalog via `INSERT … SELECT … FROM bestiary WHERE
+  archetype=…` (barrier via a conditional `SELECT … WHERE barrier=1`; the 3 swarm
+  bodies via a cross join over an id list). Literals replaced → an instance can
+  never drift from its archetype. Only id/prose/location are hand-placed.
+- **Divergence from plan's "full roster in base.sql" (noted):** base.sql still
+  ships ONLY the goblin instance (REQ-COMBAT-39) — the curated 2-room Thornmere
+  world + `testShippedSeedShape` stay stable. The other three archetypes live as
+  bestiary rows (the mold the architect casts from) + as instances in
+  combat_fixture.sql, consistent with the Step-13 divergence. The gate's "every
+  seed instance equals its catalog row" is enforced across BOTH seeds.
+- `testBestiaryCatalog`: catalog populated (4 rows, 4 valid drops); all 4
+  archetypes instantiated; **zero** stat mismatches across every instance
+  (chip/telegraph_period/health/name/barrier vs catalog); placeEnemy casts a
+  catalog-equal barriered ironhide; goblin defeat + the spawn both persist across a
+  reopen (entity survives, hostile/location gone). `testCombatSchema` extended with
+  bestiary/drop_table column shapes. Covers AI-Validation item 13 (det. parts).
+- Gate: build clean; `./build/tests` → 2380 checks, 0 failures.
 </content>
 </invoke>

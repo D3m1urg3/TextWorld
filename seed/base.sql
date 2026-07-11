@@ -66,14 +66,44 @@ INSERT INTO description(entity, prose) VALUES (6,
   'A wand of pale ashwood, smooth where other hands once held it, left on the desk as though someone knew you were coming.');
 INSERT INTO location(entity, container) VALUES (6, 1);
 
+-- The bestiary catalog: one frozen record per archetype — the mold every
+-- instance is cast from (REQ-COMBAT-28, -29, -30). The engine owns every number;
+-- the model (via the architect's eligible menu, Brick 4) sees only `blurb` and
+-- selects an archetype by name, never a stat. This shipped world hand-places just
+-- the goblin (REQ-COMBAT-39); the other archetypes are the mold the architect
+-- casts from as the invasion grows. Numbers here are the single source of truth —
+-- the goblin instance below COPIES them rather than restating literals.
+INSERT INTO bestiary(archetype, name, blurb, health, chip, telegraph_period, tier, barrier) VALUES
+  ('goblin_grunt', 'goblin grunt',
+   'a scrawny goblin raider up from the breached lower halls, quick and lightly armored', 8, 1, 2, 1, 0),
+  ('rime_touched', 'rime-touched goblin',
+   'a goblin sheathed in creeping frost, cold to approach and grudging to burn', 10, 1, 3, 1, 0),
+  ('ironhide', 'ironhide brute',
+   'a brute plated in warded iron that turns aside every blow until its ward is broken', 14, 1, 4, 2, 1),
+  ('book_swarm', 'snapping folio',
+   'a loose flock of snapping folios, flimsy alone but dangerous in a swarm', 10, 1, 0, 1, 0);
+
+-- The fixed archetype → grimoire-spell drop map (REQ-COMBAT-20): defeating an
+-- archetype drops a grimoire teaching this spell. Read by the eligibility menu
+-- (Brick 4) — an archetype can be offered when it drops a key the player lacks.
+INSERT INTO drop_table(archetype, spell) VALUES
+  ('goblin_grunt', 'fire'),
+  ('rime_touched', 'frost'),
+  ('ironhide', 'dispel'),
+  ('book_swarm', 'blast');
+
 -- 7: hostile 'goblin grunt', hand-placed in the corridor (REQ-COMBAT-39). The
 -- tutorial lock: low health, basic-attack-soluble, a small untelegraphed chip
--- clock. Numbers are per-instance literals here (micro-decision 4); Brick 4's
--- bestiary catalog becomes the mold these are cast from. archetype tag =
--- 'goblin_grunt'.
-INSERT INTO hostile(entity, archetype, chip, telegraph_period) VALUES (7, 'goblin_grunt', 1, 2);
-INSERT INTO health(entity, current, max) VALUES (7, 8, 8);
-INSERT INTO name(entity, value) VALUES (7, 'goblin grunt');
+-- clock. Its stats are CAST FROM the bestiary (micro-decision 4) — the name and
+-- numbers are copied from the catalog row, so a seed instance can never drift
+-- from its archetype. Only the entity id, canon prose, and location are placed
+-- by hand here.
+INSERT INTO hostile(entity, archetype, chip, telegraph_period)
+  SELECT 7, archetype, chip, telegraph_period FROM bestiary WHERE archetype = 'goblin_grunt';
+INSERT INTO health(entity, current, max)
+  SELECT 7, health, health FROM bestiary WHERE archetype = 'goblin_grunt';
+INSERT INTO name(entity, value)
+  SELECT 7, name FROM bestiary WHERE archetype = 'goblin_grunt';
 INSERT INTO description(entity, prose) VALUES (7,
   'A scrawny goblin in stolen leathers, one of the invaders come up from the breached lower halls. It bares its teeth and shifts its weight, watching for an opening.');
 INSERT INTO location(entity, container) VALUES (7, 2);

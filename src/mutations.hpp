@@ -119,6 +119,19 @@ void learnSpell(Db& db, int64_t player, const std::string& spell);
 void downPlayer(Db& db, int64_t player, int64_t enemy, int64_t safeRoom,
                 int64_t actor);
 
+// Cast one enemy INSTANCE from its bestiary archetype (REQ-COMBAT-29, -30), into
+// `room`, inside the caller's ambient transaction. Reads the frozen catalog row —
+// the engine owns every number, so the instance's stats are byte-copied from the
+// mold; the model (via the architect) only ever SELECTS which archetype, never a
+// stat. Mints one entity and writes its hostile/health/name rows, a description
+// row = the archetype blurb, a barrier row iff the archetype is a defense lock,
+// and a location row in `room`. Emits NO event of its own (like dropGrimoire): a
+// seed placement has none, and an architect placement is recorded by the room's
+// 'generated' event. Throws std::runtime_error if `archetype` has no bestiary row
+// (an engine fault — the caller offers only catalog names). Returns the minted
+// instance's entity id. Never begins/commits.
+int64_t placeEnemy(Db& db, const std::string& archetype, int64_t room);
+
 // The SOLE sanctioned write path for a generated room (REQ-ARCH-9), inside the
 // caller's ambient transaction. The model proposes flavor; the engine disposes:
 // this helper MINTS one entity (the first runtime entity mint), writes its

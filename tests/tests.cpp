@@ -360,6 +360,14 @@ static void testCombatSchema() {
     CHECK(queryInt(db,
                    "SELECT multiplier_num FROM resistance "
                    "WHERE archetype = 'rime_touched' AND element = 'fire'") == 2);
+
+    // --- Brick 4 tables: the bestiary catalog + drop map (REQ-COMBAT-28) ---
+    CHECK(queryInt(db, "SELECT COUNT(*) FROM pragma_table_info('bestiary') "
+                       "WHERE name IN ('archetype','name','blurb','health','chip',"
+                       "'telegraph_period','tier','barrier')") == 8);
+    CHECK(queryInt(db, "SELECT COUNT(*) FROM pragma_table_info('bestiary')") == 8);
+    CHECK(queryInt(db, "SELECT COUNT(*) FROM pragma_table_info('drop_table') "
+                       "WHERE name IN ('archetype','spell')") == 2);
 }
 
 static void testParser() {
@@ -1049,6 +1057,88 @@ static void testCombatLearn() {
                        "WHERE m.type = 'table' AND lower(p.name) IN "
                        "('xp','level','levels','experience','exp','rank','growth',"
                        "'skillpoints','power')") == 0);
+    }
+}
+
+// The bestiary catalog is the mold every instance is cast from (REQ-COMBAT-28,
+// -29, -30): each seed instance's stats equal its catalog row, placeEnemy casts a
+// fresh catalog-equal instance, and both a defeat and a spawn persist as canon
+// across a reopen. Deterministic, no network.
+static void testBestiaryCatalog() {
+    const TempDbFile worldPath("textworld_bestiary_tests.db");
+
+    int64_t spawnedId = 0;
+    {
+        Db db = openWorld(worldPath.string(), "tests/combat_fixture.sql");
+
+        // The catalog is populated: one record per archetype, one drop each, and
+        // every drop names a real catalog spell (no dangling key).
+        CHECK(queryInt(db, "SELECT COUNT(*) FROM bestiary") == 4);
+        CHECK(queryInt(db, "SELECT COUNT(*) FROM drop_table") == 4);
+        CHECK(queryInt(db,
+                       "SELECT COUNT(*) FROM drop_table d "
+                       "LEFT JOIN spell_catalog s ON s.spell = d.spell "
+                       "WHERE s.spell IS NULL") == 0);
+        // All four archetypes are instantiated in the fixture.
+        CHECK(queryInt(db, "SELECT COUNT(DISTINCT archetype) FROM hostile") == 4);
+
+        // REQ-COMBAT-30: EVERY seed instance's stats equal its bestiary row —
+        // chip, telegraph_period, health (full), name, and the barrier trait are
+        // all copied from the mold, so no instance can drift. Zero mismatches.
+        CHECK(queryInt(db,
+                       "SELECT COUNT(*) FROM hostile ho "
+                       "JOIN bestiary b ON b.archetype = ho.archetype "
+                       "JOIN health hp ON hp.entity = ho.entity "
+                       "JOIN name n ON n.entity = ho.entity "
+                       "WHERE ho.chip <> b.chip "
+                       "OR ho.telegraph_period <> b.telegraph_period "
+                       "OR hp.max <> b.health OR hp.current <> b.health "
+                       "OR n.value <> b.name "
+                       "OR (SELECT COUNT(*) FROM barrier ba "
+                       "    WHERE ba.entity = ho.entity) <> b.barrier") == 0);
+
+        // Kill the seed goblin (corridor) so defeat-persistence is checkable after
+        // a reopen: go north, attack (8 -> 4), attack (4 -> 0, defeated).
+        CHECK(runTurn(db, "go north").outcome == TurnOutcome::Ticked);
+        CHECK(runTurn(db, "attack").outcome == TurnOutcome::Ticked);
+        CHECK(runTurn(db, "attack").outcome == TurnOutcome::Ticked);
+        CHECK(queryInt(db, "SELECT COUNT(*) FROM hostile WHERE entity = 7") == 0);
+
+        // REQ-COMBAT-29/-30: placeEnemy casts a fresh instance whose stats are
+        // COPIED from the catalog — the engine owns every number. Cast an ironhide
+        // (a barriered archetype) into the cell (room 1). Wrap in a transaction so
+        // the helper's ambient-transaction contract holds.
+        db.begin();
+        spawnedId = placeEnemy(db, "ironhide", 1);
+        db.commit();
+        CHECK(spawnedId > 0);
+        // Its stats equal the ironhide catalog row and it spawned at full health.
+        CHECK(queryInt(db,
+                       ("SELECT COUNT(*) FROM hostile ho "
+                        "JOIN bestiary b ON b.archetype = ho.archetype "
+                        "JOIN health hp ON hp.entity = ho.entity "
+                        "WHERE ho.entity = " + std::to_string(spawnedId) +
+                        " AND ho.archetype = 'ironhide' AND ho.chip = b.chip "
+                        "AND ho.telegraph_period = b.telegraph_period "
+                        "AND hp.max = b.health AND hp.current = b.health").c_str()) == 1);
+        // The barrier trait is catalog-driven: an ironhide spawns warded.
+        CHECK(queryInt(db, ("SELECT COUNT(*) FROM barrier WHERE entity = " +
+                            std::to_string(spawnedId)).c_str()) == 1);
+        CHECK(queryInt(db, ("SELECT container FROM location WHERE entity = " +
+                            std::to_string(spawnedId)).c_str()) == 1);
+    }  // close the world file
+
+    // Reopen: a defeat and a spawn both persist as canon (REQ-COMBAT-30).
+    {
+        Db db = openWorld(worldPath.string(), "tests/combat_fixture.sql");
+        // The defeated goblin stays gone (no hostile/location) but its entity id
+        // survives — defeat is persistent absence, not deletion.
+        CHECK(queryInt(db, "SELECT COUNT(*) FROM hostile WHERE entity = 7") == 0);
+        CHECK(queryInt(db, "SELECT COUNT(*) FROM location WHERE entity = 7") == 0);
+        CHECK(queryInt(db, "SELECT COUNT(*) FROM entities WHERE id = 7") == 1);
+        // The spawned ironhide is still present and canon.
+        CHECK(queryInt(db, ("SELECT COUNT(*) FROM hostile WHERE entity = " +
+                            std::to_string(spawnedId)).c_str()) == 1);
     }
 }
 
@@ -4176,6 +4266,7 @@ int main() {
     testCombatDefenseLock();
     testCombatMultiplicity();
     testCombatLearn();
+    testBestiaryCatalog();
     testRender();
     testExitDisplayInvariant();
     testLoop();
