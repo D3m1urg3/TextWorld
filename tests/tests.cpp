@@ -1211,6 +1211,41 @@ static void testCombatGating() {
     CHECK(!eligibleArchetypes(db, 2).empty());
 }
 
+// The shipped setting.txt carries the invasion premise as a spreading front
+// (REQ-COMBAT-36) while preserving the hushed Thornmere tone — and no numbers
+// (the mechanical front is the engine handshake, never prose). Deterministic.
+static void testCombatSetting() {
+    const TempDbFile worldPath("textworld_combat_setting_tests.db");
+    // Shipped world + the committed default settingPath (seed/setting.txt).
+    Db db = openWorld(worldPath.string(), "seed/base.sql");
+
+    std::string setting;
+    {
+        Stmt s = db.prepare("SELECT value FROM meta WHERE key = 'setting'");
+        CHECK(s.step());
+        setting = s.colText(0);
+    }
+
+    // The invasion premise: goblins, a breach, framed as a spreading front with a
+    // dangerous core and safe edges (REQ-COMBAT-34/-36).
+    CHECK(contains(setting, "goblin"));
+    CHECK(contains(setting, "breach"));
+    CHECK(contains(setting, "front"));
+    CHECK(contains(setting, "contested"));
+    CHECK(contains(setting, "edge"));
+
+    // The hushed Thornmere tone is preserved, not replaced.
+    CHECK(contains(setting, "Thornmere"));
+    CHECK(contains(setting, "hushed"));
+    CHECK(contains(setting, "Vigil Lamps"));
+
+    // Tone only, NO numeric stat: the mechanical menu is the engine handshake, so
+    // the prose the architect reads carries no digit anywhere.
+    CHECK(queryInt(db,
+                   "SELECT (value GLOB '*[0-9]*') FROM meta WHERE key = 'setting'") ==
+          0);
+}
+
 // Multiplicity lock: AoE and DoT reach every body of a swarm; single-target
 // basic attack thins them one at a time (REQ-COMBAT-17, -19). Deterministic.
 static void testCombatMultiplicity() {
@@ -4337,6 +4372,7 @@ int main() {
     testCombatLearn();
     testBestiaryCatalog();
     testCombatGating();
+    testCombatSetting();
     testRender();
     testExitDisplayInvariant();
     testLoop();

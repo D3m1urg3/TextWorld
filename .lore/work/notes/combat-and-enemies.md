@@ -47,7 +47,7 @@ in `./build/tests`.
 **BRICK 4 — Bestiary catalog / architect spawning / setting**
 - [x] 19 — bestiary catalog + refactor placement → `testBestiaryCatalog` ✅
 - [x] 20 — eligible menu + gating + bootstrap + front → `testCombatGating` ✅
-- [ ] 21 — setting.txt invasion → `testArchitectSettingLoad`-style
+- [x] 21 — setting.txt invasion → `testCombatSetting` ✅
 - [ ] 22 — architect enemy spawn [HIGH — live LLM] → `testArchitectSpawn` (+ gated live)
 - [ ] 23 — final validation sweep → `testCombatDeterminismReplay` + sweeps
 
@@ -459,5 +459,21 @@ in `./build/tests`.
   stays contested. Covers AI-Validation item 14.
 - `combat.cpp` raw-write grep still empty (all reads). Gate: build clean;
   `./build/tests` → 2392 checks, 0 failures.
+
+### Step 21 — setting.txt: the invasion premise ✅
+- `seed/setting.txt`: added a third paragraph — goblins up from the lower halls
+  through a breach, hunting the grimoires, framed as a **spreading front** (thickest
+  in the inner/lower core near the breach, thinning to nothing at the outer edges).
+  Revised the Tone paragraph: softened "Nothing threatens" / dropped "No monsters"
+  (combat contradicts them) into "a thread of danger drawn through its inner dark …
+  at the safe edges the only tension is curfew; nearer the breach it is the goblins
+  themselves." The Thornmere/hushed/Vigil-Lamps tone anchors are preserved verbatim
+  in paras 1–2 + tone.
+- **Tone only, no numbers** (REQ-COMBAT-36): the front is the engine's mechanical
+  menu (Step 20), not prose the architect "picks up" — the file carries no digit.
+- `testCombatSetting` (deterministic): opens the shipped world; meta.setting
+  contains invasion anchors (goblin/breach/front/contested/edge) AND tone anchors
+  (Thornmere/hushed/Vigil Lamps); a `GLOB '*[0-9]*'` sweep confirms no numeric stat.
+- Gate: build clean; `./build/tests` → 2403 checks, 0 failures.
 </content>
 </invoke>
