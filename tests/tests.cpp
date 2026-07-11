@@ -927,6 +927,73 @@ static void testCombatCastGate() {
     }
 }
 
+// Elements + resistance multiplier; Fire/Frost; the basic-attack floor
+// (REQ-COMBAT-16, -18, -17). Deterministic integer ratios, no RNG.
+static void testCombatElements() {
+    auto burnedAmt = [](Db& db) {
+        return queryInt(db, "SELECT object FROM events WHERE verb = 'burned' "
+                            "ORDER BY id DESC LIMIT 1");
+    };
+    auto frozeAmt = [](Db& db) {
+        return queryInt(db, "SELECT object FROM events WHERE verb = 'froze' "
+                            "ORDER BY id DESC LIMIT 1");
+    };
+    // Navigate cell -> corridor -> frost study (room 6, the rime-touched lock).
+    auto toStudy = [](Db& db) {
+        CHECK(runTurn(db, "go north").outcome == TurnOutcome::Ticked);  // corridor
+        CHECK(runTurn(db, "go east").outcome == TurnOutcome::Ticked);   // frost study
+        CHECK(queryInt(db, "SELECT container FROM location WHERE entity = 3") == 6);
+    };
+
+    // --- Fire on the Fire-weak archetype applies the weakness multiplier (2x) ---
+    {
+        const TempDbFile p("textworld_combat_elem_fire.db");
+        Db db = openWorld(p.string(), "tests/combat_fixture.sql");
+        db.exec("INSERT INTO known_spells(entity, spell) VALUES (3, 'fire')");
+        toStudy(db);
+        CHECK(runTurn(db, "cast fire").outcome == TurnOutcome::Ticked);
+        CHECK(burnedAmt(db) == kSpellDamage * 2);  // rime weak to fire: 2/1
+    }
+
+    // --- Frost (wrong element) applies the resist multiplier (1/2) + a slow ---
+    {
+        const TempDbFile p("textworld_combat_elem_frost.db");
+        Db db = openWorld(p.string(), "tests/combat_fixture.sql");
+        db.exec("INSERT INTO known_spells(entity, spell) VALUES (3, 'frost')");
+        toStudy(db);
+        CHECK(runTurn(db, "cast frost").outcome == TurnOutcome::Ticked);
+        CHECK(frozeAmt(db) == kSpellDamage / 2);  // rime resists frost: 1/2
+        // A slow CC was laid on the rime (still active after this tick's countdown).
+        CHECK(queryInt(db, "SELECT COUNT(*) FROM status_effects "
+                           "WHERE entity = 8 AND kind = 'slow' AND remaining > 0") == 1);
+    }
+
+    // --- Basic attack deals >0 to EVERY seeded archetype (the anti-deadlock
+    // floor, REQ-COMBAT-18), including the element-lock rime-touched ---
+    {
+        const TempDbFile p("textworld_combat_elem_floor.db");
+        Db db = openWorld(p.string(), "tests/combat_fixture.sql");
+        // Every seeded hostile archetype, none with an active barrier yet:
+        // the goblin (corridor, room 2) and the rime-touched (study, room 6).
+        for (const auto& [entity, room] :
+             std::vector<std::pair<int, int>>{{7, 2}, {8, 6}}) {
+            // Reach the enemy's room.
+            if (room == 2) {
+                CHECK(runTurn(db, "go north").outcome == TurnOutcome::Ticked);
+            } else {
+                CHECK(runTurn(db, "go east").outcome == TurnOutcome::Ticked);
+            }
+            const std::string hpSql =
+                "SELECT current FROM health WHERE entity = " + std::to_string(entity);
+            const int64_t before = queryInt(db, hpSql.c_str());
+            CHECK(runTurn(db, "attack").outcome == TurnOutcome::Ticked);
+            const int64_t after = queryInt(db, hpSql.c_str());
+            CHECK(after == before - kBasicAttackDamage);
+            CHECK(after < before);  // strictly non-zero damage: the floor holds
+        }
+    }
+}
+
 // Engine-appended status line: HP + per-spell cooldown readiness (REQ-COMBAT-15).
 // Present in combat, absent outside it, and the SAME shared helper both render
 // paths append (byte-identical). Deterministic.
@@ -3915,6 +3982,7 @@ int main() {
     testCombatCastGate();
     testCombatCounter();
     testCombatStatusLine();
+    testCombatElements();
     testRender();
     testExitDisplayInvariant();
     testLoop();

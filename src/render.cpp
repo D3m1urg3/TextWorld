@@ -169,6 +169,14 @@ std::string render(Db& db, int64_t turn) {
             // A telegraphed strike interrupted by a stun (subject = the enemy).
             out += "You bind the " + nameOf(db, subject) +
                    ", its strike collapsing mid-swing.\n";
+        } else if (verb == "burned") {
+            // Fire damage (subject = enemy, object = resistance-adjusted amount).
+            out += "Your fire sears the " + nameOf(db, subject) + " for " +
+                   std::to_string(object) + " damage.\n";
+        } else if (verb == "froze") {
+            // Frost damage + a slow (subject = enemy, object = adjusted amount).
+            out += "Your frost bites the " + nameOf(db, subject) + " for " +
+                   std::to_string(object) + " damage, and its movements slow.\n";
         } else if (verb == "defeated") {
             // subject = the fallen enemy (name survives), object = its grimoire.
             out += "The " + nameOf(db, subject) + " falls. It drops the " +

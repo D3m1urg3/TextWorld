@@ -79,6 +79,31 @@ bool hasStatus(Db& db, int64_t entity, const char* kind) {
     return s.step();
 }
 
+// True while `enemy` is incapacitated by crowd control (stun or slow) — its
+// turn action is suppressed for the duration (REQ-COMBAT-19).
+bool enemyIncapacitated(Db& db, int64_t enemy) {
+    return hasStatus(db, enemy, "stun") || hasStatus(db, enemy, "slow");
+}
+
+// Applied elemental damage = base × resistance(archetype, element) as an integer
+// ratio (REQ-COMBAT-16). No resistance row → neutral (1/1). Element "" (a basic
+// attack) never reaches here — its caller skips the lookup entirely, which is
+// what keeps the non-zero floor (REQ-COMBAT-18) holding against every archetype.
+int64_t resistedDamage(Db& db, const std::string& archetype,
+                       const std::string& element, int64_t base) {
+    if (element.empty()) return base;
+    Stmt s = db.prepare(
+        "SELECT multiplier_num, multiplier_den FROM resistance "
+        "WHERE archetype = ? AND element = ?");
+    s.bind(1, archetype);
+    s.bind(2, element);
+    if (!s.step()) return base;  // neutral
+    const int64_t num = s.colInt(0);
+    const int64_t den = s.colInt(1);
+    if (den == 0) return base;  // guard against a malformed row
+    return base * num / den;    // integer ratio — deterministic
+}
+
 }  // namespace
 
 // The living hostile sharing `room` (health.current > 0), or 0 if none. Lowest
@@ -149,34 +174,49 @@ void resolveCast(Db& db, int64_t player, const std::string& spell) {
     // the execution turn (meta.turn already incremented): ready_turn = now + cd.
     int64_t cd = 0;
     std::string effect;
+    std::string element;
     {
         Stmt s = db.prepare(
-            "SELECT cooldown, effect FROM spell_catalog WHERE spell = ?");
+            "SELECT cooldown, effect, element FROM spell_catalog WHERE spell = ?");
         s.bind(1, spell);
         if (s.step()) {
             cd = s.colInt(0);
             effect = s.colText(1);
+            element = s.colText(2);  // NULL element → "" (a non-elemental spell)
         }
     }
     setCooldown(db, player, spell, currentTurn(db) + cd);
     appendEvent(db, player, "cast", 0, 0, spell.c_str());
 
-    // Apply the spell's effect. Brick 2: Ward (block) and Stun (interrupt/CC).
-    // Fire/Frost/Dispel/AoE effects arrive in Brick 3.
+    // Apply the spell's effect. The hostile in the room is the target for the
+    // offensive/CC spells; a defensive spell (ward) targets the player.
     if (effect == "ward") {
         // A one-tick block flag: consumed when the pending strike resolves this
         // tick, else it expires in this tick's status countdown (REQ-COMBAT-11).
         applyStatus(db, player, "ward", 0, 1);
-    } else if (effect == "stun") {
-        // Interrupt: cancel the pending strike and CC the enemy for a fixed
-        // duration (REQ-COMBAT-19). Needs a hostile present to bind.
-        const int64_t enemy = hostileInRoom(db, roomOf(db, player));
-        if (enemy != 0) {
-            applyStatus(db, enemy, "stun", 0, kStunDuration);
-            clearPendingStrike(db, enemy);
-            appendEvent(db, player, "stunned", enemy, 0, nullptr);
+        return;
+    }
+
+    const int64_t enemy = hostileInRoom(db, roomOf(db, player));
+    if (enemy == 0) return;  // nothing to target (a wasted cast); cooldown stands
+
+    if (effect == "stun") {
+        // Interrupt: cancel the pending strike and CC the enemy (REQ-COMBAT-19).
+        applyStatus(db, enemy, "stun", 0, kStunDuration);
+        clearPendingStrike(db, enemy);
+        appendEvent(db, player, "stunned", enemy, 0, nullptr);
+    } else if (effect == "damage" || effect == "frost") {
+        // Elemental damage (REQ-COMBAT-16): base × resistance ratio for the
+        // enemy's archetype. Frost also lays a brief slow (a CC), giving DoT/AoE
+        // and the multiplicity lock company in Brick 3.
+        const int64_t dmg =
+            resistedDamage(db, archetypeOf(db, enemy), element, kSpellDamage);
+        damageEntity(db, enemy, dmg, player, effect == "frost" ? "froze" : "burned");
+        if (effect == "frost") {
+            applyStatus(db, enemy, "slow", 0, kSlowDuration);
         }
     }
+    // Dispel (Step 16) and AoE (Step 17) effects arrive later in Brick 3.
 }
 
 std::string combatStatusLine(Db& db, int64_t player) {
@@ -238,8 +278,8 @@ void resolveCombat(Db& db, int64_t player, int64_t hostile) {
 
     // The enemy's single turn action (REQ-COMBAT-9): the telegraph → strike lane,
     // driven deterministically by telegraph_period — no RNG. SUPPRESSED entirely
-    // while the enemy is stunned (the CC interrupt, REQ-COMBAT-19).
-    if (!hasStatus(db, hostile, "stun")) {
+    // while the enemy is incapacitated by CC (stun or frost's slow, REQ-COMBAT-19).
+    if (!enemyIncapacitated(db, hostile)) {
         int64_t pendingDamage = 0;
         if (pendingStrikeDamage(db, hostile, pendingDamage)) {
             // A wind-up from last turn lands now (REQ-COMBAT-10) — unless the

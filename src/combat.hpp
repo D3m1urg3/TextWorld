@@ -30,6 +30,15 @@ inline constexpr int64_t kStrikeDamage = 5;
 // Engine-owned constant. The enemy resumes acting after this many ticks.
 inline constexpr int64_t kStunDuration = 2;
 
+// Base damage of an elemental spell before the archetype resistance ratio is
+// applied (REQ-COMBAT-16). Engine-owned; per-spell variation is a later tuning
+// axis. Applied damage = kSpellDamage × multiplier_num / multiplier_den.
+inline constexpr int64_t kSpellDamage = 4;
+
+// How many ticks Frost's slow suppresses the enemy's action (a brief CC —
+// shorter reach than Stun, and it does not cancel a pending strike).
+inline constexpr int64_t kSlowDuration = 2;
+
 // The living hostile (health.current > 0) sharing `room`, or 0 if none (lowest
 // entity id when several). Read-only. Exposed so resolveGo can refuse a flee into
 // an ungenerated exit while an enemy is present (REQ-COMBAT-26).

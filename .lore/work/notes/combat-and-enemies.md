@@ -38,7 +38,7 @@ in `./build/tests`.
 
 **BRICK 3 — Elements / four-lock closure / learning economy**
 - [x] 13 — schema: elements+locks+grimoire → `testCombatSchema` ext. ✅
-- [ ] 14 — element+resist+Fire/Frost → `testCombatElements`
+- [x] 14 — element+resist+Fire/Frost → `testCombatElements` ✅
 - [ ] 15 — DoT → `testCombatDoT`
 - [ ] 16 — defense lock (barrier/Dispel) → `testCombatDefenseLock`
 - [ ] 17 — multiplicity lock (AoE/swarm) → `testCombatMultiplicity`
@@ -298,5 +298,22 @@ in `./build/tests`.
   + testShippedSeedShape stable until the coherent Step-19 assembly.
 - `testCombatSchema`: three tables' columns; resistance rows are non-zero integer
   ratios; rime fire ratio == 2. Gate: build clean; 2228 checks, 0 failures.
+
+### Step 14 — element + resistance multiplier; Fire/Frost; floor ✅
+- `combat.hpp`: kSpellDamage=4, kSlowDuration=2. `combat.cpp`: `resistedDamage`
+  (base × num/den, integer, neutral when no row, unmodified when element ""),
+  `enemyIncapacitated` (stun OR slow suppresses the enemy turn). `resolveCast`
+  extended: fire → 'burned' (resisted damage); frost → 'froze' (resisted damage +
+  'slow' CC); ward returns early, others target hostileInRoom.
+- Basic attack unchanged (no element → never hits the resistance table) — that IS
+  the non-zero floor (REQ-COMBAT-18).
+- render `burned` + `froze` templates (standing rule).
+- `combat_fixture.sql`: **frost study = entity 6** (initially collided with the
+  player at id 3 — UNIQUE name.entity crash; fixed) holding rime-touched (entity 8,
+  10/10, weak fire). corridor east↔study west realized pair.
+- `testCombatElements`: fire on rime → kSpellDamage×2 (weakness); frost on rime →
+  kSpellDamage/2 (resist) + slow status; basic attack deals exactly
+  kBasicAttackDamage (>0) to BOTH seeded archetypes. Covers AI-Validation item 8.
+- Gate: build clean; `./build/tests` → 2256 checks, 0 failures. combat.cpp clean.
 </content>
 </invoke>

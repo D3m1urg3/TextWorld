@@ -11,9 +11,11 @@
 --   3: player (health 12/12), in the cell
 --   4: portable 'wand', in the cell (for downed drop-all coverage)
 --   5: portable 'key', in the corridor
+--   6: room 'frost study'
 --   7: hostile 'goblin grunt' (health 8/8, chip 1), in the corridor
+--   8: hostile 'rime-touched goblin' (health 10/10, chip 1), in the frost study
 
-INSERT INTO entities(id) VALUES (1), (2), (3), (4), (5), (7);
+INSERT INTO entities(id) VALUES (1), (2), (3), (4), (5), (6), (7), (8);
 
 -- 1: room 'cell'
 INSERT INTO room(entity) VALUES (1);
@@ -25,10 +27,18 @@ INSERT INTO room(entity) VALUES (2);
 INSERT INTO name(entity, value) VALUES (2, 'corridor');
 INSERT INTO description(entity, prose) VALUES (2, 'A long dim corridor.');
 
--- exits: north 1->2, south 2->1 (a realized pair; flee tests use the return leg)
+-- 6: room 'frost study' (holds the rime-touched element lock)
+INSERT INTO room(entity) VALUES (6);
+INSERT INTO name(entity, value) VALUES (6, 'frost study');
+INSERT INTO description(entity, prose) VALUES (6, 'A frost-rimed study.');
+
+-- exits: north 1->2, south 2->1 (realized pair; flee tests use the return leg);
+-- east 2->6, west 6->2 (realized pair to the frost study).
 INSERT INTO exits(room, direction, dest) VALUES
   (1, 'north', 2),
-  (2, 'south', 1);
+  (2, 'south', 1),
+  (2, 'east', 6),
+  (6, 'west', 2);
 -- a latent frontier stub off the corridor (flee-into-the-unknown is refused)
 INSERT INTO exits(room, direction, dest) VALUES
   (2, 'north', NULL);
@@ -72,3 +82,10 @@ INSERT INTO spell_catalog(spell, element, cooldown, tier, effect) VALUES
 INSERT INTO resistance(archetype, element, multiplier_num, multiplier_den) VALUES
   ('rime_touched', 'fire', 2, 1),
   ('rime_touched', 'frost', 1, 2);
+
+-- 8: hostile 'rime-touched goblin', in the frost study (element lock, weak Fire)
+INSERT INTO hostile(entity, archetype, chip, telegraph_period) VALUES (8, 'rime_touched', 1, 3);
+INSERT INTO health(entity, current, max) VALUES (8, 10, 10);
+INSERT INTO name(entity, value) VALUES (8, 'rime-touched goblin');
+INSERT INTO description(entity, prose) VALUES (8, 'A goblin sheathed in creeping frost.');
+INSERT INTO location(entity, container) VALUES (8, 6);
