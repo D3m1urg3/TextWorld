@@ -66,11 +66,14 @@ std::optional<Action> parse(Db& db, const std::string& line) {
         return Action{Verb::Attack};
     }
 
-    if (verbWord == "take" || verbWord == "drop") {
+    if (verbWord == "take" || verbWord == "drop" || verbWord == "read") {
         if (arg.empty()) return std::nullopt;  // bare verb, REQ-PROTO-6a
         const int64_t entity = lookupNoun(db, arg);
         if (entity == 0) return std::nullopt;  // not a noun anywhere in world
-        Action a{verbWord == "take" ? Verb::Take : Verb::Drop};
+        Verb v = verbWord == "take"   ? Verb::Take
+                 : verbWord == "drop" ? Verb::Drop
+                                      : Verb::Read;
+        Action a{v};
         a.subject = entity;
         return a;
     }

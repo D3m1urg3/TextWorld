@@ -8,7 +8,7 @@
 
 #include "db.hpp"
 
-enum class Verb { Look, Go, Take, Drop, Inventory, Wait, Quit, Attack, Cast };
+enum class Verb { Look, Go, Take, Drop, Inventory, Wait, Quit, Attack, Cast, Read };
 
 struct Action {
     Verb verb;

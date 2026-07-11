@@ -66,6 +66,13 @@ void resolveAttack(Db& db, int64_t player);
 std::optional<std::string> castDenialReason(Db& db, int64_t player,
                                             const std::string& spell);
 
+// Resolve a Verb::Read for `player` on entity `subject` (REQ-COMBAT-20, -21). If
+// `subject` is a grimoire the player can reach (in the room or inventory), learn
+// its spell — canon, permanent, idempotent (already-known is a no-op success).
+// A non-grimoire or out-of-reach target is an in-world refusal. Writes via
+// mutations only.
+void resolveRead(Db& db, int64_t player, int64_t subject);
+
 // Resolve a valid Verb::Cast (availability already gated by castDenialReason).
 // Sets the spell's cooldown to ready_turn = now + catalog cooldown (an immutable
 // constant, never reduced — REQ-COMBAT-14) and applies its effect (Brick 2:

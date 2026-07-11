@@ -42,7 +42,7 @@ in `./build/tests`.
 - [x] 15 — DoT → `testCombatDoT` ✅
 - [x] 16 — defense lock (barrier/Dispel) → `testCombatDefenseLock` ✅
 - [x] 17 — multiplicity lock (AoE/swarm) → `testCombatMultiplicity` ✅
-- [ ] 18 — grimoire→Read→learn → `testCombatLearn`
+- [x] 18 — grimoire→Read→learn → `testCombatLearn` ✅ **(Brick 3 done)**
 
 **BRICK 4 — Bestiary catalog / architect spawning / setting**
 - [ ] 19 — bestiary catalog + refactor placement → `testBestiaryCatalog`
@@ -362,5 +362,21 @@ in `./build/tests`.
   events, DoT reached 3 distinct bodies; basic attack thins one body per tick. With
   Steps 8/14/16 all four lock categories of REQ-COMBAT-17 are now expressed.
 - Gate: build clean; `./build/tests` → 2324 checks, 0 failures. combat.cpp clean.
+
+### Step 18 — grimoire → Read → known_spells learning economy ✅ (Brick 3 done)
+- `dropGrimoire`: `grimoireFlavorFor` extended with the taught spell (goblin→fire,
+  rime→frost, ironhide→dispel, swarm→blast); writes a `grimoire(item, spell)` row.
+- `learnSpell` mutation (INSERT OR IGNORE — canon, permanent, idempotent).
+- **`Verb::Read`** (10th verb): parser `read <noun>` (grouped with take/drop);
+  resolver ISA `read` (enum + prompt + lowering); `resolveRead` (combat.cpp): a
+  reachable grimoire (room or inventory) → learnSpell + 'learned', already-known →
+  'reread' no-op, non-grimoire/out-of-reach → refusal. render learned + reread.
+- `testCombatLearn`: kill goblin → fire grimoire (with grimoire row); read → learns
+  fire; reopen db → fire persists (canon); re-read → no-op 'reread'; **sqlite_master
+  sweep finds no growable-stat column** (REQ-COMBAT-22 anti-goal). Resolver tests →
+  ten verbs. Completes AI-Validation item 10 + known_spells clause of 11.
+- Gate: build clean; `./build/tests` → 2344 checks, 0 failures. combat.cpp clean.
+
+## BRICK 3 COMPLETE — all four lock categories, DoT, and the learning economy.
 </content>
 </invoke>

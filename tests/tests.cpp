@@ -994,6 +994,64 @@ static void testCombatElements() {
     }
 }
 
+// Grimoire → Read → known_spells learning economy (REQ-COMBAT-20, -21, -22).
+// Killing the seed enemy drops a spell grimoire; reading it learns the spell
+// permanently (surviving restart); re-reading is a no-op; no growable stat
+// exists anywhere. Deterministic.
+static void testCombatLearn() {
+    const TempDbFile worldPath("textworld_combat_learn_tests.db");
+
+    int64_t grimoireId = 0;
+    {
+        Db db = openWorld(worldPath.string(), "tests/combat_fixture.sql");
+        // The player does not know fire to begin with.
+        CHECK(queryInt(db, "SELECT COUNT(*) FROM known_spells "
+                           "WHERE entity = 3 AND spell = 'fire'") == 0);
+
+        // Kill the goblin (corridor): it drops a fire grimoire with a grimoire row.
+        CHECK(runTurn(db, "go north").outcome == TurnOutcome::Ticked);
+        CHECK(runTurn(db, "attack").outcome == TurnOutcome::Ticked);  // 8 -> 4
+        CHECK(runTurn(db, "attack").outcome == TurnOutcome::Ticked);  // 4 -> 0, defeated
+
+        grimoireId = queryInt(db, "SELECT entity FROM grimoire WHERE spell = 'fire'");
+        CHECK(grimoireId > 0);
+        CHECK(queryInt(db, ("SELECT container FROM location WHERE entity = " +
+                            std::to_string(grimoireId)).c_str()) == 2);  // in the corridor
+
+        // Read it → learn fire (canon).
+        {
+            const std::string out = runTurn(db, "read fire grimoire").output;
+            CHECK(queryInt(db, "SELECT COUNT(*) FROM known_spells "
+                               "WHERE entity = 3 AND spell = 'fire'") == 1);
+            CHECK(contains(out, "learn"));  // 'learned' render template
+        }
+    }  // close the world file
+
+    // Restart: reopen the persisted file. The learned spell survives (canon).
+    {
+        Db db = openWorld(worldPath.string(), "tests/combat_fixture.sql");
+        CHECK(queryInt(db, "SELECT COUNT(*) FROM known_spells "
+                           "WHERE entity = 3 AND spell = 'fire'") == 1);
+
+        // Reading the already-known grimoire again is a no-op success ('reread').
+        {
+            const std::string out = runTurn(db, "read fire grimoire").output;
+            CHECK(queryInt(db, "SELECT COUNT(*) FROM known_spells "
+                               "WHERE entity = 3 AND spell = 'fire'") == 1);  // still one
+            CHECK(contains(out, "already know"));  // 'reread' render template
+        }
+
+        // Anti-goal guard (REQ-COMBAT-22): NO XP/level/growable numeric column
+        // exists anywhere in the schema — progression is only known_spells rows.
+        CHECK(queryInt(db,
+                       "SELECT COUNT(*) FROM sqlite_master m "
+                       "JOIN pragma_table_info(m.name) p "
+                       "WHERE m.type = 'table' AND lower(p.name) IN "
+                       "('xp','level','levels','experience','exp','rank','growth',"
+                       "'skillpoints','power')") == 0);
+    }
+}
+
 // Multiplicity lock: AoE and DoT reach every body of a swarm; single-target
 // basic attack thins them one at a time (REQ-COMBAT-17, -19). Deterministic.
 static void testCombatMultiplicity() {
@@ -1784,10 +1842,10 @@ static void testNlResolvePrompt() {
     const std::string sys = kResolveSystemPrompt;
     CHECK(!sys.empty());
 
-    // All nine ISA verbs are named (attack + cast added in the combat brick).
+    // All ten ISA verbs are named (attack/cast/read added in the combat brick).
     for (const char* verb :
          {"look", "go", "take", "drop", "inventory", "wait", "quit", "attack",
-          "cast"}) {
+          "cast", "read"}) {
         CHECK(sys.find(verb) != std::string::npos);
     }
 
@@ -2086,15 +2144,15 @@ static void testNlResolveRequestBody() {
         const json& tool = j["tools"][0];
         CHECK(tool["name"] == "emit_action");
 
-        // input schema: object; verb enum is exactly the nine ISA verbs
-        // (attack + cast added in the combat brick, REQ-COMBAT-38).
+        // input schema: object; verb enum is exactly the ten ISA verbs
+        // (attack/cast/read added in the combat brick, REQ-COMBAT-38).
         const json& schema = tool["input_schema"];
         CHECK(schema["type"] == "object");
         const json& verb = schema["properties"]["verb"];
         CHECK(verb["type"] == "string");
         CHECK(verb["enum"] ==
               json::array({"look", "go", "take", "drop", "inventory", "wait",
-                           "quit", "attack", "cast"}));
+                           "quit", "attack", "cast", "read"}));
 
         // subject and direction present; verb is the ONLY required field.
         CHECK(schema["properties"].contains("subject"));
@@ -4117,6 +4175,7 @@ int main() {
     testCombatDoT();
     testCombatDefenseLock();
     testCombatMultiplicity();
+    testCombatLearn();
     testRender();
     testExitDisplayInvariant();
     testLoop();

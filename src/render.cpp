@@ -193,6 +193,14 @@ std::string render(Db& db, int64_t turn) {
             // An area-of-effect hit on one body (subject = that body, object = amount).
             out += "The blast tears into the " + nameOf(db, subject) + " for " +
                    std::to_string(object) + " damage.\n";
+        } else if (verb == "learned") {
+            // A grimoire read for the first time (subject = grimoire, detail = spell).
+            out += "You study the " + nameOf(db, subject) +
+                   " and learn to cast " + detail + ".\n";
+        } else if (verb == "reread") {
+            // A grimoire whose spell is already known (a no-op success).
+            out += "You study the " + nameOf(db, subject) +
+                   ", but you already know " + detail + ".\n";
         } else if (verb == "defeated") {
             // subject = the fallen enemy (name survives), object = its grimoire.
             out += "The " + nameOf(db, subject) + " falls. It drops the " +

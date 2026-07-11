@@ -37,6 +37,14 @@ int64_t chipOf(Db& db, int64_t entity) {
     return s.colInt(0);
 }
 
+// Container of an arbitrary entity, or nullopt if it has no location row.
+std::optional<int64_t> containerOf(Db& db, int64_t entity) {
+    Stmt s = db.prepare("SELECT container FROM location WHERE entity = ?");
+    s.bind(1, entity);
+    if (!s.step()) return std::nullopt;
+    return s.colInt(0);
+}
+
 // Archetype tag of a hostile ("" if it has no hostile row).
 std::string archetypeOf(Db& db, int64_t entity) {
     Stmt s = db.prepare("SELECT archetype FROM hostile WHERE entity = ?");
@@ -158,6 +166,40 @@ void resolveAttack(Db& db, int64_t player) {
     // enemy is not needed here — combat is single-enemy per room; the engine
     // finds it. Defeat is checked by the enemy-turn system (Step 5).
     damageEntity(db, enemy, kBasicAttackDamage, player, "attacked");
+}
+
+void resolveRead(Db& db, int64_t player, int64_t subject) {
+    // Is the target a grimoire (does it teach a spell)?
+    std::string spell;
+    {
+        Stmt s = db.prepare("SELECT spell FROM grimoire WHERE entity = ?");
+        s.bind(1, subject);
+        if (s.step()) spell = s.colText(0);
+    }
+    if (spell.empty()) {
+        appendEvent(db, player, "failed", 0, 0, "There's nothing to read there.");
+        return;
+    }
+    // Reachable: the grimoire is in the player's room or in their inventory.
+    const int64_t room = roomOf(db, player);
+    const std::optional<int64_t> where = containerOf(db, subject);
+    if (!where || (*where != room && *where != player)) {
+        appendEvent(db, player, "failed", 0, 0, "You don't see that here.");
+        return;
+    }
+    // Learn it (canon, permanent, idempotent). Distinguish a first learn from a
+    // no-op re-read (REQ-COMBAT-21) for narration; both are a success.
+    bool alreadyKnown = false;
+    {
+        Stmt s = db.prepare(
+            "SELECT 1 FROM known_spells WHERE entity = ? AND spell = ?");
+        s.bind(1, player);
+        s.bind(2, spell);
+        alreadyKnown = s.step();
+    }
+    learnSpell(db, player, spell);
+    appendEvent(db, player, alreadyKnown ? "reread" : "learned", subject, 0,
+                spell.c_str());
 }
 
 std::optional<std::string> castDenialReason(Db& db, int64_t player,

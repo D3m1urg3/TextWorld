@@ -88,23 +88,39 @@ void damageEntity(Db& db, int64_t target, int64_t amount, int64_t actor,
 
 namespace {
 
-// A grimoire's flavor (name + description) for a defeated archetype. Fixed,
-// deterministic content (REQ-COMBAT-20). The archetype → learned-SPELL mapping
-// lands in Step 18 as the grimoire→spell component; this is only the item's
-// costume. Unknown archetypes fall back to a plain grimoire.
+// A grimoire's flavor (name + description) AND the spell it teaches for a
+// defeated archetype — a fixed, deterministic archetype → grimoire → spell
+// mapping (REQ-COMBAT-20), never probabilistic. Unknown archetypes fall back to
+// a plain grimoire teaching nothing.
 struct GrimoireFlavor {
     const char* name;
     const char* description;
+    const char* spell;  // "" = teaches no spell
 };
 GrimoireFlavor grimoireFlavorFor(const std::string& archetype) {
     if (archetype == "goblin_grunt") {
         return {"fire grimoire",
                 "A slim grimoire bound in charred leather, its spine lettered in "
                 "embers that never quite go cold. The rune of Fire glows on the "
-                "cover."};
+                "cover.",
+                "fire"};
+    }
+    if (archetype == "rime_touched") {
+        return {"frost grimoire",
+                "A grimoire cold to the touch, its pages furred with rime.", "frost"};
+    }
+    if (archetype == "ironhide") {
+        return {"dispel grimoire",
+                "A grimoire clasped in iron, its counter-sigils gleaming.", "dispel"};
+    }
+    if (archetype == "book_swarm") {
+        return {"blast grimoire",
+                "A heavy grimoire scorched at the edges, humming with force.",
+                "blast"};
     }
     return {"grimoire",
-            "A worn grimoire, its pages dense with a spell you have yet to read."};
+            "A worn grimoire, its pages dense with a spell you have yet to read.",
+            ""};
 }
 
 }  // namespace
@@ -144,7 +160,25 @@ int64_t dropGrimoire(Db& db, const std::string& archetype, int64_t room) {
         s.bind(2, room);
         s.step();
     }
+    // The grimoire → spell bridge (REQ-COMBAT-20): a fixed archetype → spell row,
+    // read by Read to learn the spell. Only when the archetype teaches one.
+    if (flavor.spell[0] != '\0') {
+        Stmt s = db.prepare("INSERT INTO grimoire(entity, spell) VALUES (?, ?)");
+        s.bind(1, item);
+        s.bind(2, std::string(flavor.spell));
+        s.step();
+    }
     return item;  // no event: the paired 'defeated' event records the drop
+}
+
+void learnSpell(Db& db, int64_t player, const std::string& spell) {
+    // Canon, permanent (REQ-COMBAT-21): add to known_spells, idempotent — reading
+    // an already-known grimoire is a no-op. Never removed by any mechanic.
+    Stmt s = db.prepare(
+        "INSERT OR IGNORE INTO known_spells(entity, spell) VALUES (?, ?)");
+    s.bind(1, player);
+    s.bind(2, spell);
+    s.step();
 }
 
 void applyStatus(Db& db, int64_t entity, const char* kind, int64_t magnitude,

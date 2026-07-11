@@ -168,6 +168,9 @@ void resolveImpl(Db& db, const Action& action, int64_t player,
             // (REQ-COMBAT-7/-13); reaching here means the cast is valid.
             resolveCast(db, player, action.spell);
             break;
+        case Verb::Read:
+            resolveRead(db, player, action.subject);
+            break;
         case Verb::Quit:
             // Quit is handled by the game loop BEFORE the tick transaction is
             // opened — it must never reach resolve. Throwing (rather than

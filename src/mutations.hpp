@@ -105,6 +105,11 @@ void clearPendingStrike(Db& db, int64_t enemy);
 // it). Never begins/commits.
 void defeatEnemy(Db& db, int64_t enemy, int64_t droppedItem, int64_t actor);
 
+// Teach `player` `spell` by adding it to known_spells (REQ-COMBAT-21): canon and
+// permanent, idempotent (already-known is a no-op). Event-free — the paired
+// 'learned'/'reread' event records the read. Never begins/commits.
+void learnSpell(Db& db, int64_t player, const std::string& spell);
+
 // The "downed, not dead" model (REQ-COMBAT-23, -24, -25), inside the caller's
 // transaction. In order: drop every portable the player carries at the fall room
 // (each a 'dropped' event); relocate the player to `safeRoom`; restore the
