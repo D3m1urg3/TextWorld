@@ -248,6 +248,16 @@ bool knowsSpellOfElement(Db& db, int64_t player, const std::string& element) {
     return s.step();
 }
 
+// Whether `player` has `spell` in known_spells — the canon of what they can cast
+// (REQ-COMBAT-7) and the "already learned" test for a re-read (REQ-COMBAT-21).
+bool knowsSpell(Db& db, int64_t player, const std::string& spell) {
+    Stmt s = db.prepare(
+        "SELECT 1 FROM known_spells WHERE entity = ? AND spell = ?");
+    s.bind(1, player);
+    s.bind(2, spell);
+    return s.step();
+}
+
 // Whether `player` knows EVERY key `archetype`'s lock requires (REQ-COMBAT-32): a
 // dispel for a barrier, and a spell of each weakness element. A basic-soluble
 // archetype requires none, so this is trivially true for it.
@@ -356,14 +366,7 @@ void resolveRead(Db& db, int64_t player, int64_t subject) {
     }
     // Learn it (canon, permanent, idempotent). Distinguish a first learn from a
     // no-op re-read (REQ-COMBAT-21) for narration; both are a success.
-    bool alreadyKnown = false;
-    {
-        Stmt s = db.prepare(
-            "SELECT 1 FROM known_spells WHERE entity = ? AND spell = ?");
-        s.bind(1, player);
-        s.bind(2, spell);
-        alreadyKnown = s.step();
-    }
+    const bool alreadyKnown = knowsSpell(db, player, spell);
     learnSpell(db, player, spell);
     appendEvent(db, player, alreadyKnown ? "reread" : "learned", subject, 0,
                 spell.c_str());
@@ -374,12 +377,8 @@ std::optional<std::string> castDenialReason(Db& db, int64_t player,
     if (spell.empty()) return std::string("You don't know that spell.");
 
     // Learned? (REQ-COMBAT-7). known_spells is the canon of what the player can cast.
-    {
-        Stmt s = db.prepare(
-            "SELECT 1 FROM known_spells WHERE entity = ? AND spell = ?");
-        s.bind(1, player);
-        s.bind(2, spell);
-        if (!s.step()) return std::string("You don't know that spell.");
+    if (!knowsSpell(db, player, spell)) {
+        return std::string("You don't know that spell.");
     }
     // Off cooldown? (REQ-COMBAT-13). Evaluated against the current meta.turn so
     // this gate agrees exactly with the status line's readiness display (Step

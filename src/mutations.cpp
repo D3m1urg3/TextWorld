@@ -17,6 +17,16 @@ int64_t currentTurn(Db& db) {
     return s.colInt(0);
 }
 
+// Mint one fresh entity id: INSERT a bare row and read its rowid. The single id
+// source for every runtime-created entity — generated rooms, dropped grimoires,
+// spawned enemies — inside the caller's ambient transaction.
+int64_t mintEntity(Db& db) {
+    db.exec("INSERT INTO entities DEFAULT VALUES");
+    Stmt s = db.prepare("SELECT last_insert_rowid()");
+    if (!s.step()) throw std::runtime_error("mintEntity: rowid read failed");
+    return s.colInt(0);
+}
+
 }  // namespace
 
 void appendEvent(Db& db, int64_t actor, const char* verb, int64_t subj,
@@ -128,15 +138,7 @@ GrimoireFlavor grimoireFlavorFor(const std::string& archetype) {
 int64_t dropGrimoire(Db& db, const std::string& archetype, int64_t room) {
     const GrimoireFlavor flavor = grimoireFlavorFor(archetype);
 
-    // Mint one entity (same pattern as writeGeneratedRoom): INSERT DEFAULT then
-    // read the rowid.
-    db.exec("INSERT INTO entities DEFAULT VALUES");
-    int64_t item = 0;
-    {
-        Stmt s = db.prepare("SELECT last_insert_rowid()");
-        if (!s.step()) throw std::runtime_error("dropGrimoire: rowid read failed");
-        item = s.colInt(0);
-    }
+    const int64_t item = mintEntity(db);
     {
         Stmt s = db.prepare("INSERT INTO portable(entity) VALUES (?)");
         s.bind(1, item);
@@ -198,14 +200,7 @@ int64_t placeEnemy(Db& db, const std::string& archetype, int64_t room) {
         barrier = s.colInt(5);
     }
 
-    // Mint one entity (same pattern as dropGrimoire / writeGeneratedRoom).
-    db.exec("INSERT INTO entities DEFAULT VALUES");
-    int64_t enemy = 0;
-    {
-        Stmt s = db.prepare("SELECT last_insert_rowid()");
-        if (!s.step()) throw std::runtime_error("placeEnemy: rowid read failed");
-        enemy = s.colInt(0);
-    }
+    const int64_t enemy = mintEntity(db);
 
     // Component rows: the stats are COPIED from the catalog, never authored here.
     {
@@ -426,15 +421,7 @@ int64_t writeGeneratedRoom(Db& db, int64_t originRoom,
             "writeGeneratedRoom: non-invertible direction '" + direction + "'");
     }
 
-    // Mint one entity — the first runtime entity mint (micro-decision #1). No
-    // db.hpp change: INSERT DEFAULT VALUES then read last_insert_rowid().
-    db.exec("INSERT INTO entities DEFAULT VALUES");
-    int64_t newRoom = 0;
-    {
-        Stmt s = db.prepare("SELECT last_insert_rowid()");
-        if (!s.step()) throw std::runtime_error("writeGeneratedRoom: rowid read failed");
-        newRoom = s.colInt(0);
-    }
+    const int64_t newRoom = mintEntity(db);
 
     // Component rows: room tag, name, canon description. NO location row —
     // rooms have no container (matching base.sql).
