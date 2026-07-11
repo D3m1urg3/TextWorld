@@ -20,3 +20,20 @@ inline constexpr int64_t kBasicAttackDamage = 4;
 // only through mutations helpers. Defeat handling is the enemy-turn system's
 // job (Step 5), not this function's.
 void resolveAttack(Db& db, int64_t player);
+
+// The living hostile (health.current > 0) sharing `player`'s room right now, or
+// 0 if none. Read-only. The loop captures this at TICK START — before the
+// player's action resolves — so the enemy that was present still takes its one
+// turn even if the player's action moved them out (flee, Step 11); this is
+// micro-decision 2.
+int64_t tickStartHostile(Db& db, int64_t player);
+
+// The enemy-turn system (REQ-COMBAT-1, -2, -9, -12): the first non-player actor.
+// Called from runTurn AFTER resolve(), inside the SAME tick transaction, keyed
+// on `hostile` = the foe present at tick start. `hostile == 0`, or a hostile the
+// player's action just brought to 0 health, means no combat this tick (no-op;
+// defeat removal is Step 5). Otherwise the enemy takes its single turn action
+// (Brick 1: idle — the telegraph/strike lane is Step 8) PLUS the always-on chip
+// lane: fixed per-instance chip damage to the player, the irreducible HP clock.
+// Writes only through mutations helpers.
+void resolveCombat(Db& db, int64_t player, int64_t hostile);

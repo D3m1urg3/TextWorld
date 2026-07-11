@@ -622,6 +622,56 @@ static void testCombatAttack() {
           8 - 2 * kBasicAttackDamage);
 }
 
+// The chip clock + enemy-turn tick integrity (REQ-COMBAT-1, -2, -3, -9, -12).
+// Driven through the real runTurn (the enemy turn fires only in the loop, not
+// the direct-resolve `tick` helper). AI is disabled hermetically, so runTurn
+// takes the fixed-verb parser path — deterministic, no network.
+static void testCombatChipClock() {
+    const TempDbFile worldPath("textworld_combat_chip_tests.db");
+    Db db = openWorld(worldPath.string(), "tests/combat_fixture.sql");
+    const int64_t chip = queryInt(db, "SELECT chip FROM hostile WHERE entity = 7");
+    CHECK(chip > 0);
+
+    // Tick 1: walk from the cell into the corridor. At tick start the player was
+    // in the cell (no hostile), so NO chip lands this tick.
+    CHECK(runTurn(db, "go north").outcome == TurnOutcome::Ticked);
+    CHECK(queryInt(db, "SELECT value FROM meta WHERE key = 'turn'") == 1);
+    CHECK(queryInt(db, "SELECT current FROM health WHERE entity = 3") == 12);
+    CHECK(queryInt(db, "SELECT COUNT(*) FROM events WHERE verb = 'chip'") == 0);
+
+    // Tick 2: a non-combat verb (Wait) in the hostile's room STILL costs chip
+    // (REQ-COMBAT-3/-8). meta.turn increments exactly once; the enemy idles
+    // otherwise (Brick 1), so the only enemy footprint is the chip event.
+    CHECK(runTurn(db, "wait").outcome == TurnOutcome::Ticked);
+    CHECK(queryInt(db, "SELECT value FROM meta WHERE key = 'turn'") == 2);
+    CHECK(queryInt(db, "SELECT current FROM health WHERE entity = 3") == 12 - chip);
+    // The chip event is paired, stamped with THIS turn, actor = enemy, subject =
+    // player, object = the chip amount.
+    CHECK(queryInt(db,
+                   ("SELECT COUNT(*) FROM events WHERE turn = 2 AND verb = 'chip' "
+                    "AND actor = 7 AND subject = 3 AND object = " +
+                    std::to_string(chip))
+                       .c_str()) == 1);
+    // Player-then-enemy ordering within the one transaction: the player's
+    // 'waited' event precedes the enemy's 'chip' event by id.
+    CHECK(queryInt(db,
+                   "SELECT (SELECT id FROM events WHERE turn = 2 AND verb = 'waited') "
+                   "< (SELECT id FROM events WHERE turn = 2 AND verb = 'chip')") == 1);
+
+    // Tick 3: attacking lands strike + chip in the SAME tick (REQ-COMBAT-12) —
+    // the goblin loses kBasicAttackDamage AND the player loses chip.
+    CHECK(runTurn(db, "attack").outcome == TurnOutcome::Ticked);
+    CHECK(queryInt(db, "SELECT value FROM meta WHERE key = 'turn'") == 3);
+    CHECK(queryInt(db, "SELECT current FROM health WHERE entity = 7") ==
+          8 - kBasicAttackDamage);
+    CHECK(queryInt(db, "SELECT current FROM health WHERE entity = 3") ==
+          12 - 2 * chip);
+    CHECK(queryInt(db,
+                   "SELECT COUNT(*) FROM events WHERE turn = 3 AND verb = 'attacked'") == 1);
+    CHECK(queryInt(db,
+                   "SELECT COUNT(*) FROM events WHERE turn = 3 AND verb = 'chip'") == 1);
+}
+
 // Substring helper for renderer output checks.
 static bool contains(const std::string& haystack, const std::string& needle) {
     return haystack.find(needle) != std::string::npos;
@@ -3367,6 +3417,7 @@ int main() {
     testMutations();
     testSystems();
     testCombatAttack();
+    testCombatChipClock();
     testRender();
     testExitDisplayInvariant();
     testLoop();

@@ -24,7 +24,7 @@ in `./build/tests`.
 - [x] 1 — schema: health + hostile (+ version bump) → `testCombatSchema` ✅
 - [x] 2 — seed hand-placed enemy → `testShippedSeedShape` ext. ✅
 - [x] 3 — `Verb::Attack` + `resolveAttack` + `damageEntity` → `testCombatAttack` ✅
-- [ ] 4 — enemy-turn system + chip lane → `testCombatChipClock`
+- [x] 4 — enemy-turn system + chip lane → `testCombatChipClock` ✅
 - [ ] 5 — defeat + grimoire drop + downed → `testCombatDefeat`, `testCombatDowned`
 - [ ] 6 — narration + template + HP status line → `testCombatRender`
 
@@ -110,5 +110,23 @@ in `./build/tests`.
   (empty-room refusal; exact floor damage; one event; player untouched pre-Step-4;
   stacking); `testNlResolveRequestBody` enum updated to the eight verbs.
 - Gate: build clean; `./build/tests` → 1952 checks, 0 failures.
+
+### Step 4 — enemy-turn system + chip lane, wired into the tick ✅
+- `combat.{hpp,cpp}`: `tickStartHostile(db, player)` (living hostile in the
+  player's room, read-only) + `resolveCombat(db, player, hostile)` — no-op if
+  hostile 0 or already at 0 health (player's action ended combat; removal is
+  Step 5); else enemy idles (Brick 1) + chip lane `damageEntity(player, chip,
+  hostile, "chip")`. New private readers `healthOf`/`chipOf`.
+- `loop.cpp` `runTurn`: capture `startHostile` BEFORE the turn increment/resolve
+  (micro-decision 2), then call `resolveCombat` after `resolve`, same transaction
+  → player-then-enemy in one tick (REQ-COMBAT-2).
+- Key mechanism: enemy turn keyed on the tick-START hostile, so a future flee
+  (Step 11) still eats the parting turn even though the player has moved.
+- `testCombatChipClock` (via runTurn): moving in doesn't chip (was in cell at tick
+  start); Wait in the hostile room chips (non-combat verb still triggers enemy);
+  attack lands strike+chip same tick; meta.turn +1/tick; chip event paired at the
+  turn, actor=enemy→subject=player, and player's event precedes enemy's by id.
+- Gate: build clean; `./build/tests` → 1981 checks, 0 failures. combat.cpp raw-write
+  grep still empty.
 </content>
 </invoke>

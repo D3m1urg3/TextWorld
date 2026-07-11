@@ -8,6 +8,7 @@
 #include <stdexcept>
 
 #include "action.hpp"
+#include "combat.hpp"
 #include "nlresolve.hpp"
 #include "prose.hpp"
 #include "render.hpp"
@@ -46,11 +47,19 @@ TurnResult runTurn(Db& db, const std::string& line) {
         return {TurnOutcome::Quit, ""};
     }
 
-    // The tick: one transaction, one turn increment, resolve, commit.
+    // The tick: one transaction, one turn increment, resolve, enemy turn, commit.
     db.begin();
     try {
+        const int64_t player = playerId(db);
+        // Capture the hostile present at TICK START, before the player's action
+        // can move them out of the room (micro-decision 2): the enemy still
+        // takes its one turn as the player flees. 0 when not in combat.
+        const int64_t startHostile = tickStartHostile(db, player);
         db.exec("UPDATE meta SET value = value + 1 WHERE key = 'turn'");
-        resolve(db, *action, playerId(db));
+        resolve(db, *action, player);
+        // The enemy-turn system fires after the player's action, in the SAME
+        // transaction (REQ-COMBAT-2): the loop, not resolve, owns the tick.
+        resolveCombat(db, player, startHostile);
         db.commit();
     } catch (const std::exception& e) {
         // Tier c: engine error. Roll back — turn counter and world state as
