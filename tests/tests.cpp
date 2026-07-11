@@ -685,18 +685,24 @@ static void testCombatChipClock() {
                    "SELECT (SELECT id FROM events WHERE turn = 2 AND verb = 'waited') "
                    "< (SELECT id FROM events WHERE turn = 2 AND verb = 'chip')") == 1);
 
-    // Tick 3: attacking lands strike + chip in the SAME tick (REQ-COMBAT-12) —
-    // the goblin loses kBasicAttackDamage AND the player loses chip.
+    // Tick 3: the enemy telegraphed on tick 2 (period 2), so its strike lands
+    // now — attack + strike + chip all resolve in the SAME tick (REQ-COMBAT-12:
+    // chip is irreducible and a land tick deals strike + chip). The goblin still
+    // loses kBasicAttackDamage from the player's attack.
+    const int64_t hpBeforeAttack =
+        queryInt(db, "SELECT current FROM health WHERE entity = 3");
     CHECK(runTurn(db, "attack").outcome == TurnOutcome::Ticked);
     CHECK(queryInt(db, "SELECT value FROM meta WHERE key = 'turn'") == 3);
     CHECK(queryInt(db, "SELECT current FROM health WHERE entity = 7") ==
           8 - kBasicAttackDamage);
     CHECK(queryInt(db, "SELECT current FROM health WHERE entity = 3") ==
-          12 - 2 * chip);
+          hpBeforeAttack - kStrikeDamage - chip);
     CHECK(queryInt(db,
                    "SELECT COUNT(*) FROM events WHERE turn = 3 AND verb = 'attacked'") == 1);
     CHECK(queryInt(db,
                    "SELECT COUNT(*) FROM events WHERE turn = 3 AND verb = 'chip'") == 1);
+    CHECK(queryInt(db,
+                   "SELECT COUNT(*) FROM events WHERE turn = 3 AND verb = 'struck'") == 1);
 }
 
 // Defeat + grimoire drop (REQ-COMBAT-20, -30). Driving the seed enemy to 0 hp
@@ -790,6 +796,49 @@ static void testCombatDowned() {
 // Substring helper for renderer output checks.
 static bool contains(const std::string& haystack, const std::string& needle) {
     return haystack.find(needle) != std::string::npos;
+}
+
+// Telegraph → strike lane (REQ-COMBAT-9, -10, -12). A telegraph tick writes a
+// pending_strike and deals no strike damage; the enemy's next turn lands it
+// (strike + chip) and clears the row. Deterministic, driven by telegraph_period.
+static void testCombatTelegraph() {
+    const TempDbFile worldPath("textworld_combat_telegraph_tests.db");
+    Db db = openWorld(worldPath.string(), "tests/combat_fixture.sql");
+    const int64_t chip = queryInt(db, "SELECT chip FROM hostile WHERE entity = 7");
+
+    auto playerHp = [&] {
+        return queryInt(db, "SELECT current FROM health WHERE entity = 3");
+    };
+    auto pendingCount = [&] {
+        return queryInt(db, "SELECT COUNT(*) FROM pending_strike WHERE entity = 7");
+    };
+
+    CHECK(runTurn(db, "go north").outcome == TurnOutcome::Ticked);  // enter combat
+
+    // Advance (waiting) until the enemy telegraphs. Capture HP just before the
+    // telegraph tick so we can prove that tick dealt CHIP ONLY (no strike).
+    int64_t hpBeforeTelegraph = 0;
+    std::string telegraphText;
+    bool telegraphed = false;
+    for (int i = 0; i < 6 && !telegraphed; ++i) {
+        hpBeforeTelegraph = playerHp();
+        telegraphText = runTurn(db, "wait").output;
+        if (pendingCount() == 1) telegraphed = true;
+    }
+    CHECK(telegraphed);
+    CHECK(queryInt(db, "SELECT COUNT(*) FROM events WHERE verb = 'telegraph'") >= 1);
+    // No strike landed on the telegraph tick: HP fell by exactly chip.
+    CHECK(playerHp() == hpBeforeTelegraph - chip);
+    CHECK(contains(telegraphText, "winds up"));  // render template
+
+    // Next tick, no counter: the strike lands — HP falls by strike + chip, and
+    // the pending_strike row is cleared.
+    const int64_t hpPreStrike = playerHp();
+    const std::string strikeText = runTurn(db, "wait").output;
+    CHECK(pendingCount() == 0);
+    CHECK(playerHp() == hpPreStrike - kStrikeDamage - chip);
+    CHECK(queryInt(db, "SELECT COUNT(*) FROM events WHERE verb = 'struck'") >= 1);
+    CHECK(contains(strikeText, "lands its blow"));  // render template
 }
 
 // Combat narration via the permanent template path + the HP status line
@@ -3588,6 +3637,7 @@ int main() {
     testCombatDefeat();
     testCombatDowned();
     testCombatRender();
+    testCombatTelegraph();
     testRender();
     testExitDisplayInvariant();
     testLoop();

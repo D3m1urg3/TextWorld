@@ -30,7 +30,7 @@ in `./build/tests`.
 
 **BRICK 2 — Telegraph / counter / Cast / cooldowns**
 - [x] 7 — schema: telegraph+cooldown+spells → `testCombatSchema` ext. ✅
-- [ ] 8 — telegraph→strike lane → `testCombatTelegraph`
+- [x] 8 — telegraph→strike lane → `testCombatTelegraph` ✅
 - [ ] 9 — `Verb::Cast` + cooldown gate → `testCombatCastGate`
 - [ ] 10 — counters Ward/Stun → `testCombatCounter`
 - [ ] 11 — flee → `testCombatFlee`
@@ -185,5 +185,24 @@ in `./build/tests`.
   five tables' columns, hostile now 4 cols, player knows exactly {ward,stun},
   catalog rows have cooldown>0/tier=1, goblin telegraph_period>0.
 - Gate: build clean; `./build/tests` → 2098 checks, 0 failures.
+
+### Step 8 — telegraph → strike lane ✅
+- `combat.hpp`: `kStrikeDamage = 5`. `combat.cpp`: `resolveCombat` enemy turn is
+  now the state machine — pending_strike exists → land it (`struck`) + clear; else
+  if `currentTurn % telegraph_period == 0` → `setPendingStrike` (`telegraph`, one-
+  tick wind-up, no damage); else idle. Chip always applies (land tick = strike +
+  chip). Helpers: `currentTurn`, `telegraphPeriodOf`, `pendingStrikeDamage`.
+- `mutations`: `setPendingStrike(enemy, damage, element)` (upsert + 'telegraph'
+  event, actor=enemy) and event-free `clearPendingStrike`; `defeatEnemy` also
+  deletes pending_strike; `downPlayer` clears the enemy's pending (fight reset).
+- `render.cpp`: `telegraph` ("winds up a heavy blow") + `struck` ("lands its blow
+  … for N damage") templates (standing rule; asserted in testCombatTelegraph).
+- **Schedule = global-tick modulo:** deterministic, replayable; no per-enemy turn
+  counter needed. period 2 → telegraph on even ticks, strike on odd.
+- `testCombatChipClock` (Step 4) updated: its tick-3 now accounts for the strike
+  landing (attack + strike + chip in one tick) — the enemy no longer idles.
+- `testCombatTelegraph`: robustly finds the telegraph tick (chip-only, pending set,
+  "winds up" rendered), then the strike tick (strike+chip, pending cleared, "lands
+  its blow"). Gate: build clean; 2097 checks, 0 failures. combat.cpp raw-write empty.
 </content>
 </invoke>

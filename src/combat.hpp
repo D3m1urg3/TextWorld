@@ -18,6 +18,12 @@ inline constexpr int64_t kBasicAttackDamage = 4;
 // (REQ-COMBAT-23). Room 1 by seed convention, in both base.sql and the fixtures.
 inline constexpr int64_t kDormitoryCell = 1;
 
+// Damage of a telegraphed enemy strike when it lands (REQ-COMBAT-10). A heavy
+// blow — much larger than chip — so reading the wind-up and countering matters.
+// Engine-owned constant; per-archetype variation arrives with the Brick 4
+// bestiary. Written into the pending_strike row at telegraph time.
+inline constexpr int64_t kStrikeDamage = 5;
+
 // Resolve a Verb::Attack for `player`: deal kBasicAttackDamage to the living
 // hostile sharing the player's room. No hostile present → a 'failed' event and
 // no world write. Runs inside the caller's ambient tick transaction; writes

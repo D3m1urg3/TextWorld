@@ -149,6 +149,14 @@ std::string render(Db& db, int64_t turn) {
             // actor is the enemy; subject is the player (whom it wounds).
             out += "The " + nameOf(db, actor) + " wounds you for " +
                    std::to_string(object) + " damage.\n";
+        } else if (verb == "telegraph") {
+            // A one-tick wind-up (actor = enemy): the counter window opens.
+            out += "The " + nameOf(db, actor) +
+                   " winds up a heavy blow — strike it down or brace!\n";
+        } else if (verb == "struck") {
+            // A landed telegraphed strike (actor = enemy, object = damage).
+            out += "The " + nameOf(db, actor) + " lands its blow, hitting you for " +
+                   std::to_string(object) + " damage.\n";
         } else if (verb == "defeated") {
             // subject = the fallen enemy (name survives), object = its grimoire.
             out += "The " + nameOf(db, subject) + " falls. It drops the " +

@@ -134,10 +134,29 @@ int64_t dropGrimoire(Db& db, const std::string& archetype, int64_t room) {
     return item;  // no event: the paired 'defeated' event records the drop
 }
 
+void setPendingStrike(Db& db, int64_t enemy, int64_t damage, const char* element) {
+    Stmt s = db.prepare(
+        "INSERT INTO pending_strike(entity, damage, element) VALUES (?, ?, ?) "
+        "ON CONFLICT(entity) DO UPDATE SET damage = excluded.damage, "
+        "element = excluded.element");
+    s.bind(1, enemy);
+    s.bind(2, damage);
+    if (element) s.bind(3, std::string(element));  // unbound param = SQL NULL
+    s.step();
+    appendEvent(db, enemy, "telegraph", 0, 0, nullptr);
+}
+
+void clearPendingStrike(Db& db, int64_t enemy) {
+    Stmt s = db.prepare("DELETE FROM pending_strike WHERE entity = ?");
+    s.bind(1, enemy);
+    s.step();
+}
+
 void defeatEnemy(Db& db, int64_t enemy, int64_t droppedItem, int64_t actor) {
     // Remove from play WITHOUT deleting the entity id or its name/description:
     // defeat is the persistent absence of hostile + location (REQ-COMBAT-30).
-    for (const char* table : {"hostile", "health", "location"}) {
+    // pending_strike is cleared too — a fight leaves no dangling wind-up.
+    for (const char* table : {"hostile", "health", "location", "pending_strike"}) {
         Stmt s = db.prepare(
             ("DELETE FROM " + std::string(table) + " WHERE entity = ?").c_str());
         s.bind(1, enemy);
@@ -185,12 +204,14 @@ void downPlayer(Db& db, int64_t player, int64_t enemy, int64_t safeRoom,
         s.step();
     }
     // The enemy that downed the player is restored to its initial combat state
-    // (REQ-COMBAT-25): full health here; pending-strike reset joins in Step 8.
+    // (REQ-COMBAT-25): full health AND any pending wind-up cleared — the fight
+    // resets to its opening position.
     {
         Stmt s = db.prepare("UPDATE health SET current = max WHERE entity = ?");
         s.bind(1, enemy);
         s.step();
     }
+    clearPendingStrike(db, enemy);
     appendEvent(db, actor, "downed", player, safeRoom, nullptr);
 }
 

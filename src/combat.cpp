@@ -58,6 +58,31 @@ std::string archetypeOf(Db& db, int64_t entity) {
     return s.colText(0);
 }
 
+// The current (already-incremented) tick number — the global clock the telegraph
+// schedule and cooldowns key on.
+int64_t currentTurn(Db& db) {
+    Stmt s = db.prepare("SELECT value FROM meta WHERE key = 'turn'");
+    if (!s.step()) throw std::runtime_error("combat: meta.turn row missing");
+    return s.colInt(0);
+}
+
+// Telegraph cadence constant of a hostile (0 = never winds up).
+int64_t telegraphPeriodOf(Db& db, int64_t enemy) {
+    Stmt s = db.prepare("SELECT telegraph_period FROM hostile WHERE entity = ?");
+    s.bind(1, enemy);
+    if (!s.step()) return 0;
+    return s.colInt(0);
+}
+
+// If `enemy` has a pending telegraphed strike, set `damage` and return true.
+bool pendingStrikeDamage(Db& db, int64_t enemy, int64_t& damage) {
+    Stmt s = db.prepare("SELECT damage FROM pending_strike WHERE entity = ?");
+    s.bind(1, enemy);
+    if (!s.step()) return false;
+    damage = s.colInt(0);
+    return true;
+}
+
 }  // namespace
 
 void resolveAttack(Db& db, int64_t player) {
@@ -109,22 +134,36 @@ void resolveCombat(Db& db, int64_t player, int64_t hostile) {
         return;
     }
 
-    // The enemy's single turn action (REQ-COMBAT-9). Brick 1: idle — the
-    // telegraph/strike lane is Step 8. The system still fires: it is the first
-    // non-player actor, and the chip lane below is its footprint on the tick.
+    // The enemy's single turn action (REQ-COMBAT-9): the telegraph → strike lane,
+    // driven deterministically by telegraph_period — no RNG.
+    int64_t pendingDamage = 0;
+    if (pendingStrikeDamage(db, hostile, pendingDamage)) {
+        // A wind-up from last turn lands now (REQ-COMBAT-10). Counters that
+        // block/cancel it are Step 10; here, uncountered, it always lands.
+        damageEntity(db, player, pendingDamage, hostile, "struck");
+        clearPendingStrike(db, hostile);
+    } else {
+        const int64_t period = telegraphPeriodOf(db, hostile);
+        if (period > 0 && currentTurn(db) % period == 0) {
+            // Telegraph: one-tick wind-up, no damage this tick. The strike lands
+            // on the enemy's next turn (REQ-COMBAT-10). Goblin swing = no element.
+            setPendingStrike(db, hostile, kStrikeDamage, /*element=*/nullptr);
+        }
+        // else idle this turn.
+    }
 
     // Chip lane (REQ-COMBAT-12): every combat tick, in ADDITION to the turn
     // action, the enemy deals its fixed per-instance chip — the irreducible HP
-    // clock. Even optimal play costs health.
+    // clock. A land tick therefore deals strike + chip.
     const int64_t chip = chipOf(db, hostile);
     if (chip > 0) {
         damageEntity(db, player, chip, hostile, "chip");
     }
 
-    // Did the enemy's turn (chip here; a landed strike from Step 8) drop the
-    // player to 0? Then the player is downed, not dead (REQ-COMBAT-23): they
-    // wake in the dormitory cell at full health, having dropped their carried
-    // items where they fell, and the fight resets.
+    // Did the enemy's turn (a landed strike and/or chip) drop the player to 0?
+    // Then the player is downed, not dead (REQ-COMBAT-23): they wake in the
+    // dormitory cell at full health, having dropped their carried items where
+    // they fell, and the fight resets.
     const std::optional<int64_t> playerHp = healthOf(db, player);
     if (playerHp && *playerHp <= 0) {
         downPlayer(db, player, hostile, kDormitoryCell, player);

@@ -62,6 +62,17 @@ void damageEntity(Db& db, int64_t target, int64_t amount, int64_t actor,
 // minted grimoire's entity id. Never begins/commits.
 int64_t dropGrimoire(Db& db, const std::string& archetype, int64_t room);
 
+// Record a telegraphed strike on `enemy` (REQ-COMBAT-10): upsert its
+// pending_strike row (damage + element, `element` = nullptr for none) and append
+// one 'telegraph' event (actor = enemy). The row's existence means a strike is
+// pending; it lands on the enemy's next turn unless countered. Never begins/commits.
+void setPendingStrike(Db& db, int64_t enemy, int64_t damage, const char* element);
+
+// Clear `enemy`'s pending strike (delete the row). Event-free bookkeeping — the
+// visible consequence is recorded by the 'struck' event (when it lands) or the
+// 'defeated'/'downed' event (fight-reset). Never begins/commits.
+void clearPendingStrike(Db& db, int64_t enemy);
+
 // Remove a defeated enemy from play (REQ-COMBAT-20, -30): delete its hostile,
 // health, and location rows — the entity id and its name/description SURVIVE, so
 // "defeated" is the persistent absence of hostile/location, not deletion from
