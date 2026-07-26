@@ -4,6 +4,7 @@
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <map>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -18,6 +19,7 @@
 #include "loop.hpp"
 #include "mutations.hpp"
 #include "nlresolve.hpp"
+#include "profile.hpp"
 #include "prose.hpp"
 #include "render.hpp"
 #include "systems.hpp"
@@ -2299,6 +2301,172 @@ struct ScopedModelEnv {
         }
     }
 };
+
+// Parse one `twprof` record line into its key=value pairs. The leading
+// "twprof" token has no '=' and lands as a valueless key; no value contains a
+// space by construction, so whitespace splitting is exact.
+static std::map<std::string, std::string> parseProfileRecord(
+    const std::string& line) {
+    std::map<std::string, std::string> kv;
+    std::istringstream in(line);
+    std::string tok;
+    while (in >> tok) {
+        const size_t eq = tok.find('=');
+        if (eq == std::string::npos) {
+            kv[tok] = "";
+        } else {
+            kv[tok.substr(0, eq)] = tok.substr(eq + 1);
+        }
+    }
+    return kv;
+}
+
+// --- profiling mechanism (REQ-LAT-1, -4, -5) --------------------------------
+// ORDERING NOTE: profilingEnabled() caches its getenv (once per process, so the
+// turn path pays only a bool read), which is exactly why the test-only
+// profileRefreshEnabled() exists — every gate flip below must be followed by
+// one, or the cache still holds the value main() installed. This test restores
+// BOTH the env var (via the guard) and the cached bool + default sink before
+// returning, so no later test emits a profiling line.
+static void testProfileRecords() {
+    const ScopedEnvVar profGuard("TEXTWORLD_PROFILE");
+
+    // (a) the gate matrix (REQ-LAT-1). "0" counts as off, matching
+    // TEXTWORLD_AI's convention — TEXTWORLD_PROFILE=0 must never mean ON.
+    unsetenv("TEXTWORLD_PROFILE");
+    profileRefreshEnabled();
+    CHECK(!profilingEnabled());
+    setenv("TEXTWORLD_PROFILE", "1", 1);
+    profileRefreshEnabled();
+    CHECK(profilingEnabled());
+    setenv("TEXTWORLD_PROFILE", "", 1);
+    profileRefreshEnabled();
+    CHECK(!profilingEnabled());
+    setenv("TEXTWORLD_PROFILE", "0", 1);
+    profileRefreshEnabled();
+    CHECK(!profilingEnabled());
+
+    // (b) the pure formatters (REQ-LAT-5): one parseable key=value line each.
+    {
+        const std::string line =
+            formatStage(StageRecord{"narrate", 7, 1843.221, nullptr});
+        const auto kv = parseProfileRecord(line);
+        CHECK(kv.count("twprof") == 1);
+        CHECK(kv.at("kind") == "stage");
+        CHECK(kv.at("turn") == "7");
+        CHECK(kv.at("stage") == "narrate");
+        CHECK(kv.at("ms") == "1843.221");
+        // A top-level stage carries no nesting key at all.
+        CHECK(kv.count("nested_in") == 0);
+    }
+    {
+        // generate is the one nested stage (it runs inside tick).
+        const auto kv = parseProfileRecord(
+            formatStage(StageRecord{"generate", 7, 12.5, "tick"}));
+        CHECK(kv.at("stage") == "generate");
+        CHECK(kv.at("nested_in") == "tick");
+    }
+
+    CallRecord ok;
+    ok.role = "narrate";
+    ok.model = "claude-opus-4-8";
+    ok.turn = 7;
+    ok.status = 200;
+    ok.namelookupUs = 12;
+    ok.connectUs = 0;
+    ok.appconnectUs = 0;
+    ok.starttransferUs = 1731004;
+    ok.totalUs = 1843102;
+    ok.inputTokens = 1420;
+    ok.outputTokens = 212;
+    ok.tokensKnown = true;
+    {
+        const auto kv = parseProfileRecord(formatCall(ok));
+        CHECK(kv.at("kind") == "call");
+        CHECK(kv.at("turn") == "7");
+        CHECK(kv.at("role") == "narrate");
+        CHECK(kv.at("model") == "claude-opus-4-8");
+        CHECK(kv.at("status") == "200");
+        CHECK(kv.at("namelookup_us") == "12");
+        CHECK(kv.at("connect_us") == "0");
+        CHECK(kv.at("appconnect_us") == "0");
+        CHECK(kv.at("starttransfer_us") == "1731004");
+        CHECK(kv.at("total_us") == "1843102");
+        CHECK(kv.at("input_tokens") == "1420");
+        CHECK(kv.at("output_tokens") == "212");
+        CHECK(kv.count("failed") == 0);
+        CHECK(kv.count("tokens") == 0);
+    }
+    {
+        // REQ-LAT-4: a FAILED call notes the failure and emits NO token keys —
+        // never a fabricated zero.
+        CallRecord bad;
+        bad.role = "resolve";
+        bad.model = "claude-haiku-4-5";
+        bad.turn = 7;
+        bad.failed = true;
+        const auto kv = parseProfileRecord(formatCall(bad));
+        CHECK(kv.at("failed") == "1");
+        CHECK(kv.at("status") == "0");
+        CHECK(kv.count("input_tokens") == 0);
+        CHECK(kv.count("output_tokens") == 0);
+        CHECK(kv.count("tokens") == 0);
+        // The timing fields still report — a failed call still spent time.
+        CHECK(kv.count("total_us") == 1);
+    }
+    {
+        // A 200 whose body carried no readable usage says so explicitly, so an
+        // aggregator can tell "not reported" from "not parsed".
+        CallRecord unknown = ok;
+        unknown.tokensKnown = false;
+        const auto kv = parseProfileRecord(formatCall(unknown));
+        CHECK(kv.at("tokens") == "unknown");
+        CHECK(kv.count("input_tokens") == 0);
+        CHECK(kv.count("output_tokens") == 0);
+    }
+
+    // (c) the sink, and the gate governing emission (REQ-LAT-1).
+    std::vector<std::string> captured;
+    profileSetSink(
+        [&captured](const std::string& line) { captured.push_back(line); });
+
+    setenv("TEXTWORLD_PROFILE", "0", 1);
+    profileRefreshEnabled();
+    profileEmit(StageRecord{"resolve", 1, 1.0, nullptr});
+    profileEmit(ok);
+    { const ScopedStage off("total"); }
+    CHECK(captured.empty());  // profiling off => the sink hears nothing
+
+    setenv("TEXTWORLD_PROFILE", "1", 1);
+    profileRefreshEnabled();
+    profileEmit(StageRecord{"resolve", 1, 1.0, nullptr});
+    CHECK(captured.size() == 1);
+    profileEmit(ok);
+    CHECK(captured.size() == 2);
+
+    // ScopedStage emits ONCE, on scope exit, stamped with the current
+    // process-local turn.
+    const int64_t turn = profileNextTurn();
+    CHECK(profileCurrentTurn() == turn);
+    {
+        const ScopedStage on("total");
+        CHECK(captured.size() == 2);  // nothing yet — the destructor emits
+    }
+    CHECK(captured.size() == 3);
+    {
+        const auto kv = parseProfileRecord(captured.back());
+        CHECK(kv.at("kind") == "stage");
+        CHECK(kv.at("stage") == "total");
+        CHECK(kv.at("turn") == std::to_string(turn));
+    }
+
+    // Restore the default sink AND the cached gate: the guard only restores the
+    // env var, and the cache would otherwise outlive this test.
+    profileSetSink({});
+    unsetenv("TEXTWORLD_PROFILE");
+    profileRefreshEnabled();
+    CHECK(!profilingEnabled());
+}
 
 // --- request body (REQ-PROSE-8) + system prompt content (REQ-PROSE-11):
 // buildRequestBody is a pure string→string function (plus the TEXTWORLD_MODEL
@@ -4658,6 +4826,14 @@ int main() {
     unsetenv("ANTHROPIC_API_KEY");
     unsetenv("TEXTWORLD_AI");
 
+    // Same discipline for TEXTWORLD_PROFILE (REQ-LAT-1): a developer shell with
+    // it set would otherwise spray profiling lines through every runTurn test.
+    // profilingEnabled() caches its getenv at static-init time, so unsetting the
+    // var is not enough — the cache must be refreshed too.
+    const ScopedEnvVar profileGuard("TEXTWORLD_PROFILE");
+    unsetenv("TEXTWORLD_PROFILE");
+    profileRefreshEnabled();
+
     CHECK(1 + 1 == 2);
 
     testDb();
@@ -4693,6 +4869,7 @@ int main() {
     testNlResolveContext();
     testNlResolvePrompt();
     testProseTransport();
+    testProfileRecords();
     testProseRequestBody();
     testNlResolveRequestBody();
     testNlResolveGate();
