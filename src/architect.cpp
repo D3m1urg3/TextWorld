@@ -21,6 +21,7 @@
 #include "combat.hpp"     // eligibleEnemyBlurbs / archetypeForEnemyBlurb — the gated menu
 #include "json.hpp"
 #include "mutations.hpp"  // writeGeneratedRoom / placeEnemy — the SOLE sanctioned write path
+#include "profile.hpp"    // ScopedStage — the nested `generate` timer
 
 namespace {
 
@@ -421,6 +422,16 @@ std::optional<RoomProposal> validateRoomProposal(
 
 bool architectGenerate(Db& db, int64_t room, const std::string& direction,
                        int64_t actor, const HttpTransport& transport) {
+    // The `generate` stage (REQ-LAT-2), inert unless profiling is on. Timed on
+    // the INJECTED form, so the one timer covers the production overload too
+    // (it delegates here) and the stage is assertable with a fake transport.
+    // Tagged nested_in=tick because resolveGo makes this call from INSIDE the
+    // tick transaction: tick's duration already contains it, and an aggregator
+    // must not add the two together. A generation that fails still emits the
+    // stage — it consumed wall-clock; success/failure of the API call itself is
+    // the CALL record's business, not the stage's.
+    const ScopedStage generateStage("generate", "tick");
+
     // The eligible enemy menu for the room ABOUT to be created beyond this exit
     // (REQ-COMBAT-31/-34): the model's costume choices, blurbs only. Read-only.
     // Computed before the call so the tool schema can constrain the enemy field.

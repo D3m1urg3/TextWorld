@@ -4743,6 +4743,88 @@ static void testResolveGoGenerate() {
     }
 }
 
+// --- the nested `generate` stage (REQ-LAT-2) --------------------------------
+// Defined here, after cannedCreateRoom and tickT, and reusing the latent-exit
+// fixture testResolveGoGenerate walks. The stage is instrumented on the
+// INJECTED architectGenerate, so a fake transport proves it — no network.
+static void testProfileGenerateStage() {
+    const ScopedEnvVar keyGuard("ANTHROPIC_API_KEY");
+    const ScopedEnvVar aiGuard("TEXTWORLD_AI");
+    const ScopedEnvVar profGuard("TEXTWORLD_PROFILE");
+    setenv("ANTHROPIC_API_KEY", "test-key-never-used", 1);
+    unsetenv("TEXTWORLD_AI");
+    setenv("TEXTWORLD_PROFILE", "1", 1);
+    profileRefreshEnabled();
+
+    std::vector<std::string> captured;
+    profileSetSink(
+        [&captured](const std::string& line) { captured.push_back(line); });
+
+    const int64_t player = 3;
+
+    // --- walking a latent exit emits exactly one generate stage, nested in
+    // tick, and no network happened (the transport is canned). ---
+    {
+        const TempDbFile worldPath("textworld_profile_generate.db");
+        Db db = openWorld(worldPath.string(), "tests/fixture.sql");
+        db.exec("INSERT INTO exits(room, direction, dest) VALUES (1, 'east', NULL)");
+        HttpTransport fake = [&](const std::string&) {
+            return cannedCreateRoom("crypt", "A cold undercroft of grey stone.");
+        };
+        tickT(db, Action{Verb::Go, 0, "east"}, fake, player);
+
+        CHECK(capturedStages(captured) == std::vector<std::string>({"generate"}));
+        const auto kv = parseProfileRecord(captured.front());
+        CHECK(kv.at("nested_in") == "tick");
+        CHECK(!capturedAnyKind(captured, "call"));  // the fake makes no call
+        // The exit really was realized — this is a generating turn.
+        CHECK(queryInt(db,
+                       "SELECT dest FROM exits WHERE room = 1 AND direction = 'east'") > 5);
+    }
+
+    // --- a non-movement turn (and a realized-exit move) generates nothing. ---
+    {
+        captured.clear();
+        const TempDbFile worldPath("textworld_profile_nogenerate.db");
+        Db db = openWorld(worldPath.string(), "tests/fixture.sql");
+        HttpTransport fake = [&](const std::string&) {
+            return cannedCreateRoom("crypt", "A cold undercroft of grey stone.");
+        };
+        tickT(db, Action{Verb::Look, 0, ""}, fake, player);
+        tickT(db, Action{Verb::Go, 0, "north"}, fake, player);  // realized exit
+        CHECK(capturedStages(captured).empty());
+    }
+
+    // --- a gate-failing generation (the wall path) STILL emits one generate
+    // stage: it consumed wall-clock. The wall text is unchanged. ---
+    {
+        captured.clear();
+        const TempDbFile worldPath("textworld_profile_generate_fail.db");
+        Db db = openWorld(worldPath.string(), "tests/fixture.sql");
+        db.exec("INSERT INTO exits(room, direction, dest) VALUES (1, 'east', NULL)");
+        HttpTransport err = [&](const std::string&) {
+            HttpResponse r;
+            r.transportError = true;  // Phase-1 failure → wall
+            return r;
+        };
+        tickT(db, Action{Verb::Go, 0, "east"}, err, player);
+
+        CHECK(capturedStages(captured) == std::vector<std::string>({"generate"}));
+        CHECK(parseProfileRecord(captured.front()).at("nested_in") == "tick");
+        CHECK(queryText(db, "SELECT detail FROM events ORDER BY id DESC LIMIT 1") ==
+              "You can't go that way.");
+        // Latent row untouched — still retryable.
+        CHECK(queryInt(db,
+                       "SELECT COUNT(*) FROM exits WHERE room = 1 AND direction = 'east' "
+                       "AND dest IS NULL") == 1);
+    }
+
+    profileSetSink({});
+    unsetenv("TEXTWORLD_PROFILE");
+    profileRefreshEnabled();
+    CHECK(!profilingEnabled());
+}
+
 // Fleeing + room-bound enemies (REQ-COMBAT-26, -27). A latent (ungenerated)
 // exit is refused while a hostile is present — the architect is NEVER called
 // mid-combat; a realized exit lets the player flee, the enemy takes its single
@@ -4998,6 +5080,7 @@ int main() {
     testArchitectGenerate();
     testArchitectSpawn();
     testResolveGoGenerate();
+    testProfileGenerateStage();
     testCombatFlee();
     testGeneratedEventInvisible();
 
