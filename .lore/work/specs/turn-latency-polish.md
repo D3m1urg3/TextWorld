@@ -1,7 +1,7 @@
 ---
 title: "Turn latency polish: profiling, connection reuse, per-role model"
 date: 2026-07-26
-status: draft
+status: implemented
 tags: [performance, latency, profiling, libcurl, connection-reuse, model-tiering, haiku]
 modules: [loop, nlresolve, prose, architect]
 related: [.lore/work/brainstorm/performance-polish-action-latency.md, .lore/work/research/per-turn-latency-remedies.md]

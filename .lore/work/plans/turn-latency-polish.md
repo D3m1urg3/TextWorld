@@ -1,7 +1,7 @@
 ---
 title: "Implementation plan: turn-latency-polish"
 date: 2026-07-26
-status: approved
+status: executed
 tags: [plan, performance, latency, profiling, libcurl, connection-reuse, model-tiering, haiku]
 modules: [loop, nlresolve, prose, architect, aihttp, profile]
 related: [.lore/work/specs/turn-latency-polish.md, .lore/work/brainstorm/performance-polish-action-latency.md, .lore/work/research/per-turn-latency-remedies.md]

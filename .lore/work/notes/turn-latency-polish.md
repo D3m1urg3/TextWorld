@@ -1,7 +1,7 @@
 ---
 title: "Implementation notes: turn-latency-polish"
 date: 2026-07-26
-status: in_progress
+status: complete
 tags: [implementation, notes, performance, latency, profiling, libcurl, connection-reuse, model-tiering]
 source: .lore/work/plans/turn-latency-polish.md
 modules: [loop, nlresolve, prose, architect, aihttp, profile]
@@ -29,8 +29,8 @@ go-ahead ([[verification-must-be-bounded]]).
 - [x] 6 — shared persistent-handle curl client (inspection gate) ✅ `0411fc0`
 - [x] 7 — `curl_global_init`/`cleanup` guard at process boundaries ✅ `8ad774f`
 - [x] 8 — swap the three transports onto the shared client (zero test changes) ✅ `9bd89ae`
-- [ ] 9 — **STOP: awaiting go-ahead** — one bounded live run
-- [ ] 10 — final sweep against the spec checklist
+- [x] 9 — one bounded live run (approved, then run) ✅ `f941301`
+- [x] 10 — final sweep against the spec checklist ✅
 
 ## Log
 
@@ -85,3 +85,44 @@ The shell exports a real `ANTHROPIC_API_KEY`, so it made live calls — roughly
 three resolve and two narrate calls on Opus (Step 5 had not landed, so resolve
 was still Opus), a few cents. Unintended: the live budget belongs to Step 9.
 Every later smoke pins `TEXTWORLD_AI=0`.
+
+**Step 9 (live)** — approved by the user, then run: six runs, one per
+configuration, no re-runs for nicer numbers. Full write-up in
+[findings.md](../validation/turn-latency-polish/findings.md); logs alongside it.
+
+The script needed one correction mid-step: `session.txt`'s `go up` could never
+reach a latent exit, because the seeded goblin in the corridor blocks a latent
+flee (`You can't flee into the unknown with an enemy at your back.`), so
+`generate` never fired. A five-line supplementary leg (`session-generate.txt`,
+which kills the goblin first) elicited it. `prof-ai-on.log` is kept unedited —
+this was a defective script, not a retry for a better number.
+
+Headline result: reuse works and is not where the time is. Warm calls report
+`connect_us=0 appconnect_us=0` exactly — no new connection, no new TLS —
+saving ~33 ms on a ~4 000 ms turn. A turn is ~99.9 % model TTFB; the engine tick
+is 2–4 ms. The deferred levers (streaming, pregen) are where the remaining time
+lives, and profiling now exists to measure them.
+
+**Step 10 (sweep)** — every spec AI-Validation bullet ticked:
+
+| Spec bullet | Satisfied by |
+|---|---|
+| build clean, offline suite green | 0 warnings; 2599 checks, 0 failures |
+| no per-call `cleanup` | one `curl_easy_cleanup` in `src/`, in `aiHttpShutdown` |
+| `global_init` **and** `global_cleanup` | `aihttp.cpp:120` / `:131`, via `AiHttpGuard` in both `main()`s |
+| `reset` + full re-application | `aihttp.cpp:148`, 10 `setopt` calls after it; option-list diff clean |
+| `NOSIGNAL` on every handle | `aihttp.cpp:173`, inside the per-call block |
+| `TEXTWORLD_PROFILE` unset → output identical to **pre-change** | scripted AI-off session diffed byte-identical against a `b598fcb` worktree build |
+| profiling / reuse / per-role observations | Step 9 logs, per the ledger in `findings.md` |
+| README rows present | `TEXTWORLD_PROFILE` row (Step 2), corrected per-role `TEXTWORLD_MODEL` row (Step 5) |
+
+All 14 LAT requirements land. Spec → `implemented`, plan → `executed`.
+
+### Left deliberately unfixed
+
+`testArchitectLiveSmoke` fails (2 checks) under `TEXTWORLD_AI_LIVE_TEST=1`. It
+walks `east` from room 1, which has had no `east` exit since `a6a0b24` moved the
+seed's latent frontier to the corridor, so it walls before constructing any
+transport — zero AI calls, nothing this plan touched. Pre-existing and outside
+this spec; the fix is one line in the smoke and wants its own change. See
+`findings.md` for the trace.
