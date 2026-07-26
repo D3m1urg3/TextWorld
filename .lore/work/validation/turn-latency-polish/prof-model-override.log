@@ -1,0 +1,12 @@
+twprof kind=call turn=1 role=resolve model=claude-sonnet-5 status=200 namelookup_us=2219 connect_us=13995 appconnect_us=29315 starttransfer_us=1736978 total_us=1737237 input_tokens=1510 output_tokens=49
+twprof kind=stage turn=1 stage=resolve ms=1740.000
+twprof kind=stage turn=1 stage=tick ms=3.399
+twprof kind=call turn=1 role=narrate model=claude-sonnet-5 status=200 namelookup_us=52 connect_us=0 appconnect_us=0 starttransfer_us=2152432 total_us=2152586 input_tokens=670 output_tokens=97
+twprof kind=stage turn=1 stage=narrate ms=2157.253
+twprof kind=stage turn=1 stage=total ms=3900.884
+twprof kind=call turn=2 role=resolve model=claude-sonnet-5 status=200 namelookup_us=47 connect_us=0 appconnect_us=0 starttransfer_us=3578354 total_us=3578506 input_tokens=1512 output_tokens=85
+twprof kind=stage turn=2 stage=resolve ms=3583.100
+twprof kind=stage turn=2 stage=tick ms=2.828
+twprof kind=call turn=2 role=narrate model=claude-sonnet-5 status=200 namelookup_us=47 connect_us=0 appconnect_us=0 starttransfer_us=1543592 total_us=1543703 input_tokens=692 output_tokens=24
+twprof kind=stage turn=2 stage=narrate ms=1546.896
+twprof kind=stage turn=2 stage=total ms=5133.003

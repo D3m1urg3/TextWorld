@@ -1,0 +1,9 @@
+look
+take candle
+go north
+look
+go up
+inventory
+xyzzy blorp frobnicate the quux
+put the candle in the brass urn
+quit

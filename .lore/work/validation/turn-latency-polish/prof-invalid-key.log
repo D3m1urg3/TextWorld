@@ -1,0 +1,16 @@
+twprof kind=call turn=1 role=resolve model=claude-haiku-4-5 status=401 failed=1 namelookup_us=2293 connect_us=14538 appconnect_us=28869 starttransfer_us=213329 total_us=213438
+aiResolve: response rejected, clause a failed: HTTP status is not 200
+twprof kind=stage turn=1 stage=resolve ms=215.533
+twprof kind=stage turn=1 stage=tick ms=2.480
+twprof kind=call turn=1 role=narrate model=claude-opus-4-8 status=401 failed=1 namelookup_us=47 connect_us=0 appconnect_us=0 starttransfer_us=162184 total_us=162230
+aiRender: response rejected, clause a failed: HTTP status is not 200
+twprof kind=stage turn=1 stage=narrate ms=164.455
+twprof kind=stage turn=1 stage=total ms=382.562
+twprof kind=call turn=2 role=resolve model=claude-haiku-4-5 status=401 failed=1 namelookup_us=18 connect_us=0 appconnect_us=0 starttransfer_us=158335 total_us=158442
+aiResolve: response rejected, clause a failed: HTTP status is not 200
+twprof kind=stage turn=2 stage=resolve ms=160.903
+twprof kind=stage turn=2 stage=tick ms=2.892
+twprof kind=call turn=2 role=narrate model=claude-opus-4-8 status=401 failed=1 namelookup_us=30 connect_us=0 appconnect_us=0 starttransfer_us=128114 total_us=128266
+aiRender: response rejected, clause a failed: HTTP status is not 200
+twprof kind=stage turn=2 stage=narrate ms=131.064
+twprof kind=stage turn=2 stage=total ms=295.064

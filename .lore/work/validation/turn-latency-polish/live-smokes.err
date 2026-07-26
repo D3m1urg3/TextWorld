@@ -1,0 +1,74 @@
+LIVE SMOKE: driving one real turn through the Anthropic API (this makes a network call)...
+RESOLVER LIVE SMOKE: resolving real phrasings through the Anthropic API (this makes network calls)...
+ARCHITECT LIVE SMOKE: generating a room chain through the Anthropic API (this makes network calls)...
+  (generation declined for 'east' — clean fallback, chain stops)
+ARCHITECT COHERENCE JUDGE (0 rooms):
+no
+No rooms were provided to evaluate.
+COMBAT LIVE SMOKE: generating a contested room through the Anthropic API (this makes a network call)...
+  (model placed no enemy — a clear room, allowed)
+world file '/var/folders/j1/9h5_rcjd2vzdkpqdcf9y45f00000gn/T/textworld_world_tests.db' has schema_version 999999 but this build expects 5.
+No migrations exist yet: delete the world file and let the game recreate it from the seed.
+aiRender: response rejected, clause a failed: HTTP status is not 200
+aiRender: response rejected, clause a failed: HTTP status is not 200
+aiRender: response rejected, clause a failed: stop_reason is not "end_turn"
+aiRender: failed, falling back to templates: socket exploded
+aiResolve: response rejected, clause c failed: subject is not a noun anywhere in world
+aiResolve: response rejected, clause c failed: take/drop/read has no subject
+aiResolve: response rejected, clause d failed: go has no direction
+aiResolve: response rejected, clause b failed: verb is not one of the seven ISA verbs
+aiResolve: response rejected, clause a failed: more than one emit_action tool_use block
+aiResolve: response rejected, clause a failed: HTTP status is not 200
+aiResolve: response rejected, clause a failed: body is not a JSON object
+aiResolve: response rejected, clause a failed: HTTP status is not 200
+aiResolve: response rejected, clause a failed: HTTP status is not 200
+aiResolve: response rejected, clause a failed: body is not a JSON object
+aiResolve: failed, falling back to parser: socket exploded
+aiRender: response rejected, clause a failed: HTTP status is not 200
+aiRender: response rejected, clause a failed: stop_reason is not "end_turn"
+aiRender: response rejected, clause b failed: body is not a JSON object
+aiRender: response rejected, clause b failed: text block is empty
+aiRender: response rejected, clause b failed: no content blocks
+aiRender: response rejected, clause b failed: first content block is not a text block
+aiRender: response rejected, clause a failed: stop_reason is not "end_turn"
+aiRender: response rejected, clause b failed: no content blocks
+aiRender: response rejected, clause b failed: first content block is not a text block
+aiRender: response rejected, clause b failed: body is not a JSON object
+aiRender: response rejected, clause b failed: body is not a JSON object
+aiRender: response rejected, clause b failed: body is not a JSON object
+aiRender: response rejected, clause c failed: canon room description not present verbatim
+aiRender: response rejected, clause c failed: canon room description not present verbatim
+aiRender: response rejected, clause d failed: failed-event detail not present verbatim
+aiRender: response rejected, clause e failed: text exceeds 1200 characters
+aiRender: response rejected, clause a failed: HTTP status is not 200
+aiRender: response rejected, clause c failed: canon room description not present verbatim
+aiRender: response rejected, clause a failed: HTTP status is not 200
+validateRoomProposal: rejected, clause b failed: name is empty after trim
+validateRoomProposal: rejected, clause b failed: name is empty after trim
+validateRoomProposal: rejected, clause c failed: description is empty after trim
+validateRoomProposal: rejected, clause c failed: description is empty after trim
+validateRoomProposal: rejected, clause a failed: HTTP status is not 200
+validateRoomProposal: rejected, clause a failed: HTTP status is not 200
+validateRoomProposal: rejected, clause a failed: body is not a JSON object
+validateRoomProposal: rejected, clause a failed: no create_room tool_use block
+validateRoomProposal: rejected, clause a failed: more than one create_room tool_use block
+validateRoomProposal: dropped exit, not a string
+validateRoomProposal: dropped exit 'northeast', not an invertible direction
+validateRoomProposal: dropped exit 'east', a duplicate
+validateRoomProposal: dropped exit 'south', the entry-return direction
+validateRoomProposal: rejected, clause b failed: name is empty after trim
+validateRoomProposal: rejected, clause c failed: description is empty after trim
+writeGeneratedRoom: latent origin exit absent for room 1 direction 'east' (REQ-EXITS-2b precondition violation) — realizing via insert
+writeGeneratedRoom: latent origin exit absent for room 1 direction 'east' (REQ-EXITS-2b precondition violation) — realizing via insert
+validateRoomProposal: rejected, clause a failed: HTTP status is not 200
+validateRoomProposal: rejected, clause a failed: body is not a JSON object
+architectGenerate: phase 1 failed: socket exploded
+validateRoomProposal: rejected, clause a failed: no create_room tool_use block
+writeGeneratedRoom: latent origin exit absent for room 1 direction 'east' (REQ-EXITS-2b precondition violation) — realizing via insert
+writeGeneratedRoom: latent origin exit absent for room 1 direction 'east' (REQ-EXITS-2b precondition violation) — realizing via insert
+writeGeneratedRoom: latent origin exit absent for room 1 direction 'east' (REQ-EXITS-2b precondition violation) — realizing via insert
+writeGeneratedRoom: latent origin exit absent for room 15 direction 'north' (REQ-EXITS-2b precondition violation) — realizing via insert
+validateRoomProposal: rejected, clause a failed: HTTP status is not 200
+validateRoomProposal: rejected, clause a failed: HTTP status is not 200
+validateRoomProposal: rejected, clause a failed: HTTP status is not 200
+validateRoomProposal: rejected, clause a failed: HTTP status is not 200

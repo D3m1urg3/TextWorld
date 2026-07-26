@@ -1,0 +1,5 @@
+go north
+attack the goblin
+attack the goblin
+go up
+quit

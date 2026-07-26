@@ -1,0 +1,30 @@
+twprof kind=call turn=1 role=resolve model=claude-haiku-4-5 status=200 namelookup_us=1998 connect_us=14657 appconnect_us=29616 starttransfer_us=1087041 total_us=1087223 input_tokens=1390 output_tokens=71
+twprof kind=stage turn=1 stage=resolve ms=1088.965
+twprof kind=stage turn=1 stage=tick ms=2.627
+twprof kind=call turn=1 role=narrate model=claude-opus-4-8 status=200 namelookup_us=41 connect_us=0 appconnect_us=0 starttransfer_us=2393970 total_us=2394102 input_tokens=676 output_tokens=114
+twprof kind=stage turn=1 stage=narrate ms=2397.875
+twprof kind=stage turn=1 stage=total ms=3489.661
+twprof kind=call turn=2 role=resolve model=claude-haiku-4-5 status=200 namelookup_us=38 connect_us=0 appconnect_us=0 starttransfer_us=976180 total_us=976337 input_tokens=1390 output_tokens=54
+twprof kind=stage turn=2 stage=resolve ms=979.669
+twprof kind=stage turn=2 stage=tick ms=3.330
+twprof kind=call turn=2 role=narrate model=claude-opus-4-8 status=200 namelookup_us=41 connect_us=0 appconnect_us=0 starttransfer_us=3303987 total_us=3304186 input_tokens=732 output_tokens=182
+twprof kind=stage turn=2 stage=narrate ms=3308.419
+twprof kind=stage turn=2 stage=total ms=4291.609
+twprof kind=call turn=3 role=resolve model=claude-haiku-4-5 status=200 namelookup_us=49 connect_us=0 appconnect_us=0 starttransfer_us=929563 total_us=929670 input_tokens=1390 output_tokens=54
+twprof kind=stage turn=3 stage=resolve ms=932.379
+twprof kind=stage turn=3 stage=tick ms=3.402
+twprof kind=call turn=3 role=narrate model=claude-opus-4-8 status=200 namelookup_us=35 connect_us=0 appconnect_us=0 starttransfer_us=3098920 total_us=3099105 input_tokens=801 output_tokens=160
+twprof kind=stage turn=3 stage=narrate ms=3102.828
+twprof kind=stage turn=3 stage=total ms=4038.782
+twprof kind=call turn=4 role=resolve model=claude-haiku-4-5 status=200 namelookup_us=48 connect_us=0 appconnect_us=0 starttransfer_us=938060 total_us=938211 input_tokens=1392 output_tokens=71
+twprof kind=stage turn=4 stage=resolve ms=941.969
+twprof kind=call turn=4 role=generate model=claude-opus-4-8 status=200 namelookup_us=37 connect_us=0 appconnect_us=0 starttransfer_us=7268322 total_us=7268481 input_tokens=2480 output_tokens=263
+twprof kind=stage turn=4 stage=generate ms=7272.394 nested_in=tick
+twprof kind=stage turn=4 stage=tick ms=7275.799
+twprof kind=call turn=4 role=narrate model=claude-opus-4-8 status=200 namelookup_us=39 connect_us=0 appconnect_us=0 starttransfer_us=2550310 total_us=2550639 input_tokens=921 output_tokens=185
+aiRender: response rejected, clause c failed: canon room description not present verbatim
+twprof kind=stage turn=4 stage=narrate ms=2554.927
+twprof kind=stage turn=4 stage=total ms=10772.939
+twprof kind=call turn=5 role=resolve model=claude-haiku-4-5 status=200 namelookup_us=38 connect_us=0 appconnect_us=0 starttransfer_us=1019516 total_us=1019818 input_tokens=1389 output_tokens=54
+twprof kind=stage turn=5 stage=resolve ms=1023.189
+twprof kind=stage turn=5 stage=total ms=1023.272

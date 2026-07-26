@@ -1,0 +1,45 @@
+twprof kind=call turn=1 role=resolve model=claude-haiku-4-5 status=200 namelookup_us=2905 connect_us=16321 appconnect_us=32766 starttransfer_us=936851 total_us=936989 input_tokens=1389 output_tokens=54
+twprof kind=stage turn=1 stage=resolve ms=938.908
+twprof kind=stage turn=1 stage=tick ms=2.648
+twprof kind=call turn=1 role=narrate model=claude-opus-4-8 status=200 namelookup_us=24 connect_us=0 appconnect_us=0 starttransfer_us=5405887 total_us=5406033 input_tokens=670 output_tokens=103
+twprof kind=stage turn=1 stage=narrate ms=5409.454
+twprof kind=stage turn=1 stage=total ms=6351.152
+twprof kind=call turn=2 role=resolve model=claude-haiku-4-5 status=200 namelookup_us=45 connect_us=0 appconnect_us=0 starttransfer_us=1597277 total_us=1597431 input_tokens=1391 output_tokens=72
+twprof kind=stage turn=2 stage=resolve ms=1601.691
+twprof kind=stage turn=2 stage=tick ms=3.029
+twprof kind=call turn=2 role=narrate model=claude-opus-4-8 status=200 namelookup_us=58 connect_us=0 appconnect_us=0 starttransfer_us=2531224 total_us=2531337 input_tokens=692 output_tokens=107
+twprof kind=stage turn=2 stage=narrate ms=2534.285
+twprof kind=stage turn=2 stage=total ms=4139.254
+twprof kind=call turn=3 role=resolve model=claude-haiku-4-5 status=200 namelookup_us=37 connect_us=0 appconnect_us=0 starttransfer_us=1022507 total_us=1022654 input_tokens=1390 output_tokens=71
+twprof kind=stage turn=3 stage=resolve ms=1026.054
+twprof kind=stage turn=3 stage=tick ms=2.950
+twprof kind=call turn=3 role=narrate model=claude-opus-4-8 status=200 namelookup_us=52 connect_us=0 appconnect_us=0 starttransfer_us=3371297 total_us=3371437 input_tokens=717 output_tokens=113
+twprof kind=stage turn=3 stage=narrate ms=3374.375
+twprof kind=stage turn=3 stage=total ms=4403.568
+twprof kind=call turn=4 role=resolve model=claude-haiku-4-5 status=200 namelookup_us=36 connect_us=0 appconnect_us=0 starttransfer_us=1019095 total_us=1019211 input_tokens=1390 output_tokens=54
+twprof kind=stage turn=4 stage=resolve ms=1021.190
+twprof kind=stage turn=4 stage=tick ms=2.787
+twprof kind=call turn=4 role=narrate model=claude-opus-4-8 status=200 namelookup_us=40 connect_us=0 appconnect_us=0 starttransfer_us=3929425 total_us=3929585 input_tokens=761 output_tokens=167
+twprof kind=stage turn=4 stage=narrate ms=3933.687
+twprof kind=stage turn=4 stage=total ms=4957.838
+twprof kind=call turn=5 role=resolve model=claude-haiku-4-5 status=200 namelookup_us=37 connect_us=0 appconnect_us=0 starttransfer_us=962340 total_us=962461 input_tokens=1391 output_tokens=71
+twprof kind=stage turn=5 stage=resolve ms=965.314
+twprof kind=stage turn=5 stage=tick ms=3.329
+twprof kind=call turn=5 role=narrate model=claude-opus-4-8 status=200 namelookup_us=36 connect_us=0 appconnect_us=0 starttransfer_us=2367126 total_us=2367419 input_tokens=845 output_tokens=139
+twprof kind=stage turn=5 stage=narrate ms=2371.858
+twprof kind=stage turn=5 stage=total ms=3340.699
+twprof kind=call turn=6 role=resolve model=claude-haiku-4-5 status=200 namelookup_us=41 connect_us=0 appconnect_us=0 starttransfer_us=900590 total_us=900917 input_tokens=1390 output_tokens=54
+twprof kind=stage turn=6 stage=resolve ms=904.767
+twprof kind=stage turn=6 stage=tick ms=3.718
+twprof kind=call turn=6 role=narrate model=claude-opus-4-8 status=200 namelookup_us=41 connect_us=0 appconnect_us=0 starttransfer_us=3667519 total_us=3667745 input_tokens=825 output_tokens=165
+twprof kind=stage turn=6 stage=narrate ms=3671.205
+twprof kind=stage turn=6 stage=total ms=4579.908
+twprof kind=call turn=7 role=resolve model=claude-haiku-4-5 status=200 namelookup_us=44 connect_us=0 appconnect_us=0 starttransfer_us=1454302 total_us=1454541 input_tokens=1400 output_tokens=69
+twprof kind=stage turn=7 stage=resolve ms=1457.151
+twprof kind=stage turn=7 stage=total ms=1457.226
+twprof kind=call turn=8 role=resolve model=claude-haiku-4-5 status=200 namelookup_us=37 connect_us=0 appconnect_us=0 starttransfer_us=2067732 total_us=2067852 input_tokens=1398 output_tokens=158
+twprof kind=stage turn=8 stage=resolve ms=2070.557
+twprof kind=stage turn=8 stage=total ms=2070.622
+twprof kind=call turn=9 role=resolve model=claude-haiku-4-5 status=200 namelookup_us=34 connect_us=0 appconnect_us=0 starttransfer_us=1048580 total_us=1048790 input_tokens=1390 output_tokens=54
+twprof kind=stage turn=9 stage=resolve ms=1052.069
+twprof kind=stage turn=9 stage=total ms=1052.155
