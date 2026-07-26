@@ -18,6 +18,7 @@
 
 #include <curl/curl.h>
 
+#include "aihttp.hpp"  // modelForRole — the single home of the model rule
 #include "json.hpp"
 #include "lookup.hpp"
 
@@ -213,11 +214,12 @@ ResolveContext buildResolveContext(Db& db, const std::string& line) {
 }
 
 std::string buildResolveRequestBody(const std::string& contextPayload) {
-    // Model: TEXTWORLD_MODEL (set AND non-empty) else claude-opus-4-8 — the
-    // same rule buildRequestBody uses, so both AI features share one override.
-    const char* env = std::getenv("TEXTWORLD_MODEL");
-    const std::string model =
-        (env != nullptr && env[0] != '\0') ? env : "claude-opus-4-8";
+    // Model: the RESOLVE role — claude-haiku-4-5 by default (REQ-LAT-12), still
+    // overridden for every role by TEXTWORLD_MODEL. The rule lives in
+    // aihttp.hpp; resolution is a schema-gated classification, and a wrong
+    // answer from the cheaper model fails the same validation gate below and
+    // falls back to the fixed-verb parser exactly as before (REQ-LAT-14).
+    const std::string model = modelForRole(AiRole::Resolve);
 
     // The single emit_action tool (REQ-RESOLVE-8): a schema-enforced verb enum
     // of exactly the ten ISA verbs, plus optional subject / direction. Only

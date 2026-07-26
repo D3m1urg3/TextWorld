@@ -2750,7 +2750,10 @@ static void testNlResolveRequestBody() {
     unsetenv("TEXTWORLD_MODEL");
     {
         const json j = json::parse(buildResolveRequestBody(payload));
-        CHECK(j["model"] == "claude-opus-4-8");
+        // REQ-LAT-12: the RESOLVE role's own default is the cheap model. The
+        // prose and architect body tests below assert Opus and are untouched —
+        // that contrast IS the per-role proof.
+        CHECK(j["model"] == "claude-haiku-4-5");
         CHECK(j["max_tokens"] == 512);
 
         // REQ-RESOLVE-9 forbidden keys + exact top-level set (no thinking,
@@ -2804,7 +2807,7 @@ static void testNlResolveRequestBody() {
     setenv("TEXTWORLD_MODEL", "", 1);
     {
         const json j = json::parse(buildResolveRequestBody(payload));
-        CHECK(j["model"] == "claude-opus-4-8");
+        CHECK(j["model"] == "claude-haiku-4-5");
     }
     // guard's destructor restores the caller's TEXTWORLD_MODEL here.
 }
@@ -3568,6 +3571,10 @@ static size_t liveJudgeAppend(char* ptr, size_t size, size_t nmemb, void* ud) {
 // generated descriptions to a single plain (no-tool) Messages call and return
 // the model's text, or "" on any failure. Test-local transport — mirrors the
 // codebase's per-unit curlTransport stance. ONE call, no loop; a human reads it.
+//
+// This helper deliberately keeps its OWN model read rather than calling
+// modelForRole(): the judge is a test-side validator, not one of the game's
+// three AI roles, so it has no place in the per-role tiering (REQ-LAT-12).
 static std::string liveCoherenceJudge(const std::string& setting,
                                       const std::vector<std::string>& descriptions) {
     nlohmann::json body;

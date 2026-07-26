@@ -64,10 +64,12 @@ std::string buildArchitectContext(Db& db, int64_t room,
 // `description` strings plus one OPTIONAL `exits` string-array (invertible
 // onward directions, REQ-EXITS-5) — no other fields; `tool_choice` REQUIRES the
 // tool
-// (there is no decline branch — a non-call is a gate failure → wall). Model from
-// TEXTWORLD_MODEL if set and non-empty (else claude-opus-4-8; shared with the
-// renderer/resolver), max_tokens 1024, system = kArchitectPrompt, one user
-// message carrying the context payload. No thinking, no stream, no cache keys.
+// (there is no decline branch — a non-call is a gate failure → wall). Model =
+// modelForRole(AiRole::Generate) — claude-opus-4-8 by default (room prose is
+// quality work), with TEXTWORLD_MODEL overriding every role; the precedence rule
+// lives in aihttp.hpp and is stated nowhere else. max_tokens 1024, system =
+// kArchitectPrompt, one user message carrying the context payload. No thinking,
+// no stream, no cache keys.
 //
 // `enemyBlurbs` (REQ-COMBAT-31): when non-empty, the create_room schema gains one
 // OPTIONAL `enemy` string constrained to a schema-enforced ENUM of exactly these

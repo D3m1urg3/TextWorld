@@ -18,6 +18,7 @@
 
 #include <curl/curl.h>
 
+#include "aihttp.hpp"     // modelForRole — the single home of the model rule
 #include "combat.hpp"     // eligibleEnemyBlurbs / archetypeForEnemyBlurb — the gated menu
 #include "json.hpp"
 #include "mutations.hpp"  // writeGeneratedRoom / placeEnemy — the SOLE sanctioned write path
@@ -196,11 +197,10 @@ std::string buildArchitectContext(Db& db, int64_t room,
 std::string buildArchitectRequestBody(
     const std::string& contextPayload,
     const std::vector<std::string>& enemyBlurbs) {
-    // Model: TEXTWORLD_MODEL (set AND non-empty) else claude-opus-4-8 — the same
-    // rule the renderer/resolver use, so all AI features share one override.
-    const char* env = std::getenv("TEXTWORLD_MODEL");
-    const std::string model =
-        (env != nullptr && env[0] != '\0') ? env : "claude-opus-4-8";
+    // Model: the GENERATE role (room prose is quality work, so it keeps the
+    // expensive default). The default and the TEXTWORLD_MODEL override rule
+    // both live in aihttp.hpp — never restate them here.
+    const std::string model = modelForRole(AiRole::Generate);
 
     // The single create_room tool (REQ-ARCH-7b / REQ-EXITS-5): a schema-enforced
     // object with REQUIRED name + description strings and one OPTIONAL exits

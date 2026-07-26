@@ -43,10 +43,13 @@ ResolveContext buildResolveContext(Db& db, const std::string& line);
 // Mirrors buildRequestBody except: max_tokens 512; a `tools` array carrying one
 // `emit_action` tool whose input schema has a schema-enforced `verb` enum of
 // exactly the seven ISA verbs, an optional `subject` string, and an optional
-// `direction` string; `tool_choice` = {"type":"auto"}. Model from
-// TEXTWORLD_MODEL if set and non-empty (else claude-opus-4-8; shared with the
-// renderer). system = kResolveSystemPrompt, one user message carrying the
-// context payload. No thinking, no stream, no prompt caching keys — ever.
+// `direction` string; `tool_choice` = {"type":"auto"}. Model =
+// modelForRole(AiRole::Resolve) — claude-haiku-4-5 by default (resolution is a
+// schema-gated classification, so the cheap model does it and the gate below
+// still governs), with TEXTWORLD_MODEL overriding every role; the precedence
+// rule lives in aihttp.hpp and is stated nowhere else. system =
+// kResolveSystemPrompt, one user message carrying the context payload. No
+// thinking, no stream, no prompt caching keys — ever.
 std::string buildResolveRequestBody(const std::string& contextPayload);
 
 // Validation + mapping gate (REQ-RESOLVE-13): pure function of (response, db) —

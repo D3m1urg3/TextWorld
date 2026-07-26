@@ -16,6 +16,7 @@
 
 #include <curl/curl.h>
 
+#include "aihttp.hpp"  // modelForRole — the single home of the model rule
 #include "combat.hpp"  // combatStatusLine() — the engine-authored HP/cooldown tail
 #include "json.hpp"
 
@@ -237,12 +238,10 @@ std::nullopt_t failClause(char clause, const char* why) {
 }  // namespace
 
 std::string buildRequestBody(const std::string& factsPayload) {
-    // REQ-PROSE-8: model default claude-opus-4-8, overridable via
-    // TEXTWORLD_MODEL (set AND non-empty). nlohmann/json handles all
-    // escaping of the embedded payload string.
-    const char* env = std::getenv("TEXTWORLD_MODEL");
-    const std::string model =
-        (env != nullptr && env[0] != '\0') ? env : "claude-opus-4-8";
+    // REQ-PROSE-8 / REQ-LAT-12: the narrate role's model. The default and the
+    // TEXTWORLD_MODEL override rule both live in aihttp.hpp — never restate
+    // them here. nlohmann/json handles all escaping of the embedded payload.
+    const std::string model = modelForRole(AiRole::Narrate);
 
     json body;
     body["model"] = model;
