@@ -14,7 +14,7 @@ target_include_directories(sqlite3 PUBLIC vendor)
 target_compile_definitions(sqlite3 PRIVATE SQLITE_OMIT_LOAD_EXTENSION)
 
 # --- twcore: engine sources shared by game and tests ---
-add_library(twcore STATIC src/db.cpp src/world.cpp src/parser.cpp src/mutations.cpp src/systems.cpp src/combat.cpp src/render.cpp src/profile.cpp src/prose.cpp src/nlresolve.cpp src/architect.cpp src/loop.cpp)
+add_library(twcore STATIC src/db.cpp src/world.cpp src/parser.cpp src/mutations.cpp src/systems.cpp src/combat.cpp src/render.cpp src/profile.cpp src/aihttp.cpp src/prose.cpp src/nlresolve.cpp src/architect.cpp src/loop.cpp)
 target_include_directories(twcore PUBLIC src)
 target_include_directories(twcore PRIVATE vendor)
 target_link_libraries(twcore PRIVATE sqlite3 CURL::libcurl)

@@ -13,6 +13,7 @@
 #include <curl/curl.h>  // architect live smoke's single bounded judge call (gated)
 
 #include "action.hpp"
+#include "aihttp.hpp"
 #include "architect.hpp"
 #include "combat.hpp"
 #include "db.hpp"
@@ -2574,6 +2575,88 @@ static void testProfileTurnStages() {
     CHECK(!profilingEnabled());
 }
 
+// --- per-role model (REQ-LAT-12, REQ-LAT-13) --------------------------------
+// modelForRole is the ONE place the precedence rule lives, and it has exactly
+// two levels. Pure apart from the TEXTWORLD_MODEL read, so it is asserted
+// directly under the model guard.
+static void testAiRoleModel() {
+    const ScopedModelEnv guard;
+
+    // The role names are the strings the profile records carry.
+    CHECK(std::string(roleName(AiRole::Resolve)) == "resolve");
+    CHECK(std::string(roleName(AiRole::Narrate)) == "narrate");
+    CHECK(std::string(roleName(AiRole::Generate)) == "generate");
+
+    // Level 2 — per-role defaults: resolve is the cheap one, prose stays Opus.
+    unsetenv("TEXTWORLD_MODEL");
+    CHECK(modelForRole(AiRole::Resolve) == "claude-haiku-4-5");
+    CHECK(modelForRole(AiRole::Narrate) == "claude-opus-4-8");
+    CHECK(modelForRole(AiRole::Generate) == "claude-opus-4-8");
+
+    // Level 1 — the global override wins for EVERY role (REQ-LAT-13), so
+    // anyone relying on TEXTWORLD_MODEL today is unaffected by the tiering.
+    setenv("TEXTWORLD_MODEL", "claude-sonnet-5", 1);
+    CHECK(modelForRole(AiRole::Resolve) == "claude-sonnet-5");
+    CHECK(modelForRole(AiRole::Narrate) == "claude-sonnet-5");
+    CHECK(modelForRole(AiRole::Generate) == "claude-sonnet-5");
+
+    // Set-but-EMPTY is not an override — back to the per-role defaults.
+    setenv("TEXTWORLD_MODEL", "", 1);
+    CHECK(modelForRole(AiRole::Resolve) == "claude-haiku-4-5");
+    CHECK(modelForRole(AiRole::Narrate) == "claude-opus-4-8");
+    CHECK(modelForRole(AiRole::Generate) == "claude-opus-4-8");
+}
+
+// --- usage / model body parsers (REQ-LAT-4) ---------------------------------
+// Both are pure, never throw, and must report "unknown" rather than a
+// fabricated zero on anything they cannot read.
+static void testAiUsageParse() {
+    {
+        const AiUsage u = parseUsage(
+            R"({"usage":{"input_tokens":1420,"output_tokens":212}})");
+        CHECK(u.known);
+        CHECK(u.inputTokens == 1420);
+        CHECK(u.outputTokens == 212);
+    }
+    // A realistic body: usage alongside the other response fields.
+    {
+        const AiUsage u = parseUsage(
+            R"({"stop_reason":"end_turn","content":[{"type":"text","text":"hi"}],)"
+            R"("usage":{"input_tokens":7,"output_tokens":3}})");
+        CHECK(u.known);
+        CHECK(u.inputTokens == 7);
+    }
+    // Everything unreadable reads as unknown — and NEVER as zero counts that a
+    // log reader could mistake for a real measurement.
+    const char* unreadable[] = {
+        "",                                                    // empty
+        "not json at all",                                     // garbage
+        "[1,2,3]",                                             // not an object
+        R"({"content":[]})",                                   // no usage
+        R"({"usage":"nope"})",                                 // usage not object
+        R"({"usage":{}})",                                     // empty usage
+        R"({"usage":{"input_tokens":1420}})",                  // partial
+        R"({"usage":{"input_tokens":"1420","output_tokens":212}})",  // string
+        R"({"usage":{"input_tokens":1.5,"output_tokens":212}})",     // float
+    };
+    for (const char* body : unreadable) {
+        const AiUsage u = parseUsage(body);
+        CHECK(!u.known);
+        CHECK(u.inputTokens == 0);
+        CHECK(u.outputTokens == 0);
+    }
+
+    // modelFromRequestBody reads back what was actually sent.
+    CHECK(modelFromRequestBody(R"({"model":"claude-opus-4-8","max_tokens":1024})") ==
+          "claude-opus-4-8");
+    CHECK(modelFromRequestBody(R"({"model":"claude-haiku-4-5"})") ==
+          "claude-haiku-4-5");
+    CHECK(modelFromRequestBody("").empty());
+    CHECK(modelFromRequestBody("nonsense").empty());
+    CHECK(modelFromRequestBody("{}").empty());
+    CHECK(modelFromRequestBody(R"({"model":7})").empty());
+}
+
 // --- request body (REQ-PROSE-8) + system prompt content (REQ-PROSE-11):
 // buildRequestBody is a pure string→string function (plus the TEXTWORLD_MODEL
 // env read), so it is asserted by parsing its output back as JSON. ---
@@ -5059,6 +5142,8 @@ int main() {
     testProseTransport();
     testProfileRecords();
     testProfileTurnStages();
+    testAiRoleModel();
+    testAiUsageParse();
     testProseRequestBody();
     testNlResolveRequestBody();
     testNlResolveGate();
