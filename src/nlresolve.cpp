@@ -16,9 +16,7 @@
 #include <string>
 #include <vector>
 
-#include <curl/curl.h>
-
-#include "aihttp.hpp"  // modelForRole — the single home of the model rule
+#include "aihttp.hpp"  // modelForRole + the shared production transport
 #include "json.hpp"
 #include "lookup.hpp"
 
@@ -106,59 +104,14 @@ std::optional<Verb> verbFromWord(const std::string& word) {
 }
 
 // --- production HTTP transport (REQ-RESOLVE-10, -11) -------------------------
-// Deliberately REIMPLEMENTS prose.cpp's curlTransport (which is anon-namespace-
-// private there); only the HttpTransport *type* is shared (micro-decision #2).
-// Same URL / headers / 8 s timeout as prose. This function has no direct unit
-// test — it is exercised only by the gated live smoke (Step 9).
-
-// libcurl write callback: append the response bytes to a std::string.
-size_t appendToString(char* ptr, size_t size, size_t nmemb, void* userdata) {
-    static_cast<std::string*>(userdata)->append(ptr, size * nmemb);
-    return size * nmemb;
-}
-
-// One POST to the Anthropic Messages API. URL, headers, and timeout are fixed
-// properties of THIS transport, never seam parameters. The API key is read from
-// ANTHROPIC_API_KEY at call time and goes into the x-api-key header ONLY: never
-// into the payload, logs, or fixtures. Any curl failure → transportError; NO
-// retries.
-HttpResponse curlTransport(const std::string& body) {
-    HttpResponse resp;
-
-    CURL* curl = curl_easy_init();
-    if (curl == nullptr) {
-        resp.transportError = true;
-        return resp;
-    }
-
-    const char* key = std::getenv("ANTHROPIC_API_KEY");
-    curl_slist* headers = nullptr;
-    headers = curl_slist_append(
-        headers, ("x-api-key: " + std::string(key != nullptr ? key : "")).c_str());
-    headers = curl_slist_append(headers, "anthropic-version: 2023-06-01");
-    headers = curl_slist_append(headers, "content-type: application/json");
-
-    curl_easy_setopt(curl, CURLOPT_URL, "https://api.anthropic.com/v1/messages");
-    curl_easy_setopt(curl, CURLOPT_POST, 1L);
-    curl_easy_setopt(curl, CURLOPT_POSTFIELDS, body.c_str());
-    curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE,
-                     static_cast<long>(body.size()));
-    curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
-    curl_easy_setopt(curl, CURLOPT_TIMEOUT, 8L);  // total budget, seconds
-    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, appendToString);
-    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &resp.body);
-
-    const CURLcode rc = curl_easy_perform(curl);
-    if (rc != CURLE_OK) {
-        resp.transportError = true;
-    } else {
-        curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &resp.status);
-    }
-
-    curl_slist_free_all(headers);
-    curl_easy_cleanup(curl);
-    return resp;
-}
+// This unit used to REIMPLEMENT prose.cpp's curlTransport, sharing only the
+// HttpTransport *type*. That stance is reversed: aihttp.cpp now owns one shared
+// client, because a PERSISTENT easy handle (REQ-LAT-8) makes triplication
+// actively wrong — handle ownership, the reset-and-re-apply option block, the
+// getinfo timing capture, and the profile emission would each be written three
+// times. The seam is untouched: HttpTransport keeps its signature and tests
+// still inject fakes. The client itself has no direct unit test — it is
+// exercised only by the gated live smoke.
 
 }  // namespace
 
@@ -403,7 +356,7 @@ std::optional<Action> aiResolve(Db& db, const std::string& line,
 }
 
 std::optional<Action> aiResolve(Db& db, const std::string& line) {
-    return aiResolve(db, line, curlTransport);
+    return aiResolve(db, line, makeAnthropicTransport(AiRole::Resolve));
 }
 
 std::optional<Action> resolveOrParse(Db& db, const std::string& line,
@@ -418,5 +371,5 @@ std::optional<Action> resolveOrParse(Db& db, const std::string& line,
 }
 
 std::optional<Action> resolveOrParse(Db& db, const std::string& line) {
-    return resolveOrParse(db, line, curlTransport);
+    return resolveOrParse(db, line, makeAnthropicTransport(AiRole::Resolve));
 }

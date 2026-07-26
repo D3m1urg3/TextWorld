@@ -134,8 +134,9 @@ std::optional<RoomProposal> validateRoomProposal(
 bool architectGenerate(Db& db, int64_t room, const std::string& direction,
                        int64_t actor, const HttpTransport& transport);
 
-// Production overload: binds a local libcurl transport (same URL / headers /
-// 8 s total timeout as the renderer/resolver, no retries — micro-decision #3)
-// and delegates to the injected form.
+// Production overload: binds the shared libcurl client from aihttp.hpp for the
+// Generate role (same URL / headers / 8 s total timeout as the renderer and
+// resolver, which now bind the same client, no retries) and delegates to the
+// injected form.
 bool architectGenerate(Db& db, int64_t room, const std::string& direction,
                        int64_t actor);
