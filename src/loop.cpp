@@ -10,6 +10,7 @@
 #include "action.hpp"
 #include "combat.hpp"
 #include "nlresolve.hpp"
+#include "profile.hpp"
 #include "prose.hpp"
 #include "render.hpp"
 #include "systems.hpp"
@@ -40,12 +41,25 @@ int64_t roomOf(Db& db, int64_t player) {
 }  // namespace
 
 TurnResult runTurn(Db& db, const std::string& line) {
+    // Profiling (REQ-LAT-2), inert unless TEXTWORLD_PROFILE is on: one process-
+    // local turn number shared by every record of this turn, then a stage timer
+    // per SEMANTIC phase. The stages are scopes, so a phase this turn never
+    // reaches simply constructs no timer and is ABSENT from the log rather than
+    // reported as zero. `total` wraps the whole function, early returns included.
+    profileNextTurn();
+    const ScopedStage totalStage("total");
+
     // Resolution: AI resolver -> parser fallback when narration is enabled
     // (REQ-RESOLVE-1, -2), otherwise the fixed-verb parser directly — a disabled
     // run never constructs a transport. Tier a: neither yields an Action ->
     // renderError, no transaction, no tick, no world write.
-    const std::optional<Action> action =
-        aiNarrationEnabled() ? resolveOrParse(db, line) : parse(db, line);
+    // The `resolve` stage is semantic: it covers BOTH the AI resolver and the
+    // fixed-verb parser (REQ-LAT-2/-6), not "was there a network call".
+    std::optional<Action> action;
+    {
+        const ScopedStage resolveStage("resolve");
+        action = aiNarrationEnabled() ? resolveOrParse(db, line) : parse(db, line);
+    }
     if (!action) {
         return {TurnOutcome::NoTick, renderError("I don't understand that.")};
     }
@@ -66,29 +80,37 @@ TurnResult runTurn(Db& db, const std::string& line) {
     }
 
     // The tick: one transaction, one turn increment, resolve, enemy turn, commit.
-    db.begin();
-    try {
-        const int64_t player = playerId(db);
-        // Capture the ROOM the player stands in at TICK START, before the action
-        // can move them out (micro-decision 2): every enemy that was present
-        // still takes its one turn even as the player flees.
-        const int64_t startRoom = roomOf(db, player);
-        db.exec("UPDATE meta SET value = value + 1 WHERE key = 'turn'");
-        resolve(db, *action, player);
-        // The enemy-turn system fires after the player's action, in the SAME
-        // transaction (REQ-COMBAT-2): the loop, not resolve, owns the tick.
-        resolveCombat(db, player, startRoom);
-        db.commit();
-    } catch (const std::exception& e) {
-        // Tier c: engine error. Roll back — turn counter and world state as
-        // if the prompt never happened.
-        db.rollback();
-        return {TurnOutcome::EngineError, renderError(e.what())};
+    // The `tick` stage spans the whole transaction — including the architect
+    // call resolveGo may make inside it, which is why `generate` is emitted as
+    // NESTED in tick (profile.hpp) rather than as a sibling stage.
+    {
+        const ScopedStage tickStage("tick");
+        db.begin();
+        try {
+            const int64_t player = playerId(db);
+            // Capture the ROOM the player stands in at TICK START, before the
+            // action can move them out (micro-decision 2): every enemy that was
+            // present still takes its one turn even as the player flees.
+            const int64_t startRoom = roomOf(db, player);
+            db.exec("UPDATE meta SET value = value + 1 WHERE key = 'turn'");
+            resolve(db, *action, player);
+            // The enemy-turn system fires after the player's action, in the SAME
+            // transaction (REQ-COMBAT-2): the loop, not resolve, owns the tick.
+            resolveCombat(db, player, startRoom);
+            db.commit();
+        } catch (const std::exception& e) {
+            // Tier c: engine error. Roll back — turn counter and world state as
+            // if the prompt never happened.
+            db.rollback();
+            return {TurnOutcome::EngineError, renderError(e.what())};
+        }
     }
 
     // Narration dispatch (REQ-PROSE-1, REQ-PROSE-2): AI prose when enabled
     // and delivered; the template renderer is the always-there fallback
     // (REQ-PROSE-3). Tier-a and tier-c paths above never reach this.
+    // `narrate` is semantic too: AI prose and the template renderer alike.
+    const ScopedStage narrateStage("narrate");
     if (aiNarrationEnabled()) {
         if (auto prose = aiRender(db, currentTurn(db))) {
             return {TurnOutcome::Ticked, *prose};

@@ -2468,6 +2468,112 @@ static void testProfileRecords() {
     CHECK(!profilingEnabled());
 }
 
+// The `stage` values of the captured records, in emission order.
+static std::vector<std::string> capturedStages(
+    const std::vector<std::string>& captured) {
+    std::vector<std::string> stages;
+    for (const std::string& line : captured) {
+        const auto kv = parseProfileRecord(line);
+        if (kv.at("kind") == "stage") stages.push_back(kv.at("stage"));
+    }
+    return stages;
+}
+
+// True iff any captured record is of `kind`.
+static bool capturedAnyKind(const std::vector<std::string>& captured,
+                            const std::string& kind) {
+    for (const std::string& line : captured) {
+        if (parseProfileRecord(line).at("kind") == kind) return true;
+    }
+    return false;
+}
+
+// --- turn phase timers (REQ-LAT-2, REQ-LAT-6, REQ-LAT-1) --------------------
+// Runs with AI OFF (the suite is hermetic), so resolve and narrate take the
+// parser/template paths — which is the point: the stages are SEMANTIC, so they
+// are emitted whether or not a network call happened, and no kind=call record
+// appears at all (REQ-LAT-6).
+static void testProfileTurnStages() {
+    const ScopedEnvVar profGuard("TEXTWORLD_PROFILE");
+    std::vector<std::string> captured;
+    profileSetSink(
+        [&captured](const std::string& line) { captured.push_back(line); });
+
+    // (d) identity check (REQ-LAT-1): the same first turn on two identically
+    // seeded worlds, profiling off vs on. With profiling OFF the sink — which
+    // is installed the whole time — must hear nothing at all.
+    std::string offOutput;
+    std::string onOutput;
+    {
+        const TempDbFile worldPath("textworld_profile_off_tests.db");
+        Db db = openWorld(worldPath.string(), "tests/fixture.sql");
+        unsetenv("TEXTWORLD_PROFILE");
+        profileRefreshEnabled();
+        offOutput = runTurn(db, "look").output;
+    }
+    CHECK(captured.empty());
+
+    {
+        const TempDbFile worldPath("textworld_profile_on_tests.db");
+        Db db = openWorld(worldPath.string(), "tests/fixture.sql");
+        setenv("TEXTWORLD_PROFILE", "1", 1);
+        profileRefreshEnabled();
+        onOutput = runTurn(db, "look").output;
+    }
+    CHECK(!onOutput.empty());
+    CHECK(onOutput == offOutput);
+
+    // (a) a normal ticked turn: exactly the four stages, in scope-exit order,
+    // and NOTHING else — no curl record, no generate.
+    {
+        const std::vector<std::string> stages = capturedStages(captured);
+        CHECK(stages.size() == 4);
+        CHECK(stages == std::vector<std::string>({"resolve", "tick", "narrate",
+                                                  "total"}));
+        CHECK(!capturedAnyKind(captured, "call"));
+        // Every record of one turn shares its process-local turn number.
+        const auto first = parseProfileRecord(captured.front());
+        for (const std::string& line : captured) {
+            CHECK(parseProfileRecord(line).at("turn") == first.at("turn"));
+        }
+    }
+
+    const TempDbFile worldPath("textworld_profile_stages_tests.db");
+    Db db = openWorld(worldPath.string(), "tests/fixture.sql");
+
+    // (b) tier a — an unresolvable line never opens a transaction and never
+    // narrates: tick and narrate are ABSENT, not zero-faked (REQ-LAT-2).
+    captured.clear();
+    {
+        const TurnResult r = runTurn(db, "frobnicate");
+        CHECK(r.outcome == TurnOutcome::NoTick);
+        CHECK(capturedStages(captured) ==
+              std::vector<std::string>({"resolve", "total"}));
+    }
+
+    // (c) quit — same shape: resolved, then straight out.
+    captured.clear();
+    {
+        const TurnResult r = runTurn(db, "quit");
+        CHECK(r.outcome == TurnOutcome::Quit);
+        CHECK(capturedStages(captured) ==
+              std::vector<std::string>({"resolve", "total"}));
+    }
+
+    // Turn numbers advance once per turn, whatever the outcome.
+    captured.clear();
+    {
+        const int64_t before = profileCurrentTurn();
+        runTurn(db, "look");
+        CHECK(profileCurrentTurn() == before + 1);
+    }
+
+    profileSetSink({});
+    unsetenv("TEXTWORLD_PROFILE");
+    profileRefreshEnabled();
+    CHECK(!profilingEnabled());
+}
+
 // --- request body (REQ-PROSE-8) + system prompt content (REQ-PROSE-11):
 // buildRequestBody is a pure string→string function (plus the TEXTWORLD_MODEL
 // env read), so it is asserted by parsing its output back as JSON. ---
@@ -4870,6 +4976,7 @@ int main() {
     testNlResolvePrompt();
     testProseTransport();
     testProfileRecords();
+    testProfileTurnStages();
     testProseRequestBody();
     testNlResolveRequestBody();
     testNlResolveGate();

@@ -81,6 +81,7 @@ Environment variables:
 | `ANTHROPIC_API_KEY` | Enables both AI features (narration and input resolution) when set and non-empty. The key is sent only in the request's `x-api-key` header — never logged, stored, or written to the world file. |
 | `TEXTWORLD_AI` | Kill switch for both AI features. Set to exactly `0` to force template + fixed-verb mode even with a key present. Any other value (or unset) leaves AI on. |
 | `TEXTWORLD_MODEL` | Overrides the model. Default `claude-opus-4-8`; `claude-haiku-4-5` is a cheaper, faster option. |
+| `TEXTWORLD_PROFILE` | Turn profiling. Off unless set to something other than empty or `0`. When on, each turn writes one `twprof key=value` line per phase (`resolve`, `tick`, `narrate`, `generate`, `total`) and per network call (curl's namelookup/connect/appconnect/starttransfer/total split, plus role, model, and token counts) to **stderr** — game text on stdout is untouched. Off, a turn's output and behavior are byte-for-byte what they are without the variable. |
 
 With AI enabled, a turn makes up to two synchronous Claude calls — one to resolve the input line, one to narrate the result — and a `go` across an unmapped edge adds one more to generate the room. Each call has an 8-second timeout and no retries; a slow or failed call falls back (to the fixed-verb parser, that turn's template, or the `You can't go that way.` wall, respectively). No network access happens in template mode.
 
