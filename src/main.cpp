@@ -5,12 +5,18 @@
 #include <iostream>
 #include <string>
 
+#include "aihttp.hpp"
 #include "loop.hpp"
 #include "prose.hpp"
 #include "world.hpp"
 
 int main() {
     try {
+        // libcurl init/shutdown, once per process (REQ-LAT-7). First local in
+        // the try, so its destructor covers every way out below: normal return,
+        // quit, EOF, SchemaMismatch, and the generic catch.
+        const AiHttpGuard httpGuard;
+
         Db db = openWorld("world.db");
 
         // One-line mode notice (REQ-PROSE-2): told once, before the first

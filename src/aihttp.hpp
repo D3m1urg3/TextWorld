@@ -104,3 +104,18 @@ HttpResponse anthropicPost(const std::string& requestBody, AiRole role);
 // Bind a role into the existing seam. HttpTransport's signature is unchanged,
 // so every fake-transport test keeps working exactly as before.
 HttpTransport makeAnthropicTransport(AiRole role);
+
+// Process-lifetime RAII for the two calls above (REQ-LAT-7). Instantiate ONE
+// of these as the first local in main(), so its destructor covers every exit
+// path the binary has — normal return, quit, EOF, and each catch.
+//
+// Explicit RAII, deliberately NOT a function-local static: a static's
+// destructor runs AFTER main returns, i.e. after anything main itself cleaned
+// up, which is precisely the ordering bug this type exists to avoid.
+struct AiHttpGuard {
+    AiHttpGuard() { aiHttpInit(); }
+    ~AiHttpGuard() { aiHttpShutdown(); }
+
+    AiHttpGuard(const AiHttpGuard&) = delete;
+    AiHttpGuard& operator=(const AiHttpGuard&) = delete;
+};

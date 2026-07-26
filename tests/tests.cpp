@@ -5082,6 +5082,12 @@ static void testArchitectPrompt() {
 }
 
 int main() {
+    // libcurl init/shutdown for the whole run (REQ-LAT-7), ABOVE the live
+    // smokes: they use the production transports and must run with libcurl
+    // explicitly initialized. The default offline run pays one
+    // curl_global_init and nothing else — no handle is ever created.
+    const AiHttpGuard httpGuard;
+
     // Live smoke FIRST, while the developer's real environment is still
     // intact: it needs a real ANTHROPIC_API_KEY, and the hermetic unset below
     // would otherwise clobber it (see testProseLiveSmoke's env-ordering note).
