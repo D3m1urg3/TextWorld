@@ -61,7 +61,7 @@ void moveEntity(Db& db, int64_t what, int64_t toContainer, int64_t actor,
 }
 
 void damageEntity(Db& db, int64_t target, int64_t amount, int64_t actor,
-                  const char* verb) {
+                  const char* verb, const char* detail) {
     // Defense lock (REQ-COMBAT-17): while a barrier shields the target, ALL
     // damage is negated — a 'blocked' event records the deflection and health is
     // untouched, until Dispel strips the barrier. The player never carries a
@@ -93,7 +93,9 @@ void damageEntity(Db& db, int64_t target, int64_t amount, int64_t actor,
     }
     // subject = the damaged entity; object carries the amount dealt (a per-event
     // number, read verb-specifically by render, like moved's destination room).
-    appendEvent(db, actor, verb, target, amount, nullptr);
+    // `detail` is NULL for every caller but the resistance-scaled elemental one
+    // (combat.cpp), which tags it "<archetype>|<element>" — see mutations.hpp.
+    appendEvent(db, actor, verb, target, amount, detail);
 }
 
 namespace {

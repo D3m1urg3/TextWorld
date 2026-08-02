@@ -45,13 +45,24 @@ void moveEntity(Db& db, int64_t what, int64_t toContainer, int64_t actor,
 // event, inside the caller's ambient transaction. The health write clamps
 // current to [0, max] in code: current := clamp(current - amount, 0, max)
 // (REQ-COMBAT-4). The event is (actor = attacker, verb, subject = target,
-// object = amount, detail = NULL) — the sole write path for combat damage.
+// object = amount, detail) — the sole write path for combat damage.
+//
+// CONTRACT CHANGE, and the next person to add a detail needs to know it:
+// `events.detail` now carries TWO kinds of value.
+//   1. A human-readable, MODEL-FACING fragment — what it has always been. Every
+//      such detail is handed to the narrator as a fact (prose.cpp).
+//   2. An engine-internal TAG, on the 'burned' and 'froze' verbs only, of the
+//      form "<archetype>|<element>". This is what resistance discovery derives
+//      from (REQ-UI-46), and prose.cpp deliberately WITHHOLDS it from the
+//      narrator — a raw archetype tag in front of the model would otherwise be
+//      echoed into prose as a noun (REQ-PROSE-11, REQ-UI-25).
+// Adding a third tagged verb means updating that shield too.
 //
 // Throws std::runtime_error (engine error) if `target` has no health row —
 // before any event is appended — so the log never records damage that did not
 // land. The caller is expected to roll back. Never begins/commits.
 void damageEntity(Db& db, int64_t target, int64_t amount, int64_t actor,
-                  const char* verb);
+                  const char* verb, const char* detail = nullptr);
 
 // Mint a portable grimoire item into `room`, per a fixed archetype → grimoire
 // flavor map (REQ-COMBAT-20; the archetype → SPELL mapping and the grimoire→spell

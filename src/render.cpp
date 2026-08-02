@@ -8,7 +8,6 @@
 #include <vector>
 
 #include "architect.hpp"  // architectEnabled() — the latent-exit DISPLAY gate
-#include "combat.hpp"      // combatStatusLine() — the engine-authored HP/cooldown tail
 
 namespace {
 
@@ -20,13 +19,6 @@ std::string nameOf(Db& db, int64_t entity) {
     s.bind(1, entity);
     if (!s.step()) return "something";
     return s.colText(0);
-}
-
-// The player entity (singleton by convention). Read-only.
-int64_t playerEntity(Db& db) {
-    Stmt s = db.prepare("SELECT entity FROM player LIMIT 1");
-    if (!s.step()) throw std::runtime_error("render: world has no player entity");
-    return s.colInt(0);
 }
 
 // Room the actor currently stands in (for 'looked' with no destination).
@@ -216,11 +208,10 @@ std::string render(Db& db, int64_t turn) {
         // so a world-gen turn shows as its 'moved' block with no extra line.
     }
 
-    // Engine-authored combat status line (REQ-COMBAT-15): appended whenever a
-    // hostile shares the player's room. Self-gating (empty otherwise), so this
-    // is unconditional here and byte-identical to the AI path's append.
-    out += combatStatusLine(db, playerEntity(db));
-
+    // NO status append here (REQ-UI-6). Status text is now composed ONCE, by
+    // the status band in runTurn (band.cpp), so exactly one place in the binary
+    // emits it. render() is event-line output and nothing else; every verb
+    // template above is byte-identical to before the band landed (REQ-UI-7).
     return out;
 }
 

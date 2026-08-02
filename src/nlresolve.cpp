@@ -88,7 +88,10 @@ std::nullopt_t failClause(char clause, const char* why) {
     return std::nullopt;
 }
 
-// The ten ISA verbs, and nothing else (clause b). nullopt for any other word.
+// The eleven ISA verbs, and nothing else (clause b). nullopt for any other
+// word. This list and the tool enum below MUST stay element-wise identical;
+// the suite asserts it, because a verb in one and not the other is a silent
+// half-wiring rather than a compile error.
 std::optional<Verb> verbFromWord(const std::string& word) {
     if (word == "look") return Verb::Look;
     if (word == "go") return Verb::Go;
@@ -100,6 +103,7 @@ std::optional<Verb> verbFromWord(const std::string& word) {
     if (word == "attack") return Verb::Attack;
     if (word == "cast") return Verb::Cast;
     if (word == "read") return Verb::Read;
+    if (word == "spells") return Verb::Spells;
     return std::nullopt;
 }
 
@@ -128,7 +132,7 @@ const char* const kResolveSystemPrompt =
 
 Each user message is a JSON object of scope facts: "input" (the raw line to translate), "room" (the name of the room the player stands in), "exits" (the direction words leading out of it), "items" (the noun words of items visible in the room), and "inventory" (the noun words of items the player carries).
 
-The instruction set has exactly ten verbs. Each is distinct; pick the single one the input means:
+The instruction set has exactly eleven verbs. Each is distinct; pick the single one the input means:
 - look: the player surveys their surroundings. No argument.
 - go: the player moves out of the room in a direction. Set "direction" to the movement or compass word (for example north, south, up, in).
 - take: the player picks an item up off the floor into hand. Set "subject" to the item's noun word.
@@ -139,6 +143,7 @@ The instruction set has exactly ten verbs. Each is distinct; pick the single one
 - attack: the player strikes the hostile creature in the room with a plain weapon blow (for example "hit it", "swing at the goblin", "kill it"). No argument — the engine targets the foe present.
 - cast: the player invokes a spell by name (for example "cast ward", "burn it", "freeze the thing", "shield"). Set "subject" to the spell's name word.
 - read: the player reads a book or grimoire to study it (for example "read the grimoire", "study the tome"). Set "subject" to the item's noun word.
+- spells: the player asks what their known spells do - the rules, not an action in the world (for example "what do my spells do", "spell list", "how does ward work"). No argument.
 
 Rules, absolute:
 - Translate the input to exactly one action and emit it with a single emit_action call. Never emit more than one action; if the line asks for several, make no call.
@@ -187,7 +192,8 @@ std::string buildResolveRequestBody(const std::string& contextPayload) {
     properties["verb"] = {
         {"type", "string"},
         {"enum", json::array({"look", "go", "take", "drop", "inventory",
-                              "wait", "quit", "attack", "cast", "read"})},
+                              "wait", "quit", "attack", "cast", "read",
+                              "spells"})},
         {"description", "The single ISA verb the input means."}};
     properties["subject"] = {
         {"type", "string"},
@@ -323,6 +329,7 @@ std::optional<Action> validateAndLower(const HttpResponse& response, Db& db) {
         case Verb::Wait:
         case Verb::Quit:
         case Verb::Attack:
+        case Verb::Spells:
             // Clause e: argument-free — any stray subject/direction is ignored.
             // Attack targets the hostile in the room (subject stays 0); the
             // model recognizes the intent, the engine finds the foe.

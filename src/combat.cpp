@@ -438,9 +438,18 @@ void resolveCast(Db& db, int64_t player, const std::string& spell) {
         // Elemental damage (REQ-COMBAT-16): base × resistance ratio for the
         // enemy's archetype. Frost also lays a brief slow (a CC), giving DoT/AoE
         // and the multiplicity lock company in Brick 3.
-        const int64_t dmg =
-            resistedDamage(db, archetypeOf(db, enemy), element, kSpellDamage);
-        damageEntity(db, enemy, dmg, player, effect == "frost" ? "froze" : "burned");
+        const std::string archetype = archetypeOf(db, enemy);
+        const int64_t dmg = resistedDamage(db, archetype, element, kSpellDamage);
+        // Tag the event with "<archetype>|<element>" (REQ-UI-41, -46). This is
+        // the ONLY damage routed through resistedDamage, so it is the only
+        // damage that teaches the player anything about resistances — the other
+        // five call sites are not resistance-scaled and stay untagged. The tag
+        // lives in events.detail rather than a new table, so no DDL and no
+        // SCHEMA_VERSION bump (REQ-UI-45), and deleting a fight's events erases
+        // what that fight taught (REQ-UI-46).
+        const std::string tag = archetype + "|" + element;
+        damageEntity(db, enemy, dmg, player,
+                     effect == "frost" ? "froze" : "burned", tag.c_str());
         if (effect == "frost") {
             applyStatus(db, enemy, "slow", 0, kSlowDuration);
         }

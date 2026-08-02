@@ -15,7 +15,6 @@
 #include <vector>
 
 #include "aihttp.hpp"  // modelForRole + the shared production transport
-#include "combat.hpp"  // combatStatusLine() — the engine-authored HP/cooldown tail
 #include "json.hpp"
 
 namespace {
@@ -142,11 +141,10 @@ std::string deterministicAppends(Db& db, int64_t turn) {
         }
     }
 
-    // Engine-authored combat status line (REQ-COMBAT-15), the SAME helper the
-    // template renderer appends — so the line is byte-identical on both paths
-    // (the exits/inventory-append seam, now carrying HP/cooldowns). Self-gating.
-    out += combatStatusLine(db, playerEntity(db));
-
+    // NO status append here (REQ-UI-6). The status band in runTurn composes it
+    // ONCE for both render paths, so the AI path and the template path receive
+    // identical band bytes by construction rather than by duplicated calls
+    // (REQ-UI-1).
     return out;
 }
 
@@ -305,7 +303,16 @@ TurnFacts buildFacts(Db& db, int64_t turn) {
             if (subject != 0) {
                 if (const auto name = nameOf(db, subject)) e["subject"] = *name;
             }
-            if (!detailIsNull) e["detail"] = detail;
+            // The narrator sees model-facing details only. 'burned'/'froze'
+            // carry an engine-internal "<archetype>|<element>" tag instead
+            // (mutations.hpp), and handing the model a raw archetype tag would
+            // invite it into the prose as a noun — violating REQ-PROSE-11's
+            // no-new-nouns rule and REQ-UI-25. render.cpp already ignores the
+            // detail for both verbs (it reads subject and object), and
+            // aiRender's clause d inspects 'failed' details only, so nothing
+            // else observes this.
+            const bool engineInternalTag = verb == "burned" || verb == "froze";
+            if (!detailIsNull && !engineInternalTag) e["detail"] = detail;
             events.push_back(e);
 
             // Room-describing event (REQ-PROSE-12 normative definition):

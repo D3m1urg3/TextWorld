@@ -8,12 +8,14 @@
 #include <stdexcept>
 
 #include "action.hpp"
+#include "band.hpp"
 #include "combat.hpp"
 #include "nlresolve.hpp"
 #include "profile.hpp"
 #include "prose.hpp"
 #include "render.hpp"
 #include "systems.hpp"
+#include "term.hpp"
 
 namespace {
 
@@ -38,17 +40,27 @@ int64_t roomOf(Db& db, int64_t player) {
     return s.colInt(0);
 }
 
-}  // namespace
+// The status band for the world as it now stands, or "" if composing it throws
+// (REQ-UI-2: read-only, outside the tick transaction).
+//
+// The degrade is deliberate and is NOT in the spec. REQ-UI-3 demands a band on
+// the EngineError path — where the world was just rolled back — and REQ-UI-9
+// establishes the degrade-don't-throw posture ("render without a title rather
+// than failing"). A band that crashed the turn it was meant to explain would be
+// strictly worse than no band, so the failure is swallowed here rather than
+// propagated. The suite tests this path directly rather than trusting it.
+std::string bandOrEmpty(Db& db, int width) {
+    try {
+        return composeBand(db, width);
+    } catch (const std::exception&) {
+        return "";
+    }
+}
 
-TurnResult runTurn(Db& db, const std::string& line) {
-    // Profiling (REQ-LAT-2), inert unless TEXTWORLD_PROFILE is on: one process-
-    // local turn number shared by every record of this turn, then a stage timer
-    // per SEMANTIC phase. The stages are scopes, so a phase this turn never
-    // reaches simply constructs no timer and is ABSENT from the log rather than
-    // reported as zero. `total` wraps the whole function, early returns included.
-    profileNextTurn();
-    const ScopedStage totalStage("total");
-
+// The turn proper: resolution, the tick, and narration. Wrapped by runTurn
+// below, which owns wrapping and the status band — so every return path here
+// picks both up without this function knowing they exist.
+TurnResult runTurnCore(Db& db, const std::string& line) {
     // Resolution: AI resolver -> parser fallback when narration is enabled
     // (REQ-RESOLVE-1, -2), otherwise the fixed-verb parser directly — a disabled
     // run never constructs a transport. Tier a: neither yields an Action ->
@@ -67,6 +79,21 @@ TurnResult runTurn(Db& db, const std::string& line) {
     // Quit is handled before any transaction opens; it never reaches resolve.
     if (action->verb == Verb::Quit) {
         return {TurnOutcome::Quit, ""};
+    }
+
+    // Spell inspection (REQ-UI-37/-39): read-only reference information about
+    // the RULES, answered without opening a transaction — meta.turn does not
+    // move, no events row is written, and resolveCombat never runs, so no
+    // hostile takes a turn. runTurn still appends the band, so the player sees
+    // the fight state alongside the rules.
+    //
+    // REQ-UI-39b: this is a BOUNDED exception to the project's rule that all
+    // player-visible output renders from events rows. IT MUST NOT GENERALIZE.
+    // No other command may produce output outside the events model on its
+    // authority; a future addition wanting the same treatment requires its own
+    // decision, not an appeal to this one.
+    if (action->verb == Verb::Spells) {
+        return {TurnOutcome::NoTick, renderSpellRules(db, playerId(db), currentStyle())};
     }
 
     // Cast availability gate (REQ-COMBAT-7/-13): an unknown or still-recharging
@@ -119,6 +146,39 @@ TurnResult runTurn(Db& db, const std::string& line) {
     return {TurnOutcome::Ticked, render(db, currentTurn(db))};
 }
 
+}  // namespace
+
+TurnResult runTurn(Db& db, const std::string& line) {
+    // Profiling (REQ-LAT-2), inert unless TEXTWORLD_PROFILE is on: one process-
+    // local turn number shared by every record of this turn, then a stage timer
+    // per SEMANTIC phase. The stages are scopes, so a phase this turn never
+    // reaches simply constructs no timer and is ABSENT from the log rather than
+    // reported as zero. `total` lives on the OUTER function so wrapping and band
+    // composition are inside the measured turn — otherwise `total` would
+    // under-report from this release onward. The resolve/tick/narrate stage
+    // names and nesting are unchanged.
+    profileNextTurn();
+    const ScopedStage totalStage("total");
+
+    TurnResult r = runTurnCore(db, line);
+
+    // Quit produces no output, and therefore no band (REQ-UI-3 is scoped to
+    // "every turn that produces output").
+    if (r.outcome == TurnOutcome::Quit) return r;
+
+    // THE single composition site (REQ-UI-1, -3, -4, -6). Placing it here, after
+    // every runTurnCore return path, is what gives those requirements by
+    // construction rather than by discipline: no-tick refusals and engine errors
+    // get a band for free, and the AI and template paths get identical bytes
+    // because there is only one composition. Width is re-queried per turn
+    // (REQ-UI-28); the band goes LAST, below the narration (REQ-UI-4).
+    const int w = detectWidth();
+    r.output = wrapProse(r.output, w);
+    r.output += bandOrEmpty(db, w);
+    return r;
+}
+
 std::string renderStartup(Db& db) {
-    return renderRoomOf(db, playerId(db));
+    const int w = detectWidth();
+    return wrapProse(renderRoomOf(db, playerId(db)), w) + bandOrEmpty(db, w);
 }

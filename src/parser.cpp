@@ -49,6 +49,10 @@ std::optional<Action> parse(Db& db, const std::string& line) {
     if (verbWord == "inventory") return Action{Verb::Inventory};
     if (verbWord == "wait") return Action{Verb::Wait};
     if (verbWord == "quit") return Action{Verb::Quit};
+    // Spell inspection: reference information about the rules, resolved by the
+    // loop WITHOUT a tick (REQ-UI-39). Like the four above, a trailing argument
+    // is ignored.
+    if (verbWord == "spells") return Action{Verb::Spells};
 
     if (verbWord == "go") {
         if (arg.empty()) return std::nullopt;  // bare verb, REQ-PROTO-6a

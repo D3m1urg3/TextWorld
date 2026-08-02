@@ -177,6 +177,13 @@ void resolveImpl(Db& db, const Action& action, int64_t player,
             // silently ignoring) surfaces the loop bug immediately; the caller
             // rolls back the transaction, so no tick is recorded.
             throw std::logic_error("resolve: Verb::Quit must be handled pre-transaction");
+        case Verb::Spells:
+            // Spell inspection is read-only reference information and consumes
+            // no turn (REQ-UI-39), so the loop answers it BEFORE any transaction
+            // opens — it must never reach the tick. Throwing surfaces a routing
+            // bug immediately instead of silently costing the player a turn.
+            throw std::logic_error(
+                "resolve: Verb::Spells must be handled pre-transaction");
     }
 }
 

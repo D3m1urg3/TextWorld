@@ -1472,8 +1472,11 @@ static void testCombatStatusLine() {
     const int64_t wardCd =
         queryInt(db, "SELECT cooldown FROM spell_catalog WHERE spell = 'ward'");
 
-    // Outside combat: no status line.
-    CHECK(!contains(runTurn(db, "look").output, "HP:"));
+    // Outside combat: HP is STILL shown. REQ-UI-15 makes the HP row
+    // unconditional — the band replaces the old in-combat-only status line, so
+    // this assertion is inverted rather than deleted: it still tests something
+    // real, namely that HP no longer disappears outside a fight.
+    CHECK(contains(runTurn(db, "look").output, "HP:"));
 
     // Entering combat: HP plus both known spells shown ready.
     {
@@ -1499,17 +1502,13 @@ static void testCombatStatusLine() {
         CHECK(contains(out, "Ward: ready"));
     }
 
-    // Byte-identity of the append: render()'s output ends with exactly the shared
-    // combatStatusLine helper — the same helper the AI path appends, so the line
-    // is identical on both paths by construction.
-    {
-        const int64_t t = queryInt(db, "SELECT value FROM meta WHERE key = 'turn'");
-        const std::string rendered = render(db, t);
-        const std::string sl = combatStatusLine(db, 3);
-        CHECK(!sl.empty());
-        CHECK(rendered.size() >= sl.size());
-        CHECK(rendered.compare(rendered.size() - sl.size(), sl.size(), sl) == 0);
-    }
+    // The byte-identity block that stood here is RETIRED, not rewritten
+    // (REQ-UI-7a). It existed to police a duplication — the same status line
+    // appended by both render() and the AI path — that the status band
+    // eliminates: there is now exactly one composition site, in runTurn, so
+    // there are no longer two appends that could disagree. combatStatusLine()
+    // itself survives as a helper and as the readiness oracle testBandContent
+    // compares against (REQ-UI-6a).
 }
 
 // Counter resolution: Ward blocks, Stun interrupts (REQ-COMBAT-11, -19, -8).
@@ -1598,8 +1597,9 @@ static void testCombatRender() {
     const TempDbFile worldPath("textworld_combat_render_tests.db");
     Db db = openWorld(worldPath.string(), "tests/combat_fixture.sql");
 
-    // Non-combat tick (in the cell, no hostile): NO status line.
-    CHECK(!contains(runTurn(db, "look").output, "HP:"));
+    // Non-combat tick (in the cell, no hostile): HP is still shown. Inverted
+    // for REQ-UI-15 — the band carries HP unconditionally now.
+    CHECK(contains(runTurn(db, "look").output, "HP:"));
 
     // Walk into the corridor: a hostile now shares the room, so the status line
     // appears (full HP, no chip this tick — the player was in the cell at tick
@@ -1622,7 +1622,9 @@ static void testCombatRender() {
         const std::string out = runTurn(db, "attack").output;
         CHECK(contains(out, "goblin grunt falls"));
         CHECK(contains(out, "grimoire"));
-        CHECK(!contains(out, "HP:"));
+        // Combat is over, but the band still reports HP (REQ-UI-15). Inverted
+        // for the same reason as the two above.
+        CHECK(contains(out, "HP:"));
     }
 
     // The downed template (a fresh world; chip the player to 0). The downing
@@ -2787,9 +2789,12 @@ static void testNlResolveRequestBody() {
         CHECK(schema["type"] == "object");
         const json& verb = schema["properties"]["verb"];
         CHECK(verb["type"] == "string");
+        // ('spells' added by the status band, REQ-UI-37: the model-facing list
+        // must carry it too, or inspection would work only via the fixed-verb
+        // parser word — a silent half-wiring.)
         CHECK(verb["enum"] ==
               json::array({"look", "go", "take", "drop", "inventory", "wait",
-                           "quit", "attack", "cast", "read"}));
+                           "quit", "attack", "cast", "read", "spells"}));
 
         // subject and direction present; verb is the ONLY required field.
         CHECK(schema["properties"].contains("subject"));
@@ -3413,18 +3418,27 @@ static void testProseAiRender() {
         // hardwires curlTransport, so that is the honest dispatch coverage.
     }
 
-    // --- dispatch, AI off (no key): runTurn output BYTE-IDENTICAL to the
-    // template render — no transport exists to be touched ---
+    // --- dispatch, AI off (no key): runTurn output is the template render,
+    // wrapped, with the status band appended — no transport exists to be
+    // touched ---
+    //
+    // These three assertions used to read `output == render(db, N)`. That
+    // identity is what the status band deliberately ends (REQ-UI-1/-3/-4):
+    // runTurn now wraps the prose and appends a band, so the equality is
+    // restated as the composition rather than dropped. Their point is
+    // preserved — the text still derives from render(), not from a model.
     {
         const ScopedEnvVar keyGuard("ANTHROPIC_API_KEY");
         const ScopedEnvVar aiGuard("TEXTWORLD_AI");
         unsetenv("ANTHROPIC_API_KEY");
         unsetenv("TEXTWORLD_AI");
 
+        const int width = detectWidth();
+
         const TurnResult r = runTurn(db, "look");  // turn 5
         CHECK(r.outcome == TurnOutcome::Ticked);
         CHECK(queryInt(db, "SELECT value FROM meta WHERE key = 'turn'") == 5);
-        CHECK(r.output == render(db, 5));
+        CHECK(r.output == wrapProse(render(db, 5), width) + composeBand(db, width));
 
         // Kill switch through the production path: key present but
         // TEXTWORLD_AI=0 → enabled() is false BEFORE any transport, so this
@@ -3433,8 +3447,10 @@ static void testProseAiRender() {
         setenv("TEXTWORLD_AI", "0", 1);
         const TurnResult w = runTurn(db, "wait");  // turn 6
         CHECK(w.outcome == TurnOutcome::Ticked);
-        CHECK(w.output == "Time passes.\n");
-        CHECK(w.output == render(db, 6));
+        CHECK(contains(w.output, "Time passes."));
+        CHECK(w.output == wrapProse(render(db, 6), width) + composeBand(db, width));
+        // REQ-UI-4: the band is LAST — the narration is above it.
+        CHECK(w.output.find("Time passes.") < w.output.find("-- "));
         // guards restore both vars here.
     }
 }
@@ -5962,6 +5978,536 @@ static void testBandColor() {
     }
 }
 
+// The wiring: one composition site, read-only, on every output-producing turn,
+// degrading rather than throwing (REQ-UI-1, -2, -3, -4, -6, -6a, -7, -7a, -30).
+static void testBandWiring() {
+    // --- check 1: no writes ------------------------------------------------
+    // Static, in the same style as the combat surface's no-RNG guard: the
+    // band's translation unit contains no write statement at all.
+    {
+        // Match SQL as it would actually appear — inside a string literal
+        // handed to prepare()/exec() — so the contract COMMENT naming the three
+        // forbidden verbs does not trip the scan.
+        const std::string src = readFileBytes("src/band.cpp");
+        CHECK(!contains(src, "\"INSERT"));
+        CHECK(!contains(src, "\"UPDATE"));
+        CHECK(!contains(src, "\"DELETE"));
+        CHECK(!contains(src, "\"REPLACE"));
+        CHECK(!contains(src, "\"DROP"));
+        // The same scan on render.cpp, whose contract this mirrors.
+        const std::string rsrc = readFileBytes("src/render.cpp");
+        CHECK(!contains(rsrc, "\"INSERT"));
+        CHECK(!contains(rsrc, "\"UPDATE"));
+        CHECK(!contains(rsrc, "\"DELETE"));
+        // The header states the contract, so the next person to add a query
+        // reads it before writing one.
+        CHECK(contains(readFileBytes("src/band.hpp"), "READ-ONLY BY CONTRACT"));
+    }
+
+    // --- check 1, dynamic: N compositions change nothing --------------------
+    {
+        const TempDbFile worldPath("textworld_band_wiring_tests.db");
+        Db db = openWorld(worldPath.string(), "tests/combat_fixture.sql");
+        db.exec("UPDATE location SET container = 2 WHERE entity = 3");
+        const int64_t turn0 = queryInt(db, "SELECT value FROM meta WHERE key = 'turn'");
+        const int64_t events0 = queryInt(db, "SELECT COUNT(*) FROM events");
+        for (int i = 0; i < 20; ++i) composeBand(db, 80, kBandPlain);
+        CHECK(queryInt(db, "SELECT value FROM meta WHERE key = 'turn'") == turn0);
+        CHECK(queryInt(db, "SELECT COUNT(*) FROM events") == events0);
+    }
+
+    // --- check 2 / REQ-UI-6: exactly ONE place emits status text ------------
+    {
+        // Both former append sites are gone.
+        CHECK(!contains(readFileBytes("src/render.cpp"), "combatStatusLine"));
+        CHECK(!contains(readFileBytes("src/prose.cpp"), "combatStatusLine"));
+        // And the band is composed from exactly one call site in the loop, so
+        // the AI path and the template path cannot receive different bytes.
+        const std::string loop = readFileBytes("src/loop.cpp");
+        size_t sites = 0;
+        for (size_t i = loop.find("composeBand("); i != std::string::npos;
+             i = loop.find("composeBand(", i + 1)) {
+            ++sites;
+        }
+        CHECK(sites == 1);
+        // REQ-UI-6a: the helper itself SURVIVES — removed as an appender only.
+        CHECK(contains(readFileBytes("src/combat.cpp"), "std::string combatStatusLine"));
+    }
+
+    // --- check 21: no-tick turns still get a band --------------------------
+    {
+        const TempDbFile worldPath("textworld_band_notick_tests.db");
+        Db db = openWorld(worldPath.string(), "tests/combat_fixture.sql");
+        const int64_t before = queryInt(db, "SELECT value FROM meta WHERE key = 'turn'");
+
+        // An unparseable line.
+        const TurnResult bad = runTurn(db, "xyzzy the frobnitz");
+        CHECK(bad.outcome == TurnOutcome::NoTick);
+        CHECK(contains(bad.output, "I don't understand that."));
+        CHECK(contains(bad.output, "-- cell "));   // the band is there
+        CHECK(contains(bad.output, "HP: 12/12"));
+
+        // A denied cast (an unknown spell for this player).
+        const TurnResult denied = runTurn(db, "cast fire");
+        CHECK(denied.outcome == TurnOutcome::NoTick);
+        CHECK(contains(denied.output, "-- cell "));
+
+        CHECK(queryInt(db, "SELECT value FROM meta WHERE key = 'turn'") == before);
+
+        // REQ-UI-4: the band is the LAST thing in the output, below the text.
+        CHECK(bad.output.find("I don't understand") < bad.output.find("-- cell "));
+        CHECK(bad.output.back() == '\n');
+    }
+
+    // --- REQ-UI-3 on the EngineError path ----------------------------------
+    // A trigger makes the tick's first event INSERT abort, so the turn rolls
+    // back — and still reports, with a band, because the band is composed after
+    // and outside the transaction.
+    {
+        const TempDbFile worldPath("textworld_band_engineerr_tests.db");
+        Db db = openWorld(worldPath.string(), "tests/combat_fixture.sql");
+        const int64_t before = queryInt(db, "SELECT value FROM meta WHERE key = 'turn'");
+        db.exec("CREATE TRIGGER boom BEFORE INSERT ON events "
+                "BEGIN SELECT RAISE(ABORT, 'boom'); END");
+        const TurnResult r = runTurn(db, "look");
+        CHECK(r.outcome == TurnOutcome::EngineError);
+        CHECK(contains(r.output, "boom"));
+        CHECK(contains(r.output, "-- cell "));  // the band survives the rollback
+        CHECK(queryInt(db, "SELECT value FROM meta WHERE key = 'turn'") == before);
+        db.exec("DROP TRIGGER boom");
+    }
+
+    // --- the degrade path: a THROWING band must not fail the turn ----------
+    // Not specified — see the note on bandOrEmpty in loop.cpp — so it is tested
+    // directly rather than trusted.
+    {
+        const TempDbFile worldPath("textworld_band_degrade_tests.db");
+        Db db = openWorld(worldPath.string(), "tests/combat_fixture.sql");
+        db.exec("DELETE FROM player");
+        const TurnResult r = runTurn(db, "look");
+        // The turn still returns its message; the exception does NOT propagate.
+        CHECK(!r.output.empty());
+        CHECK(contains(r.output, "player entity"));
+        CHECK(!contains(r.output, "-- "));  // no band, but no crash either
+    }
+
+    // --- REQ-UI-30: narration and template prose are wrapped ---------------
+    {
+        const TempDbFile worldPath("textworld_band_wrap_tests.db");
+        Db db = openWorld(worldPath.string(), "tests/fixture.sql");
+        termSetWidthOverride(40);
+        const TurnResult r = runTurn(db, "look");
+        for (const std::string& line : splitOnNewline(r.output)) {
+            CHECK(utf8Length(stripSgr(line)) <= 40);
+        }
+        // The room's canon prose is long enough that this is not vacuous.
+        CHECK(splitOnNewline(r.output).size() > 4);
+        termSetWidthOverride(80);
+    }
+}
+
+// Check 22 / REQ-UI-5: the band is printed once at startup too, after the
+// read-only room render and before the first prompt.
+static void testBandStartup() {
+    const TempDbFile worldPath("textworld_band_startup_tests.db");
+    Db db = openWorld(worldPath.string(), "tests/fixture.sql");
+    const std::string out = renderStartup(db);
+
+    // The band is there, and its header names the STARTING room.
+    CHECK(contains(out, "-- stone hall "));
+    CHECK(contains(out, " Exits    north"));
+    CHECK(contains(out, " Objects  lantern"));
+    // Below the room render, not above it (REQ-UI-4's ordering at startup).
+    CHECK(out.find("vaulted hall of grey stone") < out.find("-- stone hall "));
+    // REQ-UI-30: the startup prose is wrapped to the width too.
+    for (const std::string& line : splitOnNewline(out)) {
+        CHECK(utf8Length(stripSgr(line)) <= 80);
+    }
+    // main.cpp stays a single fputs of this string — one band-emitting site.
+    CHECK(!contains(readFileBytes("src/main.cpp"), "composeBand"));
+}
+
+// The `spells` verb: read-only spell inspection that consumes no turn
+// (REQ-UI-37, -38, -39, -39a, -39b).
+static void testSpellsVerb() {
+    const TempDbFile worldPath("textworld_spells_verb_tests.db");
+    Db db = openWorld(worldPath.string(), "tests/combat_fixture.sql");
+
+    // Parsed by the fixed-verb parser as an argument-free verb.
+    {
+        const auto action = parse(db, "spells");
+        CHECK(action.has_value());
+        CHECK(action->verb == Verb::Spells);
+        CHECK(parse(db, "spells now")->verb == Verb::Spells);  // stray arg ignored
+    }
+
+    // Check 26 / REQ-UI-38: known spells only, with element, cooldown, effect.
+    {
+        const TurnResult r = runTurn(db, "spells");
+        CHECK(r.outcome == TurnOutcome::NoTick);
+        CHECK(contains(r.output, "ward"));
+        CHECK(contains(r.output, "stun"));
+        CHECK(contains(r.output, "cooldown: 2"));   // ward
+        CHECK(contains(r.output, "cooldown: 3"));   // stun
+        CHECK(contains(r.output, "element: none"));  // NULL renders as "none"
+        // The catalog is NOT a spoiler list: unlearned spells are absent.
+        for (const char* unlearned : {"fire", "frost", "dispel", "ember", "blast"}) {
+            CHECK(!contains(r.output, unlearned));
+        }
+        // Step 10's wrapper still appends the band, so the player sees the
+        // fight state alongside the rules.
+        CHECK(contains(r.output, "-- cell "));
+    }
+
+    // Gloss completeness: every effect keyword the catalog defines renders a
+    // real sentence, not a bare keyword and not a blank. `stun` is the one this
+    // directly guards — an incomplete table would leave a player who knows it
+    // staring at nothing.
+    {
+        db.exec("INSERT INTO known_spells(entity, spell) "
+                "SELECT 3, spell FROM spell_catalog "
+                "WHERE spell NOT IN (SELECT spell FROM known_spells WHERE entity = 3)");
+        const std::string rules = renderSpellRules(db, 3, kBandPlain);
+        CHECK(queryInt(db, "SELECT COUNT(*) FROM spell_catalog") == 7);
+        for (const char* spell : {"ward", "stun", "fire", "frost", "dispel",
+                                  "ember", "blast"}) {
+            CHECK(contains(rules, spell));
+        }
+        // Each rendered line carries a gloss beyond the keyword itself.
+        int lines = 0;
+        for (const std::string& line : splitOnNewline(rules)) {
+            if (!contains(line, "cooldown: ")) continue;
+            ++lines;
+            const size_t comma = line.rfind(", ");
+            CHECK(comma != std::string::npos);
+            const std::string gloss = line.substr(comma + 2);
+            CHECK(gloss.size() > 12);          // a sentence, not a keyword
+            CHECK(contains(gloss, " "));
+        }
+        CHECK(lines == 7);
+    }
+
+    // Check 26a / REQ-UI-39: GENUINELY no-tick, with a hostile in the room.
+    // Turn cost is not observable from the counter alone — the enemy must also
+    // not have acted.
+    {
+        const TempDbFile p2("textworld_spells_notick_tests.db");
+        Db db2 = openWorld(p2.string(), "tests/combat_fixture.sql");
+        db2.exec("UPDATE location SET container = 2 WHERE entity = 3");
+
+        const int64_t turn0 = queryInt(db2, "SELECT value FROM meta WHERE key = 'turn'");
+        const int64_t events0 = queryInt(db2, "SELECT COUNT(*) FROM events");
+        const int64_t hp0 = queryInt(db2, "SELECT current FROM health WHERE entity = 3");
+        const int64_t strikes0 =
+            queryInt(db2, "SELECT COUNT(*) FROM pending_strike");
+
+        const TurnResult r = runTurn(db2, "spells");
+        CHECK(r.outcome == TurnOutcome::NoTick);
+        CHECK(queryInt(db2, "SELECT value FROM meta WHERE key = 'turn'") == turn0);
+        CHECK(queryInt(db2, "SELECT COUNT(*) FROM events") == events0);
+        CHECK(queryInt(db2, "SELECT current FROM health WHERE entity = 3") == hp0);
+        CHECK(queryInt(db2, "SELECT COUNT(*) FROM pending_strike") == strikes0);
+    }
+
+    // Check 26b, as scoped: every command that resolves INSIDE THE TICK writes
+    // an events row; `spells` is the only SUCCESSFUL path producing output
+    // without one. (The two pre-existing no-tick paths are refusals — the
+    // precedent REQ-UI-39a itself cites, not violations.)
+    {
+        const TempDbFile p3("textworld_spells_bounded_tests.db");
+        Db db3 = openWorld(p3.string(), "tests/combat_fixture.sql");
+        for (const char* line : {"look", "wait", "inventory", "take wand"}) {
+            const int64_t before = queryInt(db3, "SELECT COUNT(*) FROM events");
+            const TurnResult r = runTurn(db3, line);
+            CHECK(r.outcome == TurnOutcome::Ticked);
+            CHECK(queryInt(db3, "SELECT COUNT(*) FROM events") > before);
+        }
+        // REQ-UI-39b is recorded at BOTH sites, so the exception cannot be
+        // cited as precedent by someone reading only one of them.
+        CHECK(contains(readFileBytes("src/loop.cpp"), "MUST NOT GENERALIZE"));
+        CHECK(contains(readFileBytes("src/band.hpp"), "MUST NOT GENERALIZE"));
+    }
+
+    // Verb::Spells must never reach the tick — resolve() throws if it does.
+    {
+        const TempDbFile p4("textworld_spells_routing_tests.db");
+        Db db4 = openWorld(p4.string(), "tests/combat_fixture.sql");
+        bool threw = false;
+        try {
+            resolve(db4, Action{Verb::Spells}, 3);
+        } catch (const std::logic_error&) {
+            threw = true;
+        }
+        CHECK(threw);
+    }
+
+    // The model-facing verb list and the tool enum are ELEMENT-WISE EQUAL, so
+    // the two cannot drift.
+    {
+        const std::vector<std::string> words = {
+            "look", "go", "take", "drop", "inventory", "wait",
+            "quit", "attack", "cast", "read", "spells"};
+        // Both lists live in nlresolve.cpp; compare them at the source level,
+        // since a word present in one and absent from the other is a silent
+        // half-wiring rather than a compile error. (The schema's runtime shape
+        // is asserted in testNlResolveRequestBody.)
+        const std::string src = readFileBytes("src/nlresolve.cpp");
+        const size_t enumStart = src.find("{\"enum\", json::array({");
+        CHECK(enumStart != std::string::npos);
+        const std::string enumBlock =
+            src.substr(enumStart, src.find("})}", enumStart) - enumStart);
+        for (const std::string& w : words) {
+            CHECK(contains(src, "word == \"" + w + "\""));  // verbFromWord
+            CHECK(contains(enumBlock, "\"" + w + "\""));    // the tool enum
+        }
+        // Nothing beyond the eleven: verbFromWord has exactly this many arms.
+        size_t arms = 0;
+        for (size_t i = src.find("word == \""); i != std::string::npos;
+             i = src.find("word == \"", i + 1)) {
+            ++arms;
+        }
+        CHECK(arms == words.size());
+        // And the prompt describes all eleven, so the schema can never accept a
+        // value the prompt never mentions.
+        const std::string p = kResolveSystemPrompt;
+        CHECK(contains(p, "exactly eleven verbs"));
+        CHECK(!contains(p, "exactly ten verbs"));
+        for (const std::string& w : words) CHECK(contains(p, "\n- " + w + ":"));
+    }
+}
+
+// Group G: resistance discovery, derived from the events transcript
+// (REQ-UI-41..-46). Also the gate on whether group G ships at all — checks 31
+// and 32 are what REQ-UI-45/-46 turn on.
+static void testBandResistance() {
+    // --- checks 31 & 32: no schema movement, no shadow store ---------------
+    // If either of these fails, group G does not ship: REQ-UI-45 says defer
+    // rather than bump, because world.cpp's gate has no migration path and a
+    // bump makes every existing world file unopenable.
+    {
+        CHECK(SCHEMA_VERSION == 5);  // unchanged by this feature
+        const TempDbFile p("textworld_resist_schema_tests.db");
+        Db db = openWorld(p.string(), "tests/combat_fixture.sql");
+        std::vector<std::string> tables;
+        {
+            Stmt s = db.prepare(
+                "SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name");
+            while (s.step()) tables.push_back(s.colText(0));
+        }
+        // The pre-feature table list, verbatim. A shadow discovery table would
+        // satisfy every behavioural check below while violating REQ-UI-46;
+        // this is what makes that requirement falsifiable.
+        const std::vector<std::string> expected = {
+            "barrier", "bestiary", "cooldowns", "description", "drop_table",
+            "entities", "events", "exits", "grimoire", "health", "hostile",
+            "known_spells", "location", "meta", "name", "pending_strike",
+            "player", "portable", "resistance", "room", "spell_catalog",
+            "status_effects"};
+        CHECK(tables == expected);
+        // And no DDL was added to the band or the mutation helper.
+        CHECK(!contains(readFileBytes("src/band.cpp"), "CREATE TABLE"));
+        CHECK(!contains(readFileBytes("src/mutations.cpp"), "CREATE TABLE"));
+    }
+
+    const TempDbFile worldPath("textworld_resist_tests.db");
+    {
+        Db db = openWorld(worldPath.string(), "tests/combat_fixture.sql");
+        db.exec("INSERT INTO known_spells(entity, spell) VALUES (3,'fire'),(3,'frost')");
+        db.exec("UPDATE location SET container = 2 WHERE entity = 3");
+
+        // Check 27: a fresh world facing an archetype shows NOTHING. The
+        // resistance table is never surfaced wholesale (REQ-UI-42).
+        CHECK(discoveredResistances(db, "goblin_grunt").empty());
+        CHECK(!contains(composeBand(db, 200, kBandPlain), "x1"));
+        CHECK(!contains(composeBand(db, 200, kBandPlain), "x2"));
+
+        // Cast fire at the goblin grunt.
+        const TurnResult r = runTurn(db, "cast fire");
+        CHECK(r.outcome == TurnOutcome::Ticked);
+
+        // --- step 13's gate: the tag is written, and ONLY here --------------
+        {
+            Stmt s = db.prepare(
+                "SELECT detail FROM events WHERE verb = 'burned' "
+                "ORDER BY id DESC LIMIT 1");
+            CHECK(s.step());
+            CHECK(s.colText(0) == "goblin_grunt|fire");
+        }
+        // The other five damage verbs are not resistance-scaled and stay NULL.
+        CHECK(queryInt(db,
+                       "SELECT COUNT(*) FROM events WHERE detail IS NOT NULL "
+                       "AND verb IN ('attacked','aoe','dot','struck','chip')") == 0);
+
+        // --- the shield test: the tag reaches the BAND but never the MODEL --
+        // The regression guard for handing a raw archetype tag to the narrator,
+        // which would invite it into the prose as a noun.
+        {
+            const int64_t turn =
+                queryInt(db, "SELECT value FROM meta WHERE key = 'turn'");
+            const TurnFacts facts = buildFacts(db, turn);
+            CHECK(!contains(facts.payload, "goblin_grunt"));
+            CHECK(!contains(facts.payload, "goblin_grunt|fire"));
+            CHECK(!contains(facts.payload, "|fire"));
+        }
+
+        // Check 28 & 34: fire is now KNOWN. goblin_grunt has no resistance row,
+        // so this is a discovered ABSENCE — rendered as an explicit x1, which
+        // must read differently from an element never tried (REQ-UI-42a).
+        {
+            const std::vector<std::string> facts =
+                discoveredResistances(db, "goblin_grunt");
+            CHECK(facts.size() == 1);
+            CHECK(facts[0] == "fire x1");
+            const std::string band = composeBand(db, 200, kBandPlain);
+            CHECK(contains(band, "fire x1"));
+            CHECK(!contains(band, "frost"));  // untested stays hidden
+        }
+
+        // A real (non-neutral) resistance renders its ratio. The rime-touched
+        // goblin resists frost 1/2 and is weak to fire 2/1.
+        {
+            db.exec("UPDATE location SET container = 6 WHERE entity = 3");
+            db.exec("DELETE FROM cooldowns WHERE entity = 3");
+            CHECK(runTurn(db, "cast frost").outcome == TurnOutcome::Ticked);
+            const std::vector<std::string> facts =
+                discoveredResistances(db, "rime_touched");
+            CHECK(facts.size() == 1);
+            CHECK(facts[0] == "frost x1/2");
+            CHECK(contains(composeBand(db, 200, kBandPlain), "frost x1/2"));
+            // Its FIRE resistance is still hidden — discovery is per element.
+            CHECK(!contains(composeBand(db, 200, kBandPlain), "fire x2"));
+        }
+
+        // Wildcard regression: a LIKE ?||'|%' filter would treat the '_' in
+        // 'goblin_grunt' as a single-character wildcard and credit this row to
+        // it. The fixtures have only one underscore-bearing archetype, so
+        // without this test the bug would ship invisibly.
+        {
+            db.exec("INSERT INTO events(turn, actor, verb, subject, object, detail) "
+                    "VALUES (999, 3, 'burned', 7, 1, 'goblinXgrunt|fire')");
+            const std::vector<std::string> facts =
+                discoveredResistances(db, "goblin_grunt");
+            CHECK(facts.size() == 1);          // still only its own fire
+            CHECK(facts[0] == "fire x1");
+            db.exec("DELETE FROM events WHERE turn = 999");
+        }
+
+        // Check 29: discovery SURVIVES DEFEAT, which deletes the hostile row and
+        // with it the entity→archetype link. It is keyed to the archetype, so a
+        // NEW instance of the same archetype is already known.
+        {
+            db.exec("DELETE FROM hostile WHERE entity = 7");
+            db.exec("DELETE FROM location WHERE entity = 7");
+            db.exec("INSERT INTO entities(id) VALUES (77)");
+            db.exec("INSERT INTO hostile(entity, archetype, chip, telegraph_period) "
+                    "VALUES (77, 'goblin_grunt', 1, 0)");
+            db.exec("INSERT INTO health(entity, current, max) VALUES (77, 8, 8)");
+            db.exec("INSERT INTO name(entity, value) VALUES (77, 'goblin grunt')");
+            db.exec("INSERT INTO location(entity, container) VALUES (77, 2)");
+            db.exec("UPDATE location SET container = 2 WHERE entity = 3");
+            CHECK(contains(composeBand(db, 200, kBandPlain), "fire x1"));
+        }
+    }
+
+    // Check 30: discovery PERSISTS ACROSS RESTARTS — free, because events is on
+    // disk and nothing is cached in the process.
+    {
+        Db db = openWorld(worldPath.string(), "tests/combat_fixture.sql");
+        const std::vector<std::string> facts =
+            discoveredResistances(db, "goblin_grunt");
+        CHECK(facts.size() == 1);
+        CHECK(facts[0] == "fire x1");
+        CHECK(discoveredResistances(db, "rime_touched").size() == 1);
+
+        // Check 33: the transcript IS the source of truth. Delete the fight's
+        // events and the discovery is GONE. Survival would prove state is being
+        // stored somewhere other than the transcript (REQ-UI-46).
+        db.exec("DELETE FROM events WHERE verb IN ('burned','froze')");
+        CHECK(discoveredResistances(db, "goblin_grunt").empty());
+        CHECK(discoveredResistances(db, "rime_touched").empty());
+    }
+
+    // Check 35: a LEGACY save — pre-feature damage events carry NULL details,
+    // so such a world legitimately starts with nothing discovered and must not
+    // crash on the nulls (REQ-UI-44a). No backfill is attempted, and none is
+    // possible: defeat already destroyed the entity→archetype link.
+    {
+        const TempDbFile legacyPath("textworld_resist_legacy_tests.db");
+        Db db = openWorld(legacyPath.string(), "tests/combat_fixture.sql");
+        db.exec("INSERT INTO events(turn, actor, verb, subject, object, detail) "
+                "VALUES (1, 3, 'burned', 7, 4, NULL), "
+                "       (1, 3, 'froze',  7, 4, NULL), "
+                "       (2, 3, 'attacked', 7, 4, NULL)");
+        CHECK(discoveredResistances(db, "goblin_grunt").empty());
+        db.exec("UPDATE location SET container = 2 WHERE entity = 3");
+        const std::string band = composeBand(db, 200, kBandPlain);
+        CHECK(contains(band, "goblin grunt"));  // composed fine, no crash
+        CHECK(!contains(band, "x1"));
+
+        // A malformed detail (no separator, or an empty element) is skipped
+        // rather than crashing or producing a blank fact.
+        db.exec("INSERT INTO events(turn, actor, verb, subject, object, detail) "
+                "VALUES (3, 3, 'burned', 7, 4, 'nobar'), "
+                "       (3, 3, 'burned', 7, 4, 'goblin_grunt|')");
+        CHECK(discoveredResistances(db, "goblin_grunt").empty());
+    }
+}
+
+// Check 8 / REQ-UI-25: color is NEVER applied inside narration. Only
+// engine-composed text is styled, and no entity name is matched against
+// narration output.
+static void testBandProseUnstyled() {
+    const ScopedEnvVar termGuard("TERM");
+    const ScopedEnvVar forceGuard("CLICOLOR_FORCE");
+    setenv("TERM", "xterm", 1);
+    setenv("CLICOLOR_FORCE", "1", 1);
+    termRefreshStyle();
+    CHECK(currentStyle().color);  // color really is on for this test
+
+    const TempDbFile worldPath("textworld_prose_unstyled_tests.db");
+    Db db = openWorld(worldPath.string(), "tests/fixture.sql");
+    const TurnResult r = runTurn(db, "look");
+
+    // The band begins at the header rule; everything above it is prose.
+    const size_t bandStart = r.output.find("-- ");
+    CHECK(bandStart != std::string::npos);
+    const std::string narration = r.output.substr(0, bandStart);
+    // The narration mentions entity names ("lantern") and carries NO escape
+    // byte — the band TU is the only styling site, and it never sees prose.
+    CHECK(contains(narration, "lantern"));
+    CHECK(narration.find('\x1b') == std::string::npos);
+    // The band below it IS styled, so the assertion above is not vacuous.
+    CHECK(r.output.substr(bandStart).find('\x1b') != std::string::npos);
+
+    // Structural, not incidental: the band never receives narration text.
+    // composeBand takes a Db and a width, and nothing else.
+    CHECK(contains(readFileBytes("src/band.hpp"), "std::string composeBand(Db& db, int width)"));
+
+    setenv("TERM", "dumb", 1);
+    unsetenv("CLICOLOR_FORCE");
+    termRefreshStyle();  // restore the suite's pinned plain style
+}
+
+// REQ-UI-47: the named non-goals stayed out of scope.
+static void testBandNonGoals() {
+    std::string src;
+    for (const char* f : {"src/term.cpp", "src/band.cpp", "src/loop.cpp",
+                          "src/main.cpp"}) {
+        src += readFileBytes(f);
+    }
+    CHECK(!contains(src, "?1049"));    // no alternate screen
+    CHECK(!contains(src, "DECSTBM"));
+    CHECK(!contains(src, "\x1b[r"));   // no scroll region
+    CHECK(!contains(src, "readline"));  // no line editing / history
+    CHECK(!contains(src, "SIGWINCH"));
+    // No third-party UI dependency was added.
+    const std::string cmake = readFileBytes("CMakeLists.txt");
+    CHECK(!contains(cmake, "ncurses"));
+    CHECK(!contains(cmake, "termbox"));
+    CHECK(!contains(cmake, "ftxui"));
+    CHECK(contains(cmake, "src/term.cpp"));
+    CHECK(contains(cmake, "src/band.cpp"));
+}
 int main() {
     // libcurl init/shutdown for the whole run (REQ-LAT-7), ABOVE the live
     // smokes: they use the production transports and must run with libcurl
@@ -5998,6 +6544,32 @@ int main() {
     const ScopedEnvVar profileGuard("TEXTWORLD_PROFILE");
     unsetenv("TEXTWORLD_PROFILE");
     profileRefreshEnabled();
+
+
+    // Pin the band width for the whole suite (REQ-UI-26's chain would otherwise
+    // measure the developer's real terminal, so a piped run and a tty run would
+    // lay out differently and assert differently). 80 is the same value the
+    // detection chain falls back to when nothing answers.
+    termSetWidthOverride(80);
+
+    // Same discipline for COLOR (REQ-UI-20): a developer shell — or a CI runner
+    // — with CLICOLOR_FORCE set would otherwise style every runTurn-based
+    // assertion's band and break substring matches on entity names. TERM=dumb
+    // is the one gate that suppresses ALL SGR, bold included, so the suite's
+    // runTurn output is plain text. The gate's own truth table is exercised by
+    // testTermColorGate, which drives styleFor() directly, and the band's colors
+    // by testBandColor, which passes an explicit TermStyle — neither depends on
+    // the process style. currentStyle() caches, so the vars must be set AND the
+    // cache refreshed.
+    const ScopedEnvVar noColorGuard("NO_COLOR");
+    const ScopedEnvVar clicolorGuard("CLICOLOR");
+    const ScopedEnvVar clicolorForceGuard("CLICOLOR_FORCE");
+    const ScopedEnvVar termGuard("TERM");
+    unsetenv("NO_COLOR");
+    unsetenv("CLICOLOR");
+    unsetenv("CLICOLOR_FORCE");
+    setenv("TERM", "dumb", 1);
+    termRefreshStyle();
 
     CHECK(1 + 1 == 2);
 
@@ -6069,6 +6641,12 @@ int main() {
     testBandContent();
     testBandGoldens();
     testBandColor();
+    testBandWiring();
+    testBandStartup();
+    testSpellsVerb();
+    testBandResistance();
+    testBandProseUnstyled();
+    testBandNonGoals();
 
     std::printf("%d checks, %d failures\n", g_checks, g_failures);
     return g_failures == 0 ? 0 : 1;
