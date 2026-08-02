@@ -24,6 +24,8 @@ The **engine foundation**, the **AI prose renderer**, the **AI action resolver**
 
 **Turn latency** is now measurable, and a little cheaper. All three AI roles share one persistent libcurl handle owned by the process, so only the first call of a session pays DNS, TCP, and TLS — every later call, of any role and across idle gaps, reuses the connection. Input resolution runs on a fast model while narration and generation keep the prose model. Gated profiling (`TEXTWORLD_PROFILE`) reports per-phase wall-clock and a per-call setup-vs-TTFB split, which is how the honest accounting below got made: a turn is ~99.9% model latency, so connection reuse buys back well under 1% of it. It is free and permanent; the levers that would actually move a turn — streaming narration, pre-generating neighbor rooms — are deferred, and profiling now exists to measure them.
 
+**The status band** is the engine's answer to "where am I and what is happening": an ANSI-colored block printed above the prompt on *every* turn — including turns the world declines — showing the room, its exits, the objects in it, every living hostile with its HP, telegraphed strikes and active states, and your own HP and spell readiness. It is composed once, in the turn loop, from read-only queries, so the AI and template paths get identical bytes and no model-supplied number can ever reach it. Prose is wrapped to the terminal width, color follows the `NO_COLOR` / `CLICOLOR` conventions and vanishes entirely when output is piped, and nothing is ever truncated to fit — a narrow terminal makes the band taller, never quieter. See [The status band](#the-status-band) below.
+
 There are no NPCs and no dialogue yet, and the setting is static — a hand-authored seed, not a live storyteller evolving the world's facts. The fixed-verb parser is no longer a throwaway harness — it is the **permanent deterministic fallback** for input, the input-side analog of the template renderer: it handles every line when the resolver is disabled, declines, or fails.
 
 ## Building
@@ -59,10 +61,11 @@ On first launch it creates `world.db` and seeds the starting world: a dormitory 
 | `attack` | Strike the hostile in the room (always available, fixed damage) |
 | `cast <spell>` | Cast a known spell that is off cooldown (e.g. `cast ward`) |
 | `read <grimoire>` | Study a dropped grimoire to learn its spell, permanently |
+| `spells` | List what your known spells do — element, cooldown, effect. Costs no turn |
 | `wait` | Pass time |
 | `quit` | Exit the game |
 
-Every command except `quit` consumes a turn — including failed attempts the world understands, like walking into a wall.
+Every command except `quit` and `spells` consumes a turn — including failed attempts the world understands, like walking into a wall. `spells` is reference information about the rules rather than an action in the world, so checking it mid-fight is free: the turn counter does not move and no enemy acts. It lists only the spells you have actually learned; the catalog is not a spoiler list.
 
 With AI enabled (see below), you can type these as natural phrasings too — `pick up the candle`, `head north`, `grab the key`, `swing at the goblin`, `burn it` — and the resolver lowers them to the actions above. Anything it can't map falls through to the fixed verbs, and a line neither can resolve is declined without consuming a turn.
 
@@ -118,6 +121,37 @@ A defeated enemy **drops a grimoire**; `read` it to add its spell to your book �
 
 The shipped world hand-places one goblin so combat is exercisable immediately, and the **architect grows the rest**. A `bestiary` catalog (seed data, like the rooms) is the mold every enemy is cast from: when the architect generates a room it may place at most one enemy, **selecting** an archetype from an engine-computed eligible menu — the model sees only each archetype's short blurb and picks a costume; the engine mints every number by copying the catalog. The menu is gated so the economy can't deadlock (only locks you can already solve, or easy foes that teach a key you lack), seeded by a bootstrap rule (the first spawn is basic-soluble and drops a starter spell), and shaped by an **invasion front**: rooms near the breached core are contested, the far edges are safe. With AI off or on any generation failure, no enemy is placed — the same silent boundary as room generation.
 
+### The status band
+
+Every turn ends with a band printed directly above the prompt:
+
+```
+-- corridor -------------------------------------------------
+ Exits    east, south, up
+ Objects  key
+ Enemy    goblin grunt  HP: 8/8  [WINDING UP]  slow 1
+ You      HP: 11/12  Stun: ready  Ward: 2
+```
+
+Rows appear only when they have content, so an empty room collapses to a header and your HP. Every number in it is engine-authored and read straight from the world — the model never supplies one, and the band never sees narration text.
+
+`[WINDING UP]` means that enemy has a heavy blow landing next turn: strike it down, stun it, or raise a ward. Enemy and player states show as kind plus **turns remaining** (`slow 1`, `dot 2`, `ward 1`) — duration is what you can act on. Spell readiness is either `ready` or the number of turns left.
+
+Once you have hit an archetype with an element, that archetype's resistance to it is permanently known and shown on its row from then on — `fire x1/2` for a resistance, `fire x2` for a weakness, `fire x1` for an element it simply does not resist. Untested elements show nothing; discovery is the mechanic. It survives the enemy's death and reopening the world, because it is derived from the event transcript rather than stored anywhere.
+
+**Color** uses the basic 16 ANSI colors only, so it resolves through your terminal theme, and it is suppressed by any of the usual signals:
+
+| Variable | Effect |
+|---|---|
+| `NO_COLOR` (set, non-empty) | No color. Bold survives, so telegraphs stay distinct |
+| `CLICOLOR_FORCE` (set, non-`0`) | Color even when output is not a terminal |
+| `CLICOLOR=0` | No color |
+| `TERM=dumb` | No escape sequences at all, bold included |
+
+Piping or redirecting output emits no escape bytes of any kind, so `./build/textworld > log.txt` is clean. Every colored fact is also carried by its text, so nothing is lost without color.
+
+**Width** comes from `ioctl(TIOCGWINSZ)` on stdout, falling back to `COLUMNS`, then to 80, re-checked each turn — resize is picked up on the next turn. Long rows wrap onto continuation lines aligned to the content column; the band never truncates or elides, and never drops an exit, object, or status to fit.
+
 ### World files
 
 - **Reset:** delete `world.db` and relaunch.
@@ -141,7 +175,7 @@ TEXTWORLD_AI_LIVE_TEST=1 ANTHROPIC_API_KEY=sk-ant-... ./build/tests
 ## Project layout
 
 ```
-src/        engine sources (built into the twcore static library); prose.cpp is the AI renderer, nlresolve.cpp the AI input resolver, architect.cpp the AI world generator, combat.cpp the deterministic combat system, aihttp.cpp the shared persistent-connection HTTP client and per-role model rule, profile.cpp the gated turn profiling
+src/        engine sources (built into the twcore static library); prose.cpp is the AI renderer, nlresolve.cpp the AI input resolver, architect.cpp the AI world generator, combat.cpp the deterministic combat system, band.cpp the status band and term.cpp its terminal services (color gating, width detection, wrapping), aihttp.cpp the shared persistent-connection HTTP client and per-role model rule, profile.cpp the gated turn profiling
 tests/      test suite (hand-rolled micro-harness, no framework)
 seed/       base.sql — the hand-authored starting world and bestiary catalog; setting.txt — the freeform setting (including the invasion premise) that guides world generation
 vendor/     SQLite and nlohmann/json amalgamations
