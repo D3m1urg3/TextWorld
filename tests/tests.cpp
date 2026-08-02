@@ -15,6 +15,7 @@
 #include "action.hpp"
 #include "aihttp.hpp"
 #include "architect.hpp"
+#include "band.hpp"
 #include "combat.hpp"
 #include "db.hpp"
 #include "loop.hpp"
@@ -5383,6 +5384,584 @@ static void testTermWrap() {
     CHECK(wrapProse("one two", 0) == "one two");
 }
 
+// --- the status band (src/band.cpp) ----------------------------------------
+
+// Color fully suppressed / fully forced. The band tests drive these explicitly
+// rather than the process style, so they neither depend on nor disturb the
+// developer's terminal.
+static const TermStyle kBandPlain{false, false};
+static const TermStyle kBandColor{true, true};
+
+static std::vector<std::string> splitOnNewline(const std::string& s) {
+    std::vector<std::string> lines;
+    std::string cur;
+    for (const char c : s) {
+        if (c == '\n') {
+            lines.push_back(cur);
+            cur.clear();
+        } else {
+            cur += c;
+        }
+    }
+    if (!cur.empty()) lines.push_back(cur);
+    return lines;
+}
+
+// The band's frame: layout, hanging indent, ASCII-only rules, conditional rows.
+// Pure — no database touches this test (REQ-UI-8, -9, -29, -33, -33a, -33b).
+static void testBandLayout() {
+    // A synthetic row set with a long exit list and many objects — the shape
+    // check 11 names. Every word fits the 10-column content field at width 20,
+    // so nothing here relies on the over-long-word overflow case.
+    auto listRow = [](const char* label, const std::vector<std::string>& items) {
+        BandRow row{label, {}};
+        for (size_t i = 0; i < items.size(); ++i) {
+            row.spans.push_back({items[i], Color::None, false,
+                                 i + 1 == items.size() ? "" : ", "});
+        }
+        return row;
+    };
+    const std::vector<BandRow> rows = {
+        listRow("Exits", {"north", "south", "east", "west", "up", "down"}),
+        listRow("Objects",
+                {"lantern", "key", "rope", "flask", "chalk", "coin", "map"}),
+        BandRow{"Enemy",
+                {{"goblin", Color::None, false, "  "},
+                 {"HP: 6/9", Color::None, false, "  "},
+                 {"dot 2", Color::None, false, ""}}},
+        BandRow{"You", {{"HP: 11/12", Color::None, false, ""}}},
+    };
+
+    for (const int width : {20, 40, 80, 200}) {
+        const std::string band = layoutBand("stone hall", rows, width, kBandPlain);
+        const std::vector<std::string> lines = splitOnNewline(band);
+        CHECK(!lines.empty());
+        for (const std::string& line : lines) {
+            // Check 11: no emitted line exceeds the width, at any width.
+            CHECK(utf8Length(line) <= static_cast<size_t>(width));
+            // Check 12: every framing byte is ASCII (REQ-UI-29) — no box-drawing
+            // and no middle dot, both East Asian Ambiguous.
+            for (const char c : line) CHECK(static_cast<unsigned char>(c) < 0x80);
+        }
+
+        // Check 11c: continuation lines are indented to the row's content
+        // column (11, 1-based), not to column 0.
+        for (const std::string& line : lines) {
+            if (line.rfind("          ", 0) == 0) {  // 10 leading spaces
+                CHECK(line.size() > static_cast<size_t>(kBandIndent));
+                CHECK(line[kBandIndent] != ' ');
+            }
+        }
+
+        // Check 11b in frame form: the same facts survive every width. Nothing
+        // is truncated or elided (REQ-UI-33a).
+        const std::string flat = band;
+        for (const char* fact : {"north", "down", "lantern", "map", "HP: 6/9",
+                                 "HP: 11/12", "dot 2"}) {
+            CHECK(contains(flat, fact));
+        }
+    }
+
+    // At width 40 the object list must actually wrap, or the indent assertions
+    // above are vacuous.
+    {
+        const std::string band = layoutBand("stone hall", rows, 40, kBandPlain);
+        bool sawContinuation = false;
+        for (const std::string& line : splitOnNewline(band)) {
+            if (line.rfind("          ", 0) == 0) sawContinuation = true;
+        }
+        CHECK(sawContinuation);
+    }
+
+    // Header shape: "-- <name> " then dashes to the width, all ASCII.
+    {
+        const std::string band = layoutBand("stone hall", rows, 60, kBandPlain);
+        const std::vector<std::string> lines = splitOnNewline(band);
+        CHECK(lines[0] == "-- stone hall ----------------------------------------------");
+        CHECK(lines[0].size() == 60);
+    }
+
+    // Check 24 (frame half): an empty room name renders the rule with no title
+    // and does not throw (REQ-UI-9).
+    {
+        const std::string band = layoutBand("", rows, 40, kBandPlain);
+        const std::vector<std::string> lines = splitOnNewline(band);
+        CHECK(lines[0] == std::string(40, '-'));
+    }
+
+    // Check 17 (frame half): a row with no content emits nothing at all — the
+    // band's height varies with what is present (REQ-UI-8).
+    {
+        const std::vector<BandRow> sparse = {
+            BandRow{"Exits", {}},
+            BandRow{"Objects", {{"", Color::None, false, ""}}},
+            BandRow{"You", {{"HP: 1/1", Color::None, false, ""}}},
+        };
+        const std::string band = layoutBand("cell", sparse, 40, kBandPlain);
+        CHECK(!contains(band, "Exits"));
+        CHECK(!contains(band, "Objects"));
+        CHECK(contains(band, "You      HP: 1/1"));
+        CHECK(splitOnNewline(band).size() == 2);  // header + one row
+    }
+
+    // REQ-UI-33b: when the name leaves no room for even one dash, the RULES are
+    // dropped — never the name. Every byte of the name survives.
+    {
+        const std::string longName = "the impossibly long vaulted hall of echoes";
+        const std::string band = layoutBand(longName, {}, 20, kBandPlain);
+        for (const std::string& line : splitOnNewline(band)) {
+            CHECK(utf8Length(line) <= 20);
+        }
+        std::string joined;
+        for (const std::string& line : splitOnNewline(band)) joined += line + " ";
+        for (const char* word : {"impossibly", "vaulted", "echoes"}) {
+            CHECK(contains(joined, word));
+        }
+        CHECK(!contains(band, "--"));  // the rule is what gave way
+    }
+
+    // The clamp floor applies inside layout too, so a width below 20 cannot
+    // produce a zero-or-negative content field (REQ-UI-27).
+    {
+        const std::string band = layoutBand("cell", rows, 5, kBandPlain);
+        CHECK(!band.empty());
+        for (const std::string& line : splitOnNewline(band)) {
+            CHECK(utf8Length(line) <= static_cast<size_t>(kMinWidth));
+        }
+    }
+}
+
+// The band's content: rooms, exits, objects, hostiles, the player row, and
+// combat legibility — all with color disabled, so a layout bug can never be
+// confused with a color bug (REQ-UI-9..-18, -34, -35, -36, -40).
+static void testBandContent() {
+    // --- steps 5: room name, exits, objects (fixture.sql) ---
+    {
+        const TempDbFile worldPath("textworld_band_content_tests.db");
+        Db db = openWorld(worldPath.string(), "tests/fixture.sql");
+
+        const std::string band = composeBand(db, 60, kBandPlain);
+        CHECK(contains(band, "-- stone hall "));
+        CHECK(contains(band, " Exits    north"));
+        CHECK(contains(band, " Objects  lantern"));
+
+        // REQ-UI-14: the band repeats the room's NAME, never its description.
+        CHECK(!contains(band, "vaulted hall of grey stone"));
+        CHECK(!contains(band, "flagstones"));
+
+        // The Exits and Objects lists match the room block's exactly.
+        const std::string block = renderRoomOf(db, 3);
+        CHECK(contains(block, "Exits: north."));
+        CHECK(contains(block, "You see: lantern."));
+
+        // Check 17: moving to a room with neither drops BOTH rows entirely.
+        db.exec("DELETE FROM location WHERE entity = 4");   // the lantern
+        db.exec("DELETE FROM exits WHERE room = 1");
+        {
+            const std::string bare = composeBand(db, 60, kBandPlain);
+            CHECK(!contains(bare, "Exits"));
+            CHECK(!contains(bare, "Objects"));
+            CHECK(contains(bare, "-- stone hall "));
+        }
+
+        // Check 24: a room whose name row is deleted renders without throwing —
+        // the rule appears with no title (REQ-UI-9).
+        db.exec("DELETE FROM name WHERE entity = 1");
+        {
+            const std::string nameless = composeBand(db, 40, kBandPlain);
+            CHECK(splitOnNewline(nameless)[0] == std::string(40, '-'));
+        }
+    }
+
+    // --- check 18: latent exits follow the room block's visibility gate ---
+    {
+        const TempDbFile worldPath("textworld_band_latent_tests.db");
+        Db db = openWorld(worldPath.string(), "tests/fixture.sql");
+        db.exec("INSERT INTO exits(room, direction, dest) VALUES (1, 'up', NULL)");
+
+        const ScopedEnvVar keyGuard("ANTHROPIC_API_KEY");
+        const ScopedEnvVar aiGuard("TEXTWORLD_AI");
+
+        // Architect ENABLED: the latent exit lists, and is textually
+        // INDISTINGUISHABLE from the realized one — no marker (REQ-UI-10).
+        setenv("ANTHROPIC_API_KEY", "test-key-never-used", 1);
+        unsetenv("TEXTWORLD_AI");
+        {
+            const std::string band = composeBand(db, 60, kBandPlain);
+            CHECK(contains(band, "north, up"));
+        }
+
+        // Architect DISABLED: the latent exit is absent.
+        unsetenv("ANTHROPIC_API_KEY");
+        setenv("TEXTWORLD_AI", "0", 1);
+        {
+            const std::string band = composeBand(db, 60, kBandPlain);
+            CHECK(contains(band, " Exits    north"));
+            CHECK(!contains(band, "up"));
+        }
+    }
+
+    // --- steps 6, 7, 8: hostiles, the player row, combat legibility ---
+    {
+        const TempDbFile worldPath("textworld_band_combat_tests.db");
+        Db db = openWorld(worldPath.string(), "tests/combat_fixture.sql");
+
+        // Check 19 / REQ-UI-15, -16: out of combat (the cell) the player row is
+        // COMPACT — HP is present, spell readiness is not.
+        {
+            const std::string band = composeBand(db, 60, kBandPlain);
+            CHECK(contains(band, " You      HP: 12/12"));
+            CHECK(!contains(band, "Ward:"));
+            CHECK(!contains(band, "Stun:"));
+            CHECK(!contains(band, "Enemy"));
+        }
+
+        // Move into the corridor: one living hostile, so one Enemy row with its
+        // current and maximum HP (check 12 / REQ-UI-12).
+        db.exec("UPDATE location SET container = 2 WHERE entity = 3");
+        {
+            const std::string band = composeBand(db, 60, kBandPlain);
+            CHECK(contains(band, " Enemy    goblin grunt  HP: 8/8"));
+            // Check 19 / REQ-UI-17: in combat, HP *and* readiness.
+            CHECK(contains(band, " You      HP: 12/12"));
+            CHECK(contains(band, "Stun: ready"));
+            CHECK(contains(band, "Ward: ready"));
+
+            // Check 20 — THE ORACLE. Every readiness value in the band equals
+            // what combatStatusLine() reports for the same state. This is the
+            // payoff of keeping that helper alive (REQ-UI-6a): it catches a
+            // readiness reimplementation drifting from the original.
+            const std::string oracle = combatStatusLine(db, 3);
+            CHECK(!oracle.empty());
+            size_t pos = 0;
+            int pairs = 0;
+            while ((pos = oracle.find(" · ", pos)) != std::string::npos) {
+                pos += std::string(" · ").size();
+                const size_t end = oracle.find(" · ", pos);
+                const std::string pair = oracle.substr(
+                    pos, end == std::string::npos ? std::string::npos : end - pos);
+                const std::string trimmed =
+                    pair.empty() || pair.back() != '\n' ? pair
+                                                        : pair.substr(0, pair.size() - 1);
+                CHECK(contains(band, trimmed));  // e.g. "Ward: ready"
+                ++pairs;
+            }
+            CHECK(pairs == 2);
+        }
+
+        // A cooling spell shows the integer turns remaining, not "ready".
+        {
+            const int64_t now =
+                queryInt(db, "SELECT value FROM meta WHERE key = 'turn'");
+            const std::string sql =
+                "INSERT INTO cooldowns(entity, spell, ready_turn) VALUES "
+                "(3, 'ward', " + std::to_string(now + 3) + ")";
+            db.exec(sql.c_str());
+            const std::string band = composeBand(db, 60, kBandPlain);
+            CHECK(contains(band, "Ward: 3"));
+            CHECK(contains(band, "Stun: ready"));
+            // The oracle again, on the cooling side of the branch.
+            CHECK(contains(combatStatusLine(db, 3), "Ward: 3"));
+            db.exec("DELETE FROM cooldowns WHERE entity = 3");
+        }
+
+        // Check 25 / REQ-UI-34: the telegraph marker appears only when a
+        // pending_strike row exists.
+        {
+            CHECK(!contains(composeBand(db, 60, kBandPlain), "[WINDING UP]"));
+            db.exec("INSERT INTO pending_strike(entity, damage, element) "
+                    "VALUES (7, 5, NULL)");
+            CHECK(contains(composeBand(db, 60, kBandPlain), "[WINDING UP]"));
+            db.exec("DELETE FROM pending_strike WHERE entity = 7");
+        }
+
+        // Check 26c / REQ-UI-35: kind plus REMAINING turns, never magnitude.
+        // The magnitudes here (9, 6) appear nowhere else in the row, so their
+        // digits leaking in would be unambiguous.
+        {
+            db.exec("INSERT INTO status_effects(entity, kind, magnitude, remaining) "
+                    "VALUES (7, 'dot', 9, 2), (7, 'slow', 6, 1)");
+            const std::string band = composeBand(db, 200, kBandPlain);
+            std::string enemyLine;
+            for (const std::string& line : splitOnNewline(band)) {
+                if (line.rfind(" Enemy", 0) == 0) enemyLine = line;
+            }
+            CHECK(contains(enemyLine, "dot 2"));
+            CHECK(contains(enemyLine, "slow 1"));
+            CHECK(!contains(enemyLine, "9"));  // magnitude, deliberately absent
+            CHECK(!contains(enemyLine, "6"));
+            db.exec("DELETE FROM status_effects WHERE entity = 7");
+        }
+
+        // REQ-UI-36: the player's own states, notably a held ward.
+        {
+            db.exec("INSERT INTO status_effects(entity, kind, magnitude, remaining) "
+                    "VALUES (3, 'ward', 0, 1)");
+            const std::string band = composeBand(db, 80, kBandPlain);
+            std::string youLine;
+            for (const std::string& line : splitOnNewline(band)) {
+                if (line.rfind(" You", 0) == 0) youLine = line;
+            }
+            CHECK(contains(youLine, "ward 1"));
+            db.exec("DELETE FROM status_effects WHERE entity = 3");
+        }
+
+        // A hostile at 0 HP produces no row (REQ-UI-12: LIVING hostiles only).
+        {
+            db.exec("UPDATE health SET current = 0 WHERE entity = 7");
+            const std::string band = composeBand(db, 60, kBandPlain);
+            CHECK(!contains(band, "Enemy"));
+            db.exec("UPDATE health SET current = 8 WHERE entity = 7");
+        }
+
+        // Check 23 / REQ-UI-13: three hostiles, three rows, in the entity order
+        // resolveCombat iterates.
+        {
+            db.exec("UPDATE location SET container = 11 WHERE entity = 3");
+            const std::string band = composeBand(db, 80, kBandPlain);
+            int enemyRows = 0;
+            for (const std::string& line : splitOnNewline(band)) {
+                if (line.rfind(" Enemy", 0) == 0) ++enemyRows;
+            }
+            CHECK(enemyRows == 3);
+            // Same order as combat's swarm query, by construction.
+            std::vector<int64_t> combatOrder;
+            {
+                Stmt s = db.prepare(
+                    "SELECT h.entity FROM hostile h "
+                    "JOIN location l ON l.entity = h.entity "
+                    "WHERE l.container = 11 ORDER BY h.entity");
+                while (s.step()) combatOrder.push_back(s.colInt(0));
+            }
+            CHECK(combatOrder.size() == 3);
+            db.exec("UPDATE location SET container = 2 WHERE entity = 3");
+        }
+
+        // Check 11b / REQ-UI-33a: the same FACT SET at width 200 and width 20.
+        // Only line breaks differ — nothing is truncated or elided.
+        {
+            db.exec("INSERT INTO pending_strike(entity, damage, element) "
+                    "VALUES (7, 5, NULL)");
+            db.exec("INSERT INTO status_effects(entity, kind, magnitude, remaining) "
+                    "VALUES (7, 'dot', 9, 2)");
+            const std::string wide = composeBand(db, 200, kBandPlain);
+            const std::string narrow = composeBand(db, 20, kBandPlain);
+            for (const char* fact : {"goblin", "grunt", "HP:", "8/8",
+                                     "[WINDING", "UP]", "dot", "12/12",
+                                     "Ward:", "Stun:", "corridor"}) {
+                CHECK(contains(wide, fact));
+                CHECK(contains(narrow, fact));
+            }
+            db.exec("DELETE FROM pending_strike WHERE entity = 7");
+            db.exec("DELETE FROM status_effects WHERE entity = 7");
+        }
+    }
+}
+
+// Check 16 / REQ-UI-16: golden bands for seven fixed world states, asserted as
+// EXACT strings with color disabled. These are the layout's contract — a change
+// to spacing, ordering, or row composition has to be made here deliberately.
+// Set TW_DUMP_BANDS=1 to print the actuals when intentionally re-baselining.
+static void testBandGoldens() {
+    const bool dump = std::getenv("TW_DUMP_BANDS") != nullptr;
+    auto golden = [&](const char* label, const std::string& actual,
+                      const std::string& expected) {
+        if (dump) {
+            std::printf("--- %s ---\n%s", label, actual.c_str());
+            return;
+        }
+        CHECK(actual == expected);
+    };
+
+    const TempDbFile worldPath("textworld_band_golden_tests.db");
+    Db db = openWorld(worldPath.string(), "tests/combat_fixture.sql");
+
+    // 1. An empty room: no exits, no objects, no hostiles — just the player.
+    db.exec("INSERT INTO entities(id) VALUES (99)");
+    db.exec("INSERT INTO room(entity) VALUES (99)");
+    db.exec("INSERT INTO name(entity, value) VALUES (99, 'empty vault')");
+    db.exec("UPDATE location SET container = 99 WHERE entity = 3");
+    golden("empty room", composeBand(db, 60, kBandPlain),
+           "-- empty vault ---------------------------------------------\n"
+           " You      HP: 12/12\n");
+
+    // 2. A room with objects (the cell holds the wand).
+    db.exec("UPDATE location SET container = 1 WHERE entity = 3");
+    golden("objects", composeBand(db, 60, kBandPlain),
+           "-- cell ----------------------------------------------------\n"
+           " Exits    down, north\n"
+           " Objects  wand\n"
+           " You      HP: 12/12\n");
+
+    // 3. One hostile (the corridor).
+    db.exec("UPDATE location SET container = 2 WHERE entity = 3");
+    golden("one hostile", composeBand(db, 60, kBandPlain),
+           "-- corridor ------------------------------------------------\n"
+           " Exits    east, south, up\n"
+           " Objects  key\n"
+           " Enemy    goblin grunt  HP: 8/8\n"
+           " You      HP: 12/12  Stun: ready  Ward: ready\n");
+
+    // 4. Three hostiles (the library swarm), one row each in entity order.
+    db.exec("UPDATE location SET container = 11 WHERE entity = 3");
+    golden("three hostiles", composeBand(db, 60, kBandPlain),
+           "-- library -------------------------------------------------\n"
+           " Exits    up\n"
+           " Enemy    snapping folio  HP: 10/10\n"
+           " Enemy    snapping folio  HP: 10/10\n"
+           " Enemy    snapping folio  HP: 10/10\n"
+           " You      HP: 12/12  Stun: ready  Ward: ready\n");
+
+    // 5. Mid-telegraph: the loudest element in the band.
+    db.exec("UPDATE location SET container = 2 WHERE entity = 3");
+    db.exec("INSERT INTO pending_strike(entity, damage, element) VALUES (7, 5, NULL)");
+    golden("mid-telegraph", composeBand(db, 60, kBandPlain),
+           "-- corridor ------------------------------------------------\n"
+           " Exits    east, south, up\n"
+           " Objects  key\n"
+           " Enemy    goblin grunt  HP: 8/8  [WINDING UP]\n"
+           " You      HP: 12/12  Stun: ready  Ward: ready\n");
+    db.exec("DELETE FROM pending_strike WHERE entity = 7");
+
+    // 6. A barriered hostile (the armory's ironhide brute).
+    db.exec("UPDATE location SET container = 9 WHERE entity = 3");
+    golden("barrier", composeBand(db, 60, kBandPlain),
+           "-- armory --------------------------------------------------\n"
+           " Exits    down\n"
+           " Enemy    ironhide brute  HP: 14/14  barrier\n"
+           " You      HP: 12/12  Stun: ready  Ward: ready\n");
+
+    // 7. A warded player: the state that decides whether a telegraphed strike
+    // lands (REQ-UI-36).
+    db.exec("UPDATE location SET container = 2 WHERE entity = 3");
+    db.exec("INSERT INTO status_effects(entity, kind, magnitude, remaining) "
+            "VALUES (3, 'ward', 0, 1)");
+    golden("player warded", composeBand(db, 60, kBandPlain),
+           "-- corridor ------------------------------------------------\n"
+           " Exits    east, south, up\n"
+           " Objects  key\n"
+           " Enemy    goblin grunt  HP: 8/8\n"
+           " You      HP: 12/12  ward 1  Stun: ready  Ward: ready\n");
+}
+
+// Color, applied per role (REQ-UI-19, -22, -24, -25). Runs AFTER the plain-text
+// goldens above, so a failure here is unambiguously a color bug and never a
+// layout bug.
+static void testBandColor() {
+    const TempDbFile worldPath("textworld_band_color_tests.db");
+    Db db = openWorld(worldPath.string(), "tests/combat_fixture.sql");
+    db.exec("UPDATE location SET container = 2 WHERE entity = 3");
+    db.exec("INSERT INTO pending_strike(entity, damage, element) VALUES (7, 5, NULL)");
+    db.exec("INSERT INTO status_effects(entity, kind, magnitude, remaining) "
+            "VALUES (3, 'ward', 0, 1)");
+    {
+        const int64_t now = queryInt(db, "SELECT value FROM meta WHERE key = 'turn'");
+        const std::string sql =
+            "INSERT INTO cooldowns(entity, spell, ready_turn) VALUES "
+            "(3, 'ward', " + std::to_string(now + 3) + ")";
+        db.exec(sql.c_str());
+    }
+
+    const std::string colored = composeBand(db, 200, kBandColor);
+
+    // --- per-role mapping (REQ-UI-24), against the plan's normative table ---
+    CHECK(contains(colored, "\x1b[1mcorridor\x1b[0m"));       // header: bold, no color
+    CHECK(contains(colored, "\x1b[36msouth\x1b[0m"));         // exits: cyan
+    CHECK(contains(colored, "\x1b[32mkey\x1b[0m"));           // objects: green
+    CHECK(contains(colored, "\x1b[31mgoblin\x1b[0m"));        // hostile name: red
+    CHECK(contains(colored, "\x1b[31m8/8\x1b[0m"));           // hostile HP: red
+    CHECK(contains(colored, "\x1b[1;91m[WINDING\x1b[0m"));    // telegraph: bold bright red
+    CHECK(contains(colored, "\x1b[94mStun:\x1b[0m"));         // ready spell: bright blue
+    CHECK(contains(colored, "\x1b[90mWard:\x1b[0m"));         // cooling spell: grey
+    CHECK(contains(colored, "\x1b[35mward\x1b[0m"));          // status effect: magenta
+
+    // The ten treatments are PAIRWISE DISTINCT. This is what makes "one role
+    // per color" a test rather than a comment: a mapping that is merely applied
+    // but not distinct would pass every assertion above while violating
+    // REQ-UI-24.
+    {
+        const std::vector<std::string> codes = {
+            "1",     // room name header (bold, uncolored)
+            "36",    // exits
+            "32",    // objects
+            "31",    // hostile name + HP
+            "1;91",  // telegraph
+            "33",    // player HP, low
+            "94",    // spell ready
+            "90",    // spell cooling
+            "35",    // status effects
+            "95",    // discovered resistance
+        };
+        CHECK(codes.size() == 10);
+        for (size_t i = 0; i < codes.size(); ++i) {
+            for (size_t j = i + 1; j < codes.size(); ++j) CHECK(codes[i] != codes[j]);
+        }
+        // Basic 16 only (REQ-UI-19): every code is bold, or 30-37, or 90-97.
+        for (const std::string& c : codes) {
+            const std::string tail = c == "1;91" ? "91" : c;
+            if (tail == "1") continue;
+            const int n = std::atoi(tail.c_str());
+            CHECK((n >= 30 && n <= 37) || (n >= 90 && n <= 97));
+        }
+    }
+
+    // --- low-HP threshold (current * 3 <= max), boundary included -----------
+    // The threshold is invented by the implementation, so its boundary is
+    // tested rather than assumed.
+    {
+        db.exec("UPDATE health SET current = 3 WHERE entity = 3");   // 9 < 12
+        CHECK(contains(composeBand(db, 200, kBandColor), "\x1b[33m3/12\x1b[0m"));
+        db.exec("UPDATE health SET current = 4 WHERE entity = 3");   // 12 == 12
+        CHECK(contains(composeBand(db, 200, kBandColor), "\x1b[33m4/12\x1b[0m"));
+        db.exec("UPDATE health SET current = 5 WHERE entity = 3");   // 15 > 12
+        const std::string healthy = composeBand(db, 200, kBandColor);
+        CHECK(!contains(healthy, "\x1b[33m"));
+        CHECK(contains(healthy, "HP: 5/12"));  // present, just unstyled
+        db.exec("UPDATE health SET current = 12 WHERE entity = 3");
+    }
+
+    // --- ordering: color must not enter the width arithmetic ---------------
+    // A band that counted escape bytes as columns fails here. This is the single
+    // most likely source of a width bug, which is why it gets its own sweep.
+    for (const int width : {20, 40, 80, 200}) {
+        for (const std::string& line : splitOnNewline(composeBand(db, width, kBandColor))) {
+            CHECK(utf8Length(stripSgr(line)) <= static_cast<size_t>(width));
+        }
+    }
+
+    // --- suppression (check 22 / REQ-UI-22) --------------------------------
+    // The colorless run is byte-for-byte the colored run with its sequences
+    // stripped — no empty sequences, no stray resets, nothing lost.
+    for (const int width : {20, 40, 60, 80, 200}) {
+        CHECK(stripSgr(composeBand(db, width, kBandColor)) ==
+              composeBand(db, width, kBandPlain));
+    }
+    // And a suppressed run carries no escape byte at all.
+    CHECK(composeBand(db, 60, kBandPlain).find('\x1b') == std::string::npos);
+    // NO_COLOR keeps bold (the header) but drops every color (REQ-UI-23).
+    {
+        const TermStyle noColor{false, true};
+        const std::string band = composeBand(db, 60, noColor);
+        CHECK(contains(band, "\x1b[1mcorridor\x1b[0m"));
+        CHECK(!contains(band, "\x1b[31m"));
+        CHECK(!contains(band, "\x1b[36m"));
+        // The telegraph keeps its bold, so it stays distinct without color.
+        CHECK(contains(band, "\x1b[1m[WINDING\x1b[0m"));
+    }
+
+    // --- check 11b: nothing is lost at the narrow width --------------------
+    {
+        const std::string wide = stripSgr(composeBand(db, 200, kBandColor));
+        const std::string narrow = stripSgr(composeBand(db, 20, kBandColor));
+        for (const char* fact : {"goblin", "grunt", "8/8", "[WINDING", "UP]",
+                                 "ward", "Stun:", "Ward:", "key", "east",
+                                 "south", "up", "corridor"}) {
+            CHECK(contains(wide, fact));
+            CHECK(contains(narrow, fact));
+        }
+    }
+}
+
 int main() {
     // libcurl init/shutdown for the whole run (REQ-LAT-7), ABOVE the live
     // smokes: they use the production transports and must run with libcurl
@@ -5486,6 +6065,10 @@ int main() {
     testTermColorGate();
     testTermWidth();
     testTermWrap();
+    testBandLayout();
+    testBandContent();
+    testBandGoldens();
+    testBandColor();
 
     std::printf("%d checks, %d failures\n", g_checks, g_failures);
     return g_failures == 0 ? 0 : 1;
