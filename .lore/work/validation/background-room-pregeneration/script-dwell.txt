@@ -1,0 +1,7 @@
+north
+attack
+attack
+look
+look
+north
+quit

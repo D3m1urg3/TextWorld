@@ -10,6 +10,7 @@
 // written three times, i.e. three chances to leak an option.
 #pragma once
 
+#include <atomic>
 #include <string>
 
 #include "prose.hpp"  // HttpResponse / HttpTransport — the seam, UNCHANGED
@@ -55,16 +56,20 @@ std::string modelFromRequestBody(const std::string& requestBody);
 
 // --- the shared persistent-handle HTTP client -------------------------------
 //
-// THREADING CONTRACT (REQ-LAT-11), recorded here for the deferred background
-// pre-generation work, which is the only reason any of this is worth writing
-// down today:
-//   * The handle below is MAIN-THREAD ONLY. Nothing here introduces a thread.
+// THREADING CONTRACT (REQ-LAT-11), written down for the background
+// pre-generation work and now CASHED by it (REQ-PREGEN-8):
+//   * The shared handle behind anthropicPost() is MAIN-THREAD ONLY.
 //   * One easy handle per thread. NEVER share a handle between threads, and
 //     never share a connection cache across threads (that is what a curl share
-//     handle would be for — deliberately not used).
+//     handle would be for — deliberately not used). AiHttpWorkerClient below
+//     is the ONE sanctioned second handle: it owns its own, and it never names
+//     the shared one.
 //   * aiHttpInit() must run BEFORE any thread that touches libcurl is created;
 //     curl_global_init is not thread-safe and must not race lazy init.
-//   * CURLOPT_NOSIGNAL is already set on every call, so a future worker thread
+//     Symmetrically, every AiHttpWorkerClient must be DESTROYED — and the
+//     thread owning it joined — BEFORE aiHttpShutdown() (REQ-PREGEN-19). A
+//     live easy handle outliving curl_global_cleanup() is undefined behavior.
+//   * CURLOPT_NOSIGNAL is already set on every call, so the worker thread
 //     cannot be killed by libcurl's alarm-based DNS timeout.
 
 // curl_global_init(CURL_GLOBAL_DEFAULT), once. Idempotent (REQ-LAT-7).
@@ -104,6 +109,40 @@ HttpResponse anthropicPost(const std::string& requestBody, AiRole role);
 // Bind a role into the existing seam. HttpTransport's signature is unchanged,
 // so every fake-transport test keeps working exactly as before.
 HttpTransport makeAnthropicTransport(AiRole role);
+
+// ONE easy handle, owned by the thread that constructs it (REQ-PREGEN-8) — the
+// sanctioned second handle the threading contract above names.
+//
+// NEVER touches the shared main-thread handle; no curl share handle exists, so
+// the connection cache is deliberately NOT shared across the two threads. That
+// costs the worker a fresh connect per call and buys the absence of a whole
+// class of race; the worker is off the critical path, so the trade is free.
+//
+// Construct and destroy it on the SAME thread, and only between aiHttpInit()
+// and aiHttpShutdown(). `abort` is a flag the OWNER of this object may set from
+// another thread to tear down an in-flight transfer promptly (REQ-PREGEN-20);
+// it is polled by a libcurl progress callback, so its granularity is libcurl's
+// callback cadence (about a second while idle-waiting on TTFB), not
+// instantaneous. Pass nullptr for no abort.
+//
+// post() is otherwise behavior-identical to anthropicPost: same URL, headers,
+// 8 s timeout, one attempt, no retries. Its profile records carry
+// background=1 (REQ-PREGEN-24).
+class AiHttpWorkerClient {
+  public:
+    explicit AiHttpWorkerClient(const std::atomic<bool>* abort);
+    ~AiHttpWorkerClient();
+
+    AiHttpWorkerClient(const AiHttpWorkerClient&) = delete;
+    AiHttpWorkerClient& operator=(const AiHttpWorkerClient&) = delete;
+
+    HttpResponse post(const std::string& requestBody, AiRole role);
+
+  private:
+    void* handle_ = nullptr;  // CURL*, opaque here so curl.h stays out of this
+                              // header (every AI unit includes it)
+    const std::atomic<bool>* abort_ = nullptr;
+};
 
 // Process-lifetime RAII for the two calls above (REQ-LAT-7). Instantiate ONE
 // of these as the first local in main(), so its destructor covers every exit

@@ -1,0 +1,11 @@
+twprof kind=dwell turn=0 ms=0.010
+twprof kind=call turn=1 role=resolve model=claude-haiku-4-5 status=200 namelookup_us=2893 connect_us=15503 appconnect_us=30110 starttransfer_us=1418833 total_us=1418969 input_tokens=1389 output_tokens=71
+twprof kind=stage turn=1 stage=resolve ms=1421.701
+twprof kind=stage turn=1 stage=tick ms=2.349
+twprof kind=call turn=1 role=narrate model=claude-opus-4-8 status=200 namelookup_us=26 connect_us=0 appconnect_us=0 starttransfer_us=2121536 total_us=2121654 input_tokens=676 output_tokens=121
+twprof kind=stage turn=1 stage=narrate ms=2126.233
+twprof kind=stage turn=1 stage=total ms=3550.467
+twprof kind=dwell turn=1 ms=0.014
+twprof kind=call turn=2 role=resolve model=claude-haiku-4-5 status=200 namelookup_us=83 connect_us=0 appconnect_us=0 starttransfer_us=917756 total_us=917856 input_tokens=1387 output_tokens=54
+twprof kind=stage turn=2 stage=resolve ms=920.074
+twprof kind=stage turn=2 stage=total ms=920.162

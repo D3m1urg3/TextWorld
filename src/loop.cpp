@@ -182,3 +182,7 @@ std::string renderStartup(Db& db) {
     const int w = detectWidth();
     return wrapProse(renderRoomOf(db, playerId(db)), w) + bandOrEmpty(db, w);
 }
+
+// See loop.hpp: exists so main() can name the room the pre-generation scheduler
+// should look at (REQ-PREGEN-4) without duplicating this file's two lookups.
+int64_t playerRoom(Db& db) { return roomOf(db, playerId(db)); }

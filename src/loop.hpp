@@ -31,3 +31,12 @@ TurnResult runTurn(Db& db, const std::string& line);
 // tick, no transaction, no event row. Lets main() show where you are before
 // the first prompt without consuming a turn.
 std::string renderStartup(Db& db);
+
+// The room the player currently occupies. Read-only — no tick, no transaction.
+//
+// Exists so main() can name the room the pre-generation scheduler should look
+// at (REQ-PREGEN-4) without duplicating the two lookups this file already has.
+// Deliberately NOT a widened TurnResult: the room is wanted at STARTUP too,
+// where no TurnResult exists, and widening the struct would touch every test
+// that constructs one.
+int64_t playerRoom(Db& db);

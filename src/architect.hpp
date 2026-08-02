@@ -140,3 +140,81 @@ bool architectGenerate(Db& db, int64_t room, const std::string& direction,
 // injected form.
 bool architectGenerate(Db& db, int64_t room, const std::string& direction,
                        int64_t actor);
+
+// The AI half of Phase 1, after the snapshot: request body → ONE transport call
+// → validation gate. Pure of the database by construction — it takes the two
+// snapshotted inputs rather than reading them — which is what lets the
+// background worker call it without a Db (REQ-PREGEN-7).
+//
+// Does NOT catch: each caller keeps its own try/catch and its own diagnostic,
+// because "the architect walled" and "a background job failed" are different
+// events. The transport is invoked at most once; no retries (REQ-PREGEN-9).
+//
+// The Phase 2 counterpart is architectCommitProposal below. Between them, the
+// synchronous path and the pre-generated path run THE SAME code on both halves
+// — the request is built and validated identically, with the same
+// direction-of-travel passed to the gate, whoever is calling.
+std::optional<RoomProposal> architectProposeRoom(
+    const std::string& contextPayload,
+    const std::vector<std::string>& enemyBlurbs, const std::string& direction,
+    const HttpTransport& transport);
+
+// Phase 2 of architectGenerate, verbatim and whole (REQ-PREGEN-14): mint the
+// room, realize the origin exit, plant the reciprocal + declared latent stubs
+// and the 'generated' event; THEN re-check the proposal's enemy blurb against
+// the LIVE eligible menu and, when it still resolves, placeEnemy +
+// recordArchitectSpawn. Runs inside the caller's tick transaction. Outside any
+// catch: a genuine DB fault propagates to runTurn's rollback (REQ-ARCH-5).
+// Returns the minted room id.
+//
+// Extracted so a PRE-GENERATED candidate and a synchronously generated one
+// commit through THE SAME CODE — "indistinguishable canon" is then structural
+// rather than asserted. Omitting the enemy half here would silently stop
+// spawning on the pregen path (REQ-PREGEN-14, REQ-PREGEN-18).
+int64_t architectCommitProposal(Db& db, int64_t originRoom,
+                                const std::string& direction,
+                                const RoomProposal& proposal, int64_t actor);
+
+// THE PRE-GENERATION SCHEDULER. Snapshot and submit one background job per
+// latent exit of `room` that has no candidate, no in-flight job, and no attempt
+// already made during this occupancy (REQ-PREGEN-4). Depth 1: a candidate's own
+// declared exits are never chased (REQ-PREGEN-3). No-op when pre-generation or
+// the architect is off.
+//
+// WHY IT LIVES HERE AND NOT IN pregen.cpp. Every read a job needs happens on
+// the MAIN thread at queue time so the job it hands off carries no Db and no
+// world pointer (REQ-PREGEN-5) — and pregen.cpp may not contain any SQL at all
+// (REQ-PREGEN-7). This file already owns buildArchitectContext, already calls
+// eligibleEnemyBlurbs, and is contractually read-only, so the snapshot belongs
+// here. It stays READ-ONLY: this function never begins, commits, or writes.
+//
+// CALL IT AFTER the tick's transaction has committed and after the player's
+// text has been flushed, so queuing can never delay the turn they waited on.
+//
+// "This occupancy" means the room this was last called with: standing still
+// never re-queues a slot whose job failed, but leaving and coming back does
+// (REQ-PREGEN-10). Idempotent — calling it twice for the same room queues
+// nothing the second time, which is what makes calling it after EVERY turn
+// cheap and uniform.
+void architectQueuePregen(Db& db, int64_t room);
+
+// The world turn (meta.turn) — the basis for a candidate's staleness figure
+// (REQ-PREGEN-13). Read-only, one row.
+//
+// Deliberately meta.turn and NOT profileCurrentTurn(): "how many turns old" is
+// a gameplay fact, and the process-local profile counter drifts from it on
+// turns that never tick.
+//
+// Shared rather than reimplemented because BOTH of its callers serve the one
+// staleness feature — architectQueuePregen stamps a job with it, and resolveGo
+// subtracts that stamp from it to report age_turns. (loop.cpp, combat.cpp and
+// mutations.cpp keep their own private copies of this read: those are
+// independent units needing an unrelated one-off value, not two halves of one
+// computation.)
+int64_t architectWorldTurn(Db& db);
+
+// TEST-ONLY. Forgets the current occupancy, so a test can start a scenario
+// without inheriting the attempted-direction set a previous one left behind.
+// Production code never calls this — in a real session, occupancy changes
+// only by the player moving.
+void architectResetPregenOccupancyForTest();

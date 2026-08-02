@@ -2,8 +2,10 @@
 // here — loop.cpp, architect.cpp and aihttp.cpp own those.
 #include "profile.hpp"
 
+#include <atomic>
 #include <cstdio>
 #include <cstdlib>
+#include <mutex>
 
 namespace {
 
@@ -19,8 +21,11 @@ bool readProfileEnv() {
 // initialization order is unobservable.
 bool g_enabled = readProfileEnv();
 
-// Process-local turn sequence (not meta.turn).
-int64_t g_turn = 0;
+// Process-local turn sequence (not meta.turn). ATOMIC because the pregen
+// worker reads it via profileCurrentTurn() to stamp its background call
+// records while the main thread advances it between turns (REQ-PREGEN-22).
+// Only the main thread ever writes.
+std::atomic<int64_t> g_turn{0};
 
 // Empty => the default stderr sink.
 std::function<void(const std::string&)>& sink() {
@@ -28,7 +33,18 @@ std::function<void(const std::string&)>& sink() {
     return s;
 }
 
+// Serializes the whole of write() — the sink lookup, the sink call, and the
+// default fprintf alike (REQ-PREGEN-22). Records come from two threads, and
+// this is what makes one record one ATOMIC line rather than two threads'
+// bytes braided together. Note the default sink is a SINGLE fprintf, not a
+// write-then-newline pair: splitting it would defeat the point of the lock.
+std::mutex& sinkMutex() {
+    static std::mutex m;
+    return m;
+}
+
 void write(const std::string& line) {
+    const std::lock_guard<std::mutex> lock(sinkMutex());
     if (sink()) {
         sink()(line);
         return;
@@ -74,6 +90,10 @@ std::string formatCall(const CallRecord& record) {
                       " role=" + record.role + " model=" + record.model +
                       " status=" + std::to_string(record.status);
     if (record.failed) out += " failed=1";
+    // REQ-PREGEN-24: present only on a background call, so a foreground
+    // record is byte-identical to the pre-pregeneration format. Placed after
+    // status= and before the timing keys.
+    if (record.background) out += " background=1";
     out += " namelookup_us=" + std::to_string(record.namelookupUs) +
            " connect_us=" + std::to_string(record.connectUs) +
            " appconnect_us=" + std::to_string(record.appconnectUs) +
@@ -102,9 +122,43 @@ void profileEmit(const CallRecord& record) {
     write(formatCall(record));
 }
 
+std::string formatDwell(const DwellRecord& record) {
+    return "twprof kind=dwell turn=" + std::to_string(record.turn) +
+           " ms=" + formatMs(record.ms);
+}
+
+void profileEmit(const DwellRecord& record) {
+    if (!g_enabled) return;
+    write(formatDwell(record));
+}
+
+std::string formatPregen(const PregenRecord& record) {
+    std::string out = "twprof kind=pregen turn=" + std::to_string(record.turn) +
+                      " outcome=" + record.outcome;
+    // Each key belongs to exactly one outcome; a miss carries none, so its
+    // line is the bare four-field form above.
+    if (record.ageTurns) out += " age_turns=" + std::to_string(*record.ageTurns);
+    if (record.waitMs) out += " wait_ms=" + formatMs(*record.waitMs);
+    if (record.runMs) out += " run_ms=" + formatMs(*record.runMs);
+    return out;
+}
+
+void profileEmit(const PregenRecord& record) {
+    if (!g_enabled) return;
+    write(formatPregen(record));
+}
+
 ScopedStage::~ScopedStage() {
     const std::chrono::duration<double, std::milli> elapsed =
         std::chrono::steady_clock::now() - start_;
     profileEmit(StageRecord{stage_, profileCurrentTurn(), elapsed.count(),
                             nestedIn_});
+}
+
+ScopedDwell::~ScopedDwell() {
+    const std::chrono::duration<double, std::milli> elapsed =
+        std::chrono::steady_clock::now() - start_;
+    // profileCurrentTurn() is the turn just completed: the next turn is not
+    // numbered until runTurn calls profileNextTurn() (REQ-PREGEN-25).
+    profileEmit(DwellRecord{profileCurrentTurn(), elapsed.count()});
 }
