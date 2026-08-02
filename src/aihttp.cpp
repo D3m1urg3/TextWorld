@@ -2,6 +2,7 @@
 // parsers, and the one persistent-handle HTTP client the three AI roles share.
 #include "aihttp.hpp"
 
+#include <atomic>
 #include <cstdlib>
 #include <optional>
 
@@ -54,6 +55,105 @@ int64_t timingUs(CURL* handle, CURLINFO info) {
     curl_off_t value = 0;
     if (curl_easy_getinfo(handle, info, &value) != CURLE_OK) return 0;
     return static_cast<int64_t>(value);
+}
+
+// libcurl progress callback (REQ-PREGEN-20): returning non-zero makes libcurl
+// abandon the transfer with CURLE_ABORTED_BY_CALLBACK, which reads downstream
+// as an ordinary transportError — the existing failure path, no new branch.
+// `clientp` is the std::atomic<bool>* the caller handed in; it is only ever
+// READ here, so the cross-thread access is exactly one atomic load.
+int abortIfFlagged(void* clientp, curl_off_t, curl_off_t, curl_off_t,
+                   curl_off_t) {
+    const auto* flag = static_cast<const std::atomic<bool>*>(clientp);
+    return (flag != nullptr && flag->load()) ? 1 : 0;
+}
+
+// The whole of one POST, parameterized by the handle that performs it. This is
+// anthropicPost's former body verbatim, lifted so BOTH the shared main-thread
+// handle and a worker's own handle (REQ-PREGEN-8) run identical code — same
+// URL, same three headers, same 8 s timeout, same one perform, no retries
+// (REQ-PREGEN-9). The handle is a PARAMETER precisely so this function can
+// never reach for the file-static shared one.
+HttpResponse performPost(CURL* handle, const std::string& requestBody,
+                         AiRole role, bool background,
+                         const std::atomic<bool>* abort) {
+    HttpResponse resp;
+    if (handle == nullptr) {
+        resp.transportError = true;
+        return resp;
+    }
+    // Wipe every option from the previous call, then re-apply the full set
+    // below (REQ-LAT-8, REQ-LAT-10). What reset does NOT wipe is exactly what
+    // this whole change is for: the connection pool, the TLS session, and the
+    // DNS cache all belong to the handle and survive.
+    curl_easy_reset(handle);
+
+    // The key is read at CALL time, so the header list is rebuilt per call. It
+    // goes into x-api-key ONLY — never into the payload, a log line, or a
+    // profile record.
+    const char* key = std::getenv("ANTHROPIC_API_KEY");
+    SlistGuard headers;
+    headers.list = curl_slist_append(
+        headers.list,
+        ("x-api-key: " + std::string(key != nullptr ? key : "")).c_str());
+    headers.list =
+        curl_slist_append(headers.list, "anthropic-version: 2023-06-01");
+    headers.list = curl_slist_append(headers.list, "content-type: application/json");
+
+    curl_easy_setopt(handle, CURLOPT_URL, "https://api.anthropic.com/v1/messages");
+    curl_easy_setopt(handle, CURLOPT_POST, 1L);
+    curl_easy_setopt(handle, CURLOPT_POSTFIELDS, requestBody.c_str());
+    curl_easy_setopt(handle, CURLOPT_POSTFIELDSIZE,
+                     static_cast<long>(requestBody.size()));
+    curl_easy_setopt(handle, CURLOPT_HTTPHEADER, headers.list);
+    curl_easy_setopt(handle, CURLOPT_TIMEOUT, 8L);  // total budget, seconds
+    curl_easy_setopt(handle, CURLOPT_WRITEFUNCTION, appendToString);
+    curl_easy_setopt(handle, CURLOPT_WRITEDATA, &resp.body);
+    // All of these belong in the PER-CALL block, not a one-time setup path:
+    // curl_easy_reset clears them along with everything else.
+    curl_easy_setopt(handle, CURLOPT_NOSIGNAL, 1L);        // REQ-LAT-9
+    curl_easy_setopt(handle, CURLOPT_TCP_KEEPALIVE, 1L);   // keep the pooled
+                                                           // connection warm
+                                                           // across idle gaps
+    // The abort pair, likewise per-call and likewise wiped by reset. Absent
+    // for the main-thread client, which has nothing to abort for.
+    if (abort != nullptr) {
+        curl_easy_setopt(handle, CURLOPT_NOPROGRESS, 0L);
+        curl_easy_setopt(handle, CURLOPT_XFERINFOFUNCTION, abortIfFlagged);
+        curl_easy_setopt(handle, CURLOPT_XFERINFODATA, abort);
+    }
+
+    const CURLcode rc = curl_easy_perform(handle);
+    if (rc != CURLE_OK) {
+        resp.transportError = true;
+    } else {
+        curl_easy_getinfo(handle, CURLINFO_RESPONSE_CODE, &resp.status);
+    }
+
+    // Everything below is gated: profiling off means none of it runs.
+    if (profilingEnabled()) {
+        CallRecord record;
+        record.role = roleName(role);
+        record.model = modelFromRequestBody(requestBody);
+        record.turn = profileCurrentTurn();
+        record.status = resp.status;
+        record.failed = resp.transportError || resp.status != 200;
+        record.background = background;  // REQ-PREGEN-24
+        record.namelookupUs = timingUs(handle, CURLINFO_NAMELOOKUP_TIME_T);
+        record.connectUs = timingUs(handle, CURLINFO_CONNECT_TIME_T);
+        record.appconnectUs = timingUs(handle, CURLINFO_APPCONNECT_TIME_T);
+        record.starttransferUs = timingUs(handle, CURLINFO_STARTTRANSFER_TIME_T);
+        record.totalUs = timingUs(handle, CURLINFO_TOTAL_TIME_T);
+        if (!record.failed) {
+            const AiUsage usage = parseUsage(resp.body);
+            record.tokensKnown = usage.known;
+            record.inputTokens = usage.inputTokens;
+            record.outputTokens = usage.outputTokens;
+        }
+        profileEmit(record);
+    }
+
+    return resp;  // headers.list freed here, AFTER perform and every getinfo
 }
 
 }  // namespace
@@ -134,79 +234,33 @@ void aiHttpShutdown() {
 }
 
 HttpResponse anthropicPost(const std::string& requestBody, AiRole role) {
-    HttpResponse resp;
-
+    // The shared, main-thread-only handle, created on first use. Nothing about
+    // this call changed when performPost was extracted: same handle, same
+    // options, same records, and no abort flag — the main thread has nothing to
+    // abort for, it is the thread waiting on the answer.
     if (g_handle == nullptr) g_handle = curl_easy_init();
-    if (g_handle == nullptr) {
-        resp.transportError = true;
-        return resp;
-    }
-    // Wipe every option from the previous call, then re-apply the full set
-    // below (REQ-LAT-8, REQ-LAT-10). What reset does NOT wipe is exactly what
-    // this whole change is for: the connection pool, the TLS session, and the
-    // DNS cache all belong to the handle and survive.
-    curl_easy_reset(g_handle);
-
-    // The key is read at CALL time, so the header list is rebuilt per call. It
-    // goes into x-api-key ONLY — never into the payload, a log line, or a
-    // profile record.
-    const char* key = std::getenv("ANTHROPIC_API_KEY");
-    SlistGuard headers;
-    headers.list = curl_slist_append(
-        headers.list,
-        ("x-api-key: " + std::string(key != nullptr ? key : "")).c_str());
-    headers.list =
-        curl_slist_append(headers.list, "anthropic-version: 2023-06-01");
-    headers.list = curl_slist_append(headers.list, "content-type: application/json");
-
-    curl_easy_setopt(g_handle, CURLOPT_URL, "https://api.anthropic.com/v1/messages");
-    curl_easy_setopt(g_handle, CURLOPT_POST, 1L);
-    curl_easy_setopt(g_handle, CURLOPT_POSTFIELDS, requestBody.c_str());
-    curl_easy_setopt(g_handle, CURLOPT_POSTFIELDSIZE,
-                     static_cast<long>(requestBody.size()));
-    curl_easy_setopt(g_handle, CURLOPT_HTTPHEADER, headers.list);
-    curl_easy_setopt(g_handle, CURLOPT_TIMEOUT, 8L);  // total budget, seconds
-    curl_easy_setopt(g_handle, CURLOPT_WRITEFUNCTION, appendToString);
-    curl_easy_setopt(g_handle, CURLOPT_WRITEDATA, &resp.body);
-    // Both of these belong in the PER-CALL block, not a one-time setup path:
-    // curl_easy_reset clears them along with everything else.
-    curl_easy_setopt(g_handle, CURLOPT_NOSIGNAL, 1L);        // REQ-LAT-9
-    curl_easy_setopt(g_handle, CURLOPT_TCP_KEEPALIVE, 1L);   // keep the pooled
-                                                             // connection warm
-                                                             // across idle gaps
-
-    const CURLcode rc = curl_easy_perform(g_handle);
-    if (rc != CURLE_OK) {
-        resp.transportError = true;
-    } else {
-        curl_easy_getinfo(g_handle, CURLINFO_RESPONSE_CODE, &resp.status);
-    }
-
-    // Everything below is gated: profiling off means none of it runs.
-    if (profilingEnabled()) {
-        CallRecord record;
-        record.role = roleName(role);
-        record.model = modelFromRequestBody(requestBody);
-        record.turn = profileCurrentTurn();
-        record.status = resp.status;
-        record.failed = resp.transportError || resp.status != 200;
-        record.namelookupUs = timingUs(g_handle, CURLINFO_NAMELOOKUP_TIME_T);
-        record.connectUs = timingUs(g_handle, CURLINFO_CONNECT_TIME_T);
-        record.appconnectUs = timingUs(g_handle, CURLINFO_APPCONNECT_TIME_T);
-        record.starttransferUs = timingUs(g_handle, CURLINFO_STARTTRANSFER_TIME_T);
-        record.totalUs = timingUs(g_handle, CURLINFO_TOTAL_TIME_T);
-        if (!record.failed) {
-            const AiUsage usage = parseUsage(resp.body);
-            record.tokensKnown = usage.known;
-            record.inputTokens = usage.inputTokens;
-            record.outputTokens = usage.outputTokens;
-        }
-        profileEmit(record);
-    }
-
-    return resp;  // headers.list freed here, AFTER perform and every getinfo
+    return performPost(g_handle, requestBody, role, /*background=*/false,
+                       /*abort=*/nullptr);
 }
 
 HttpTransport makeAnthropicTransport(AiRole role) {
     return [role](const std::string& body) { return anthropicPost(body, role); };
+}
+
+AiHttpWorkerClient::AiHttpWorkerClient(const std::atomic<bool>* abort)
+    : handle_(curl_easy_init()), abort_(abort) {}
+
+AiHttpWorkerClient::~AiHttpWorkerClient() {
+    // Runs on the SAME thread that constructed this, and before
+    // aiHttpShutdown() reaches curl_global_cleanup() (REQ-PREGEN-19).
+    if (handle_ != nullptr) {
+        curl_easy_cleanup(static_cast<CURL*>(handle_));
+        handle_ = nullptr;
+    }
+}
+
+HttpResponse AiHttpWorkerClient::post(const std::string& requestBody,
+                                      AiRole role) {
+    return performPost(static_cast<CURL*>(handle_), requestBody, role,
+                       /*background=*/true, abort_);
 }

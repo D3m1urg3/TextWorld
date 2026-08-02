@@ -4,10 +4,15 @@
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <chrono>
+#include <condition_variable>
+#include <future>
 #include <map>
+#include <mutex>
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include <curl/curl.h>  // architect live smoke's single bounded judge call (gated)
@@ -20,6 +25,7 @@
 #include "loop.hpp"
 #include "mutations.hpp"
 #include "nlresolve.hpp"
+#include "pregen.hpp"
 #include "profile.hpp"
 #include "prose.hpp"
 #include "render.hpp"
@@ -2469,6 +2475,163 @@ static void testProfileRecords() {
     CHECK(!profilingEnabled());
 }
 
+// --- Step 1, REQ-PREGEN-22/-24/-25: the three additions pre-generation needs
+// from the profiling mechanism, all provable without a thread of pregen's own:
+// the background flag's FORMAT, the dwell record's format and CORRECTNESS, and
+// serialized emission under genuine concurrent load. ---
+static void testProfileBackgroundAndDwell() {
+    const ScopedEnvVar profGuard("TEXTWORLD_PROFILE");
+
+    // (a) REQ-PREGEN-24: `background=1` appears on a background record and the
+    // key is ABSENT — not `background=0` — on a foreground one, so every log
+    // line written before this feature existed is still byte-identical.
+    CallRecord fg;
+    fg.role = "generate";
+    fg.model = "claude-opus-4-8";
+    fg.turn = 7;
+    fg.status = 200;
+    fg.totalUs = 7300000;
+    fg.inputTokens = 1200;
+    fg.outputTokens = 340;
+    fg.tokensKnown = true;
+    {
+        const auto kv = parseProfileRecord(formatCall(fg));
+        CHECK(kv.count("background") == 0);
+    }
+    {
+        CallRecord bg = fg;
+        bg.background = true;
+        const std::string line = formatCall(bg);
+        const auto kv = parseProfileRecord(line);
+        CHECK(kv.at("background") == "1");
+        // Exactly one key gained, and the rest of the line is unmoved: the
+        // foreground form with " background=1" spliced in after status=.
+        const std::string fgLine = formatCall(fg);
+        const size_t at = fgLine.find(" namelookup_us=");
+        CHECK(at != std::string::npos);
+        CHECK(line == fgLine.substr(0, at) + " background=1" + fgLine.substr(at));
+    }
+
+    // (b) REQ-PREGEN-25 format: the dwell record's documented shape.
+    {
+        const auto kv = parseProfileRecord(formatDwell(DwellRecord{7, 1234.567}));
+        CHECK(kv.count("twprof") == 1);
+        CHECK(kv.at("kind") == "dwell");
+        CHECK(kv.at("turn") == "7");
+        CHECK(kv.at("ms") == "1234.567");
+    }
+
+    std::vector<std::string> captured;
+    std::mutex capturedMutex;
+    profileSetSink([&](const std::string& line) {
+        const std::lock_guard<std::mutex> lock(capturedMutex);
+        captured.push_back(line);
+    });
+    setenv("TEXTWORLD_PROFILE", "1", 1);
+    profileRefreshEnabled();
+
+    // (c) REQ-PREGEN-25 CORRECTNESS — the half the live run cannot establish,
+    // because a piped script's true dwell is ~0 and an implementation that
+    // always emitted zero would pass a presence check. A manufactured delay
+    // must show up in the value: a real dependence on the wait, not a constant.
+    {
+        captured.clear();
+        const int64_t turn = profileNextTurn();
+        {
+            const ScopedDwell dwell;
+            CHECK(captured.empty());  // nothing yet — the destructor emits
+            std::this_thread::sleep_for(std::chrono::milliseconds(60));
+        }
+        CHECK(captured.size() == 1);
+        const auto kv = parseProfileRecord(captured.back());
+        CHECK(kv.at("kind") == "dwell");
+        CHECK(kv.at("turn") == std::to_string(turn));
+        const double ms = std::stod(kv.at("ms"));
+        CHECK(ms >= 55.0);   // tracks the delay
+        CHECK(ms < 500.0);   // and is not some unrelated large number
+    }
+
+    // (d) REQ-PREGEN-22: two threads, 200 records each. Every one of the 400
+    // must arrive as a COMPLETE, well-formed line — never interleaved, never
+    // truncated, never two records braided into one. The `twprof` marker
+    // appearing anywhere past position 0 is exactly what a torn write looks
+    // like, so that is what is asserted.
+    {
+        captured.clear();
+        auto emitMany = [](const char* role) {
+            for (int i = 0; i < 200; ++i) {
+                CallRecord r;
+                r.role = role;
+                r.model = "claude-opus-4-8";
+                r.turn = i;
+                r.status = 200;
+                r.background = true;
+                r.tokensKnown = true;
+                r.inputTokens = i;
+                r.outputTokens = i;
+                profileEmit(r);
+            }
+        };
+        std::thread a([&] { emitMany("generate"); });
+        std::thread b([&] { emitMany("narrate"); });
+        a.join();
+        b.join();
+
+        CHECK(captured.size() == 400);
+        bool allWellFormed = true;
+        for (const std::string& line : captured) {
+            if (line.empty() || line.rfind("twprof ", 0) != 0) {
+                allWellFormed = false;
+                break;
+            }
+            if (line.find("twprof", 1) != std::string::npos) {
+                allWellFormed = false;  // a second record spliced in
+                break;
+            }
+            const auto kv = parseProfileRecord(line);
+            if (kv.count("kind") == 0 || kv.at("kind") != "call" ||
+                kv.count("total_us") == 0 || kv.count("output_tokens") == 0) {
+                allWellFormed = false;  // truncated before the tail keys
+                break;
+            }
+        }
+        CHECK(allWellFormed);
+    }
+
+    profileSetSink({});
+    unsetenv("TEXTWORLD_PROFILE");
+    profileRefreshEnabled();
+    CHECK(!profilingEnabled());
+}
+
+// --- Step 3, REQ-PREGEN-8: the worker's own easy handle. What is mechanically
+// checkable OFFLINE is handle LIFETIME and thread OWNERSHIP — construct and
+// destroy the client on a std::thread, between the suite's aiHttpInit() and its
+// shutdown, WITHOUT calling post(). No network, no crash, and the destructor
+// runs on the same thread that built it.
+//
+// The abort callback's RUNTIME behavior is deliberately NOT faked here: it
+// cannot be shown without a real in-flight transfer, so it belongs to the live
+// run. What IS pinned here is that the option pair exists and that constructing
+// a second handle alongside the shared one is safe. ---
+static void testAiHttpWorkerClient() {
+    std::atomic<bool> abort{false};
+    std::atomic<bool> constructed{false};
+
+    std::thread worker([&] {
+        const AiHttpWorkerClient client(&abort);
+        constructed.store(true);
+        // No post() — the offline suite makes no network access.
+    });
+    worker.join();
+    CHECK(constructed.load());
+
+    // A nullptr abort flag is legal too (the no-abort configuration).
+    std::thread plain([&] { const AiHttpWorkerClient client(nullptr); });
+    plain.join();
+    CHECK(true);  // reaching here without a crash IS the assertion
+}
+
 // The `stage` values of the captured records, in emission order.
 static std::vector<std::string> capturedStages(
     const std::vector<std::string>& captured) {
@@ -4533,6 +4696,776 @@ static void testArchitectGenerate() {
     }
 }
 
+// --- Step 4, REQ-PREGEN-1/-9/-10/-11/-12/-13/-16/-21: the candidate store as a
+// SINGLE-THREADED state machine. No thread exists yet, deliberately: the store
+// is the part that can be proven exhaustively without concurrency, so it is
+// proven here and the thread is added on top of something already known good.
+// Every transport is a fake — no network. ---
+static void testPregenStore() {
+    const ScopedEnvVar pregenGuard("TEXTWORLD_PREGEN");
+
+    // A job as the scheduler will hand one over: no Db, no world pointer, just
+    // the snapshot.
+    auto makeJob = [](int64_t room, const std::string& dir, int64_t turn) {
+        PregenJob job;
+        job.room = room;
+        job.direction = dir;
+        job.contextPayload = R"({"setting":"","origin_name":"stone hall"})";
+        job.enemyBlurbs = {};
+        job.snapshotTurn = turn;
+        return job;
+    };
+
+    // (a) REQ-PREGEN-1, the gate: with TEXTWORLD_PREGEN=0 a submit is dropped
+    // on the floor and an acquire is a Miss that touches nothing.
+    {
+        setenv("TEXTWORLD_PREGEN", "0", 1);
+        pregenRefreshEnabledForTest();
+        CHECK(!pregenEnabled());
+        pregenResetForTest();
+
+        pregenSubmit(makeJob(1, "east", 3));
+        CHECK(pregenPendingCountForTest() == 0);
+        CHECK(pregenStateOf(1, "east") == PregenState::Absent);
+
+        int calls = 0;
+        HttpTransport fake = [&](const std::string&) {
+            ++calls;
+            return cannedCreateRoom("crypt", "A cold undercroft.");
+        };
+        const PregenResult r = pregenAcquire(1, "east", &fake);
+        CHECK(r.outcome == PregenOutcome::Miss);
+        CHECK(!r.proposal.has_value());
+        CHECK(calls == 0);
+    }
+
+    // Everything below runs with the gate ON — unset means on, which is the
+    // half of REQ-PREGEN-1 an AI-off script can never exercise.
+    unsetenv("TEXTWORLD_PREGEN");
+    pregenRefreshEnabledForTest();
+    CHECK(pregenEnabled());
+    // "0" is the ONLY off value; any other value leaves it on.
+    setenv("TEXTWORLD_PREGEN", "1", 1);
+    pregenRefreshEnabledForTest();
+    CHECK(pregenEnabled());
+    unsetenv("TEXTWORLD_PREGEN");
+    pregenRefreshEnabledForTest();
+
+    // (b) REQ-PREGEN-12, three of the four states (Running needs the worker).
+    {
+        pregenResetForTest();
+        CHECK(pregenStateOf(1, "east") == PregenState::Absent);
+        pregenSubmit(makeJob(1, "east", 3));
+        CHECK(pregenStateOf(1, "east") == PregenState::Queued);
+        CHECK(pregenPendingCountForTest() == 1);
+
+        RoomProposal proposal;
+        proposal.name = "crypt";
+        proposal.description = "A cold undercroft.";
+        pregenInjectReadyForTest(2, "north", proposal, 9);
+        CHECK(pregenStateOf(2, "north") == PregenState::Ready);
+        // An unrelated key is still Absent — the store is keyed, not global.
+        CHECK(pregenStateOf(2, "south") == PregenState::Absent);
+    }
+
+    // (c) Hit: a ready candidate is handed over with ZERO transport calls, and
+    // carries its snapshot turn for the staleness report (REQ-PREGEN-13).
+    {
+        pregenResetForTest();
+        RoomProposal proposal;
+        proposal.name = "crypt";
+        proposal.description = "A cold undercroft of grey stone.";
+        proposal.exits = {"north"};
+        proposal.enemyBlurb = "a hunched goblin";
+        pregenInjectReadyForTest(1, "east", proposal, 4);
+
+        int calls = 0;
+        HttpTransport fake = [&](const std::string&) {
+            ++calls;
+            return cannedCreateRoom("wrong", "should never be built");
+        };
+        const PregenResult r = pregenAcquire(1, "east", &fake);
+        CHECK(r.outcome == PregenOutcome::Hit);
+        CHECK(calls == 0);
+        CHECK(r.proposal.has_value());
+        CHECK(r.proposal->name == "crypt");
+        CHECK(r.proposal->description == "A cold undercroft of grey stone.");
+        CHECK(r.proposal->exits.size() == 1);
+        CHECK(r.proposal->enemyBlurb == "a hunched goblin");
+        CHECK(r.snapshotTurn == 4);
+        CHECK(r.runMs == 0.0);   // a hit did no work
+        CHECK(r.waitMs == 0.0);
+        // REQ-PREGEN-11: the candidate is not evicted by being read.
+        CHECK(pregenStateOf(1, "east") == PregenState::Ready);
+    }
+
+    // (d) RanQueued: a job still in the queue is DEQUEUED and run right here,
+    // once, and the queue is left empty (REQ-PREGEN-16 second bullet).
+    {
+        pregenResetForTest();
+        pregenSubmit(makeJob(1, "east", 7));
+        CHECK(pregenPendingCountForTest() == 1);
+
+        int calls = 0;
+        std::string sentBody;
+        HttpTransport fake = [&](const std::string& body) {
+            ++calls;
+            sentBody = body;
+            return cannedCreateRoom("crypt", "A cold undercroft.", {"north"});
+        };
+        const PregenResult r = pregenAcquire(1, "east", &fake);
+        CHECK(r.outcome == PregenOutcome::RanQueued);
+        CHECK(calls == 1);  // exactly one call — no duplicate for this key
+        CHECK(r.proposal.has_value());
+        CHECK(r.proposal->name == "crypt");
+        CHECK(r.runMs >= 0.0);
+        CHECK(pregenPendingCountForTest() == 0);
+        // The snapshot was REUSED, not rebuilt: the body carries the payload
+        // the job was queued with (REQ-PREGEN-5, REQ-PREGEN-16).
+        CHECK(sentBody.find("stone hall") != std::string::npos);
+        // The result is also stored, so the key is now a hit.
+        CHECK(pregenStateOf(1, "east") == PregenState::Ready);
+    }
+
+    // (e) Failure, both shapes: a throwing transport and a non-200 each leave
+    // the slot ABSENT — cleared, not poisoned (REQ-PREGEN-9, REQ-PREGEN-10) —
+    // yield no proposal, and are called exactly ONCE (no retries).
+    {
+        pregenResetForTest();
+        pregenSubmit(makeJob(1, "east", 7));
+        int calls = 0;
+        HttpTransport thrower = [&](const std::string&) -> HttpResponse {
+            ++calls;
+            throw std::runtime_error("socket exploded");
+        };
+        const PregenResult r = pregenAcquire(1, "east", &thrower);
+        CHECK(r.outcome == PregenOutcome::RanQueued);
+        CHECK(!r.proposal.has_value());
+        CHECK(calls == 1);
+        CHECK(pregenStateOf(1, "east") == PregenState::Absent);
+        CHECK(pregenPendingCountForTest() == 0);
+
+        // Absent again means re-queueable — the bounded retry of REQ-PREGEN-10.
+        pregenSubmit(makeJob(1, "east", 8));
+        CHECK(pregenStateOf(1, "east") == PregenState::Queued);
+
+        int badCalls = 0;
+        HttpTransport bad = [&](const std::string&) {
+            ++badCalls;
+            HttpResponse resp;
+            resp.status = 500;
+            return resp;
+        };
+        const PregenResult r2 = pregenAcquire(1, "east", &bad);
+        CHECK(r2.outcome == PregenOutcome::RanQueued);
+        CHECK(!r2.proposal.has_value());
+        CHECK(badCalls == 1);
+        CHECK(pregenStateOf(1, "east") == PregenState::Absent);
+    }
+
+    // (f) REQ-PREGEN-11 / -21: one slot per key, ever. A second submit for a
+    // key already known is a no-op, so no room is ever paid for twice.
+    {
+        pregenResetForTest();
+        pregenSubmit(makeJob(1, "east", 1));
+        pregenSubmit(makeJob(1, "east", 2));
+        pregenSubmit(makeJob(1, "east", 3));
+        CHECK(pregenPendingCountForTest() == 1);
+        // A different direction off the same room IS a different key.
+        pregenSubmit(makeJob(1, "west", 1));
+        CHECK(pregenPendingCountForTest() == 2);
+    }
+
+    pregenResetForTest();
+    unsetenv("TEXTWORLD_PREGEN");
+    pregenRefreshEnabledForTest();
+}
+
+// A fake transport the TEST controls the timing of. It blocks inside the call
+// until the test releases it, so a job can be pinned in flight and observed —
+// the alternative, sleeping and hoping, is what turns a concurrency bug into an
+// unbounded retry loop. Every wait below is on a condition the test itself
+// satisfies, so nothing here can hang on a slow machine that would not also
+// hang on a fast one.
+struct BlockingTransport {
+    std::mutex mutex;
+    std::condition_variable cv;
+    bool released = false;
+    int calls = 0;
+    bool concurrentEntry = false;  // set if two calls are ever inside at once
+    int inside = 0;
+    std::string roomName = "crypt";
+
+    // Blocks until release() is called. Records the call and flags any
+    // overlapping entry — the serial-worker assertion (REQ-PREGEN-6).
+    HttpResponse operator()(const std::string&) {
+        {
+            std::unique_lock<std::mutex> lock(mutex);
+            ++calls;
+            ++inside;
+            if (inside > 1) concurrentEntry = true;
+            cv.wait(lock, [this] { return released; });
+            --inside;
+        }
+        return cannedCreateRoom(roomName, "A cold undercroft of grey stone.");
+    }
+
+    void release() {
+        {
+            const std::lock_guard<std::mutex> lock(mutex);
+            released = true;
+        }
+        cv.notify_all();
+    }
+
+    int callCount() {
+        const std::lock_guard<std::mutex> lock(mutex);
+        return calls;
+    }
+};
+
+// Spin (not sleep) until `pred` holds. A hang here is a DESIGN bug to be read
+// out of the code, never a timing knob to be tuned — so there is deliberately
+// no timeout to raise.
+template <typename Pred>
+static void spinUntil(Pred pred) {
+    while (!pred()) std::this_thread::yield();
+}
+
+// --- Step 5, REQ-PREGEN-2/-6/-12: the worker thread, and NOTHING else. The
+// tick still never waits on it, so a bug at this step can only show up as a job
+// that does not run — never as a hang. That separation is the entire reason
+// this is split from the wait in testPregenWait below. ---
+static void testPregenWorker() {
+    const ScopedEnvVar keyGuard("ANTHROPIC_API_KEY");
+    const ScopedEnvVar aiGuard("TEXTWORLD_AI");
+    const ScopedEnvVar pregenGuard("TEXTWORLD_PREGEN");
+
+    auto makeJob = [](int64_t room, const std::string& dir) {
+        PregenJob job;
+        job.room = room;
+        job.direction = dir;
+        job.contextPayload = R"({"setting":"","origin_name":"stone hall"})";
+        job.snapshotTurn = 5;
+        return job;
+    };
+
+    // (a) REQ-PREGEN-1 / -2: the thread-existence matrix. This is the check the
+    // spec insists on by name — "no records in the log" would pass all three
+    // rows below and prove nothing.
+    {
+        // architect on, pregen on (unset) -> a thread exists.
+        setenv("ANTHROPIC_API_KEY", "test-key-never-used", 1);
+        unsetenv("TEXTWORLD_AI");
+        unsetenv("TEXTWORLD_PREGEN");
+        pregenRefreshEnabledForTest();
+        CHECK(architectEnabled());
+        pregenResetForTest();
+        pregenSetWorkerTransportForTest(
+            [](const std::string&) { return cannedCreateRoom("x", "y"); });
+        pregenStart();
+        CHECK(pregenWorkerRunning());
+        pregenResetForTest();
+        CHECK(!pregenWorkerRunning());
+
+        // pregen off -> NO thread.
+        setenv("TEXTWORLD_PREGEN", "0", 1);
+        pregenRefreshEnabledForTest();
+        pregenStart();
+        CHECK(!pregenWorkerRunning());
+        pregenResetForTest();
+
+        // architect off (no key) -> NO thread, even with pregen on.
+        unsetenv("TEXTWORLD_PREGEN");
+        pregenRefreshEnabledForTest();
+        unsetenv("ANTHROPIC_API_KEY");
+        CHECK(!architectEnabled());
+        pregenStart();
+        CHECK(!pregenWorkerRunning());
+        pregenResetForTest();
+    }
+
+    // Both gates on for the rest.
+    setenv("ANTHROPIC_API_KEY", "test-key-never-used", 1);
+    unsetenv("TEXTWORLD_AI");
+    unsetenv("TEXTWORLD_PREGEN");
+    pregenRefreshEnabledForTest();
+
+    // (b) REQ-PREGEN-12, the fourth state: Running is OBSERVABLE. The job is
+    // pinned inside the transport until this test releases it.
+    {
+        pregenResetForTest();
+        BlockingTransport blocking;
+        pregenSetWorkerTransportForTest(
+            [&blocking](const std::string& body) { return blocking(body); });
+        pregenStart();
+        CHECK(pregenWorkerRunning());
+
+        pregenSubmit(makeJob(1, "east"));
+        spinUntil([] { return pregenStateOf(1, "east") == PregenState::Running; });
+        CHECK(pregenStateOf(1, "east") == PregenState::Running);
+
+        blocking.release();
+        spinUntil([] { return pregenStateOf(1, "east") == PregenState::Ready; });
+        CHECK(pregenStateOf(1, "east") == PregenState::Ready);
+        CHECK(blocking.callCount() == 1);
+
+        // And the candidate the worker produced is really there.
+        const PregenResult r = pregenAcquire(1, "east", nullptr);
+        CHECK(r.outcome == PregenOutcome::Hit);
+        CHECK(r.proposal.has_value());
+        CHECK(r.proposal->name == "crypt");
+        CHECK(r.snapshotTurn == 5);
+        pregenResetForTest();
+    }
+
+    // (c) REQ-PREGEN-6: ONE job at a time. Three jobs submitted at once; the
+    // fake flags any overlapping entry, and all three still complete.
+    {
+        pregenResetForTest();
+        std::mutex m;
+        std::condition_variable cv;
+        int done = 0;
+        bool overlapped = false;
+        int inside = 0;
+        pregenSetWorkerTransportForTest([&](const std::string&) {
+            {
+                const std::lock_guard<std::mutex> lock(m);
+                ++inside;
+                if (inside > 1) overlapped = true;
+            }
+            std::this_thread::yield();  // widen the window a real overlap needs
+            {
+                const std::lock_guard<std::mutex> lock(m);
+                --inside;
+                ++done;
+            }
+            cv.notify_all();
+            return cannedCreateRoom("crypt", "A cold undercroft.");
+        });
+        pregenStart();
+
+        pregenSubmit(makeJob(1, "east"));
+        pregenSubmit(makeJob(1, "west"));
+        pregenSubmit(makeJob(1, "north"));
+
+        {
+            std::unique_lock<std::mutex> lock(m);
+            cv.wait(lock, [&] { return done == 3; });
+        }
+        // `done` counts transport RETURNS; the worker stores each result just
+        // after. Wait on the state the assertions actually read, not on the
+        // fake's counter — otherwise the last store races this thread.
+        spinUntil([] {
+            return pregenStateOf(1, "north") == PregenState::Ready;
+        });
+
+        CHECK(!overlapped);  // never re-entered concurrently
+        CHECK(pregenStateOf(1, "east") == PregenState::Ready);
+        CHECK(pregenStateOf(1, "west") == PregenState::Ready);
+        CHECK(pregenStateOf(1, "north") == PregenState::Ready);
+        CHECK(pregenPendingCountForTest() == 0);
+        pregenResetForTest();
+    }
+
+    unsetenv("TEXTWORLD_PREGEN");
+    pregenRefreshEnabledForTest();
+}
+
+// --- Step 6, REQ-PREGEN-16/-19/-20: the only place in the codebase that
+// blocks a thread. Everything that can hang lives here, so a hang has exactly
+// one place to be. Same discipline as Step 5: explicit gates the test releases,
+// no sleep-based sequencing anywhere. ---
+static void testPregenWait() {
+    const ScopedEnvVar keyGuard("ANTHROPIC_API_KEY");
+    const ScopedEnvVar aiGuard("TEXTWORLD_AI");
+    const ScopedEnvVar pregenGuard("TEXTWORLD_PREGEN");
+    setenv("ANTHROPIC_API_KEY", "test-key-never-used", 1);
+    unsetenv("TEXTWORLD_AI");
+    unsetenv("TEXTWORLD_PREGEN");
+    pregenRefreshEnabledForTest();
+
+    auto makeJob = [](int64_t room, const std::string& dir) {
+        PregenJob job;
+        job.room = room;
+        job.direction = dir;
+        job.contextPayload = R"({"setting":"","origin_name":"stone hall"})";
+        job.snapshotTurn = 5;
+        return job;
+    };
+
+    // (a) REQ-PREGEN-16 first bullet: the tick walks an exit whose job is
+    // RUNNING. It waits for that job — it does NOT start a second call — and
+    // then commits that job's own result.
+    {
+        pregenResetForTest();
+        BlockingTransport blocking;
+        pregenSetWorkerTransportForTest(
+            [&blocking](const std::string& body) { return blocking(body); });
+        pregenStart();
+        pregenSubmit(makeJob(1, "east"));
+        spinUntil([] { return pregenStateOf(1, "east") == PregenState::Running; });
+
+        // The acquire blocks, so it runs on a second thread and the test
+        // releases the transport from here — the same shape as the real thing,
+        // where the tick blocks and the worker finishes underneath it.
+        std::promise<PregenResult> promise;
+        std::future<PregenResult> future = promise.get_future();
+        std::thread tick([&] {
+            promise.set_value(pregenAcquire(1, "east", nullptr));
+        });
+
+        // Release only once the tick is PROVABLY blocked in the wait.
+        // Releasing sooner would let the job land first and turn this into a
+        // hit — a flaky test, not different behavior.
+        spinUntil([] { return pregenWaitingCountForTest() == 1; });
+        blocking.release();
+        const PregenResult r = future.get();
+        tick.join();
+
+        CHECK(r.outcome == PregenOutcome::Waited);
+        CHECK(r.proposal.has_value());
+        CHECK(r.proposal->name == "crypt");
+        CHECK(r.waitMs >= 0.0);
+        CHECK(blocking.callCount() == 1);  // exactly one call IN TOTAL
+        pregenResetForTest();
+    }
+
+    // (b) REQ-PREGEN-12 / -16 second bullet — the failure this whole design
+    // exists to avoid. With the worker stuck inside job A, walking B must NOT
+    // wait for A: B is dequeued and run on the calling thread. Asserted by
+    // completing B *while A is still blocked*, which a queue-order wait could
+    // never do.
+    {
+        pregenResetForTest();
+        BlockingTransport blockingA;
+        std::atomic<int> bCalls{0};
+        pregenSetWorkerTransportForTest([&](const std::string& body) {
+            return blockingA(body);  // the worker only ever gets A
+        });
+        pregenStart();
+
+        pregenSubmit(makeJob(1, "east"));   // A — the worker will take this
+        spinUntil([] { return pregenStateOf(1, "east") == PregenState::Running; });
+        pregenSubmit(makeJob(1, "west"));   // B — still sitting in the queue
+        CHECK(pregenStateOf(1, "west") == PregenState::Queued);
+
+        HttpTransport bTransport = [&](const std::string&) {
+            ++bCalls;
+            return cannedCreateRoom("vestry", "A narrow robing room.");
+        };
+        const PregenResult rb = pregenAcquire(1, "west", &bTransport);
+
+        // B completed. A is STILL blocked — proof the tick did not queue behind
+        // it (the bound a naive wait would have accepted is queue depth x 8 s).
+        CHECK(pregenStateOf(1, "east") == PregenState::Running);
+        CHECK(rb.outcome == PregenOutcome::RanQueued);
+        CHECK(rb.proposal.has_value());
+        CHECK(rb.proposal->name == "vestry");
+        CHECK(bCalls.load() == 1);          // exactly one call for B's key
+        CHECK(blockingA.callCount() == 1);  // and A was not called again
+
+        blockingA.release();
+        spinUntil([] { return pregenStateOf(1, "east") == PregenState::Ready; });
+        pregenResetForTest();
+    }
+
+    // (c) REQ-PREGEN-19 / -20: stop while a job is in flight. The join must
+    // complete — this is the assertion that the process does not hang on quit —
+    // and a second stop must be a harmless no-op.
+    {
+        pregenResetForTest();
+        BlockingTransport blocking;
+        pregenSetWorkerTransportForTest(
+            [&blocking](const std::string& body) { return blocking(body); });
+        pregenStart();
+        CHECK(pregenWorkerRunning());
+        pregenSubmit(makeJob(1, "east"));
+        spinUntil([] { return pregenStateOf(1, "east") == PregenState::Running; });
+
+        // pregenStop() blocks until the worker's current job returns. A real
+        // libcurl transfer is torn down by the abort callback (which needs a
+        // real transfer, so it belongs to the live run); a fake transport has
+        // no such callback, so the test releases it explicitly — the join is
+        // still the thing under test.
+        std::thread stopper([] { pregenStop(); });
+        blocking.release();
+        stopper.join();
+        CHECK(!pregenWorkerRunning());
+
+        pregenStop();  // idempotent
+        CHECK(!pregenWorkerRunning());
+        pregenResetForTest();
+    }
+
+    // (d) Stop when no thread was ever started — safe, not a crash.
+    {
+        pregenResetForTest();
+        CHECK(!pregenWorkerRunning());
+        pregenStop();
+        pregenStop();
+        CHECK(!pregenWorkerRunning());
+    }
+
+    unsetenv("TEXTWORLD_PREGEN");
+    pregenRefreshEnabledForTest();
+}
+
+// --- Step 9, REQ-PREGEN-4 (call sites): playerRoom() is the accessor main()
+// needs to name a room for the scheduler. It must agree with the location row
+// AND with the subject renderStartup renders, or main would be prefetching the
+// exits of a room the player is not standing in. ---
+static void testPlayerRoom() {
+    const TempDbFile worldPath("textworld_player_room.db");
+    Db db = openWorld(worldPath.string(), "tests/fixture.sql");
+
+    // The fixture stands the player (3) in the stone hall (1).
+    CHECK(playerRoom(db) == 1);
+    CHECK(playerRoom(db) ==
+          queryInt(db, "SELECT container FROM location WHERE entity = 3"));
+    CHECK(contains(renderStartup(db), "vaulted hall of grey stone"));
+
+    // It TRACKS the player: after a move it names the new room, and still
+    // agrees with what startup would render.
+    const TurnResult r = runTurn(db, "go north");
+    CHECK(r.outcome == TurnOutcome::Ticked);
+    CHECK(playerRoom(db) == 2);
+    CHECK(playerRoom(db) ==
+          queryInt(db, "SELECT container FROM location WHERE entity = 3"));
+    CHECK(contains(renderStartup(db), "overgrown walled garden"));
+
+    // Read-only: naming the room neither ticks nor writes an event.
+    const int64_t turn = queryInt(db, "SELECT value FROM meta WHERE key = 'turn'");
+    const int64_t events = queryInt(db, "SELECT COUNT(*) FROM events");
+    CHECK(playerRoom(db) == 2);
+    CHECK(queryInt(db, "SELECT value FROM meta WHERE key = 'turn'") == turn);
+    CHECK(queryInt(db, "SELECT COUNT(*) FROM events") == events);
+}
+
+// --- Step 8, REQ-PREGEN-3/-4/-5/-10/-13/-18: the scheduler. Read-only, on the
+// main thread, and idempotent — that last property is what lets main() call it
+// after every single turn without thinking about it. ---
+static void testArchitectQueuePregen() {
+    const ScopedEnvVar keyGuard("ANTHROPIC_API_KEY");
+    const ScopedEnvVar aiGuard("TEXTWORLD_AI");
+    const ScopedEnvVar pregenGuard("TEXTWORLD_PREGEN");
+    setenv("ANTHROPIC_API_KEY", "test-key-never-used", 1);
+    unsetenv("TEXTWORLD_AI");
+    unsetenv("TEXTWORLD_PREGEN");
+    pregenRefreshEnabledForTest();
+
+    // (a) REQ-PREGEN-3 / -4: one job per LATENT exit, never one for a realized
+    // exit. The fixture already maps 1 -north-> 2 (realized); two latents are
+    // added alongside it.
+    {
+        pregenResetForTest();
+        architectResetPregenOccupancyForTest();
+        const TempDbFile worldPath("textworld_queue_basic.db");
+        Db db = openWorld(worldPath.string(), "tests/fixture.sql");
+        db.exec("INSERT INTO exits(room, direction, dest) VALUES (1, 'east', NULL)");
+        db.exec("INSERT INTO exits(room, direction, dest) VALUES (1, 'up', NULL)");
+
+        architectQueuePregen(db, 1);
+        CHECK(pregenPendingCountForTest() == 2);
+        CHECK(pregenStateOf(1, "east") == PregenState::Queued);
+        CHECK(pregenStateOf(1, "up") == PregenState::Queued);
+        CHECK(pregenStateOf(1, "north") == PregenState::Absent);  // realized
+
+        // (b) REQ-PREGEN-4, IDEMPOTENCE. Calling again for the same room queues
+        // nothing — the property D3's "call it after every turn" rests on.
+        architectQueuePregen(db, 1);
+        architectQueuePregen(db, 1);
+        CHECK(pregenPendingCountForTest() == 2);
+    }
+
+    // (c) REQ-PREGEN-5 / -13: the job carries the SNAPSHOT, and the snapshot is
+    // genuinely re-read — advance the turn counter between two scheduler calls
+    // and the stamp must move with it.
+    {
+        pregenResetForTest();
+        architectResetPregenOccupancyForTest();
+        const TempDbFile worldPath("textworld_queue_snapshot.db");
+        Db db = openWorld(worldPath.string(), "tests/fixture.sql");
+        db.exec("INSERT INTO exits(room, direction, dest) VALUES (1, 'east', NULL)");
+        db.exec("UPDATE meta SET value = 4 WHERE key = 'turn'");
+
+        // Capture what the worker actually receives by letting the tick run the
+        // queued job with a body-recording fake.
+        architectQueuePregen(db, 1);
+        std::string sentBody;
+        HttpTransport recorder = [&](const std::string& body) {
+            sentBody = body;
+            return cannedCreateRoom("crypt", "A cold undercroft.");
+        };
+        const PregenResult r = pregenAcquire(1, "east", &recorder);
+        CHECK(r.outcome == PregenOutcome::RanQueued);
+
+        // The context payload is exactly buildArchitectContext's output, and
+        // the enemy menu exactly eligibleEnemyBlurbs' (empty in this fixture,
+        // so the body carries no `enemy` property at all).
+        const std::string expectedContext = buildArchitectContext(db, 1, "east");
+        const nlohmann::json body = nlohmann::json::parse(sentBody);
+        CHECK(body["messages"][0]["content"] == expectedContext);
+        CHECK(eligibleEnemyBlurbs(db, 1).empty());
+        CHECK(!body["tools"][0]["input_schema"]["properties"].contains("enemy"));
+
+        // The stamp is meta.turn. It rides on the stored candidate, and a
+        // result carries it only on a HIT — which is the one outcome that
+        // reports age_turns — so it is read back the way production reads it.
+        CHECK(pregenStateOf(1, "east") == PregenState::Ready);
+        CHECK(pregenAcquire(1, "east", &recorder).snapshotTurn == 4);
+
+        // And it MOVES with meta.turn, so the read is genuinely being
+        // exercised rather than hard-coded.
+        db.exec("UPDATE meta SET value = 9 WHERE key = 'turn'");
+        db.exec("INSERT INTO exits(room, direction, dest) VALUES (1, 'up', NULL)");
+        architectQueuePregen(db, 1);
+        CHECK(pregenAcquire(1, "up", &recorder).outcome == PregenOutcome::RanQueued);
+        const PregenResult r2 = pregenAcquire(1, "up", &recorder);
+        CHECK(r2.outcome == PregenOutcome::Hit);
+        CHECK(r2.snapshotTurn == 9);
+    }
+
+    // (d) REQ-PREGEN-18: a room WITH an eligible enemy menu snapshots that menu
+    // into the job, so the model sees the same choices the synchronous path
+    // would have offered it.
+    {
+        pregenResetForTest();
+        architectResetPregenOccupancyForTest();
+        const TempDbFile worldPath("textworld_queue_enemy.db");
+        Db db = openWorld(worldPath.string(), "tests/combat_fixture.sql");
+        db.exec("INSERT INTO exits(room, direction, dest) VALUES (1, 'east', NULL)");
+        const std::vector<std::string> expected = eligibleEnemyBlurbs(db, 1);
+        CHECK(!expected.empty());
+
+        architectQueuePregen(db, 1);
+        std::string sentBody;
+        HttpTransport recorder = [&](const std::string& body) {
+            sentBody = body;
+            return cannedCreateRoom("crypt", "A cold undercroft.");
+        };
+        CHECK(pregenAcquire(1, "east", &recorder).outcome ==
+              PregenOutcome::RanQueued);
+        const nlohmann::json body = nlohmann::json::parse(sentBody);
+        const nlohmann::json& props = body["tools"][0]["input_schema"]["properties"];
+        CHECK(props.contains("enemy"));
+        CHECK(props["enemy"]["enum"] == nlohmann::json(expected));
+    }
+
+    // (e) REQ-PREGEN-10, OCCUPANCY. A failed job clears its slot; standing in
+    // the same room must NOT re-queue it, and leaving and returning MUST.
+    {
+        pregenResetForTest();
+        architectResetPregenOccupancyForTest();
+        const TempDbFile worldPath("textworld_queue_occupancy.db");
+        Db db = openWorld(worldPath.string(), "tests/fixture.sql");
+        db.exec("INSERT INTO exits(room, direction, dest) VALUES (1, 'east', NULL)");
+        db.exec("INSERT INTO exits(room, direction, dest) VALUES (2, 'east', NULL)");
+
+        architectQueuePregen(db, 1);
+        CHECK(pregenStateOf(1, "east") == PregenState::Queued);
+
+        // Force the job to fail: the slot goes back to Absent.
+        HttpTransport err = [](const std::string&) {
+            HttpResponse r;
+            r.transportError = true;
+            return r;
+        };
+        CHECK(pregenAcquire(1, "east", &err).outcome == PregenOutcome::RanQueued);
+        CHECK(pregenStateOf(1, "east") == PregenState::Absent);
+
+        // Same room, same occupancy → not retried. This is what bounds retries
+        // by room entries rather than by time; a spin here would be a call per
+        // turn, forever, during an outage.
+        architectQueuePregen(db, 1);
+        CHECK(pregenStateOf(1, "east") == PregenState::Absent);
+        CHECK(pregenPendingCountForTest() == 0);
+
+        // Leave (room 2) and come back → a NEW occupancy, so it IS re-queued.
+        architectQueuePregen(db, 2);
+        CHECK(pregenStateOf(2, "east") == PregenState::Queued);
+        architectQueuePregen(db, 1);
+        CHECK(pregenStateOf(1, "east") == PregenState::Queued);
+    }
+
+    // (f) REQ-PREGEN-1 / -2: both gates, each on its own. Off means NOTHING is
+    // queued — not a job that is queued and then ignored.
+    {
+        pregenResetForTest();
+        architectResetPregenOccupancyForTest();
+        const TempDbFile worldPath("textworld_queue_gates.db");
+        Db db = openWorld(worldPath.string(), "tests/fixture.sql");
+        db.exec("INSERT INTO exits(room, direction, dest) VALUES (1, 'east', NULL)");
+
+        setenv("TEXTWORLD_PREGEN", "0", 1);
+        pregenRefreshEnabledForTest();
+        architectQueuePregen(db, 1);
+        CHECK(pregenPendingCountForTest() == 0);
+        CHECK(pregenStateOf(1, "east") == PregenState::Absent);
+
+        unsetenv("TEXTWORLD_PREGEN");
+        pregenRefreshEnabledForTest();
+        unsetenv("ANTHROPIC_API_KEY");  // architectEnabled() false
+        CHECK(!architectEnabled());
+        architectQueuePregen(db, 1);
+        CHECK(pregenPendingCountForTest() == 0);
+        CHECK(pregenStateOf(1, "east") == PregenState::Absent);
+
+        // And with both back on, the same call does queue — so the two checks
+        // above are really about the gates and not about the fixture.
+        setenv("ANTHROPIC_API_KEY", "test-key-never-used", 1);
+        architectQueuePregen(db, 1);
+        CHECK(pregenStateOf(1, "east") == PregenState::Queued);
+    }
+
+    pregenResetForTest();
+    architectResetPregenOccupancyForTest();
+    unsetenv("TEXTWORLD_PREGEN");
+    pregenRefreshEnabledForTest();
+}
+
+// --- Step 2, REQ-PREGEN-14: architectCommitProposal is architectGenerate's
+// Phase 2, extracted whole. The refactor's real proof is that every existing
+// architect test above passes UNEDITED; this test adds the direct entry point,
+// asserting the same rows testArchitectGenerate asserts — reached from a
+// hand-built RoomProposal with no transport anywhere in sight, which is
+// precisely how the pregen hit path will reach it. ---
+static void testArchitectCommitProposal() {
+    const int64_t player = 3;
+    const TempDbFile worldPath("textworld_arch_commit.db");
+    Db db = openWorld(worldPath.string(), "tests/fixture.sql");
+
+    // A proposal as the gate would have produced it, with one declared onward
+    // exit so the latent-stub half of Phase 2 is exercised too.
+    RoomProposal proposal;
+    proposal.name = "crypt";
+    proposal.description = "A cold undercroft of grey stone.";
+    proposal.exits = {"north"};
+
+    db.begin();
+    const int64_t newRoom =
+        architectCommitProposal(db, 1, "east", proposal, player);
+    db.commit();
+
+    CHECK(newRoom > 5);  // minted beyond the fixture's ids
+    // The origin exit is realized to the new room, and the reciprocal planted.
+    CHECK(queryInt(db, "SELECT dest FROM exits WHERE room = 1 AND direction = 'east'") ==
+          newRoom);
+    CHECK(queryInt(db, ("SELECT dest FROM exits WHERE room = " +
+                        std::to_string(newRoom) + " AND direction = 'west'").c_str()) == 1);
+    CHECK(queryText(db, ("SELECT value FROM name WHERE entity = " +
+                         std::to_string(newRoom)).c_str()) == "crypt");
+    CHECK(queryText(db, ("SELECT prose FROM description WHERE entity = " +
+                         std::to_string(newRoom)).c_str()) ==
+          "A cold undercroft of grey stone.");
+    // The declared onward exit is present as a LATENT stub (dest NULL).
+    CHECK(queryInt(db, ("SELECT COUNT(*) FROM exits WHERE room = " +
+                        std::to_string(newRoom) +
+                        " AND direction = 'north' AND dest IS NULL").c_str()) == 1);
+    // Exactly one 'generated' event.
+    CHECK(queryInt(db, "SELECT COUNT(*) FROM events WHERE verb = 'generated'") == 1);
+}
+
 // Architect enemy spawning (REQ-COMBAT-31, -35): the deterministic half, driven
 // by a fake transport (cannedCreateRoom with an optional enemy blurb). The model
 // SELECTS a costume from the engine's eligible enum; the engine mints the
@@ -4831,6 +5764,417 @@ static void testResolveGoGenerate() {
         CHECK(queryInt(db, "SELECT COUNT(*) FROM exits WHERE room = 1 AND direction = 'east' AND dest IS NULL") == 1);
         CHECK(calls == 2);  // one transport call per attempt, no retries
     }
+}
+
+// A canonical dump of everything a generated room writes to canon: the exit
+// graph, the minted room's name and prose, and the event log's verbs. Ids are
+// deliberately INCLUDED — two worlds built from the same fixture mint the same
+// ids, so an identical string is a genuine row-for-row match rather than a
+// coincidence of shape.
+static std::string canonSnapshot(Db& db) {
+    std::string out;
+    out += "exits[" +
+           queryText(db,
+                     "SELECT IFNULL(group_concat(s, ';'), '') FROM ("
+                     "SELECT room || ' ' || direction || ' -> ' || "
+                     "IFNULL(CAST(dest AS TEXT), 'latent') AS s FROM exits "
+                     "ORDER BY room, direction)") +
+           "]";
+    out += " names[" +
+           queryText(db,
+                     "SELECT IFNULL(group_concat(s, ';'), '') FROM ("
+                     "SELECT entity || '=' || value AS s FROM name "
+                     "ORDER BY entity)") +
+           "]";
+    out += " prose[" +
+           queryText(db,
+                     "SELECT IFNULL(group_concat(s, ';'), '') FROM ("
+                     "SELECT entity || '=' || prose AS s FROM description "
+                     "ORDER BY entity)") +
+           "]";
+    out += " events[" +
+           queryText(db,
+                     "SELECT IFNULL(group_concat(s, ';'), '') FROM ("
+                     "SELECT verb || ':' || IFNULL(detail, '') AS s FROM events "
+                     "ORDER BY id)") +
+           "]";
+    out += " rooms[" + std::to_string(queryInt(db, "SELECT COUNT(*) FROM room")) +
+           "] entities[" +
+           std::to_string(queryInt(db, "SELECT COUNT(*) FROM entities")) + "]";
+    return out;
+}
+
+// --- Step 7, REQ-PREGEN-14/-15/-17/-18/-23: committing a candidate inside the
+// tick. The headline claim is that a pre-generated room and a synchronously
+// generated one are INDISTINGUISHABLE in canon — asserted by building both from
+// the same proposal and comparing the two worlds row for row, not by eye. ---
+static void testPregenCommit() {
+    const ScopedEnvVar keyGuard("ANTHROPIC_API_KEY");
+    const ScopedEnvVar aiGuard("TEXTWORLD_AI");
+    const ScopedEnvVar pregenGuard("TEXTWORLD_PREGEN");
+    setenv("ANTHROPIC_API_KEY", "test-key-never-used", 1);
+    unsetenv("TEXTWORLD_AI");
+    unsetenv("TEXTWORLD_PREGEN");
+    pregenRefreshEnabledForTest();
+    const int64_t player = 3;
+
+    // The one proposal both paths will produce, in both of its forms.
+    const std::string roomName = "crypt";
+    const std::string roomProse = "A cold undercroft of grey stone.";
+    const std::vector<std::string> roomExits = {"north", "down"};
+
+    RoomProposal candidate;
+    candidate.name = roomName;
+    candidate.description = roomProse;
+    candidate.exits = roomExits;
+
+    // --- (a) HIT: canon equality with the synchronous path, and zero network.
+    std::string syncCanon;
+    {
+        pregenResetForTest();
+        const TempDbFile worldPath("textworld_pregen_sync.db");
+        Db db = openWorld(worldPath.string(), "tests/fixture.sql");
+        db.exec("INSERT INTO exits(room, direction, dest) VALUES (1, 'east', NULL)");
+        HttpTransport fake = [&](const std::string&) {
+            return cannedCreateRoom(roomName, roomProse, roomExits);
+        };
+        tickT(db, Action{Verb::Go, 0, "east"}, fake, player);
+        syncCanon = canonSnapshot(db);
+    }
+    {
+        pregenResetForTest();
+        const TempDbFile worldPath("textworld_pregen_hit.db");
+        Db db = openWorld(worldPath.string(), "tests/fixture.sql");
+        db.exec("INSERT INTO exits(room, direction, dest) VALUES (1, 'east', NULL)");
+        pregenInjectReadyForTest(1, "east", candidate, /*snapshotTurn=*/1);
+
+        int calls = 0;
+        HttpTransport fake = [&](const std::string&) {
+            ++calls;
+            return cannedCreateRoom("wrong", "should never be built");
+        };
+        tickT(db, Action{Verb::Go, 0, "east"}, fake, player);
+
+        CHECK(calls == 0);  // REQ-PREGEN-14: no network on the commit turn
+        const int64_t newRoom = queryInt(
+            db, "SELECT dest FROM exits WHERE room = 1 AND direction = 'east'");
+        CHECK(newRoom > 5);
+        CHECK(queryInt(db, "SELECT container FROM location WHERE entity = 3") == newRoom);
+        // Row for row, the same world the synchronous path produced.
+        CHECK(canonSnapshot(db) == syncCanon);
+    }
+
+    // --- (b) MISS with an empty store: the synchronous path, untouched. This
+    // duplicates nothing — testResolveGoGenerate proves it at length and passes
+    // UNEDITED, which IS the REQ-PREGEN-15 regression proof. What is added here
+    // is the explicit statement that an empty store leaves the wall intact on a
+    // declining transport.
+    {
+        pregenResetForTest();
+        const TempDbFile worldPath("textworld_pregen_miss.db");
+        Db db = openWorld(worldPath.string(), "tests/fixture.sql");
+        db.exec("INSERT INTO exits(room, direction, dest) VALUES (1, 'east', NULL)");
+        int calls = 0;
+        HttpTransport err = [&](const std::string&) {
+            ++calls;
+            HttpResponse r;
+            r.transportError = true;
+            return r;
+        };
+        tickT(db, Action{Verb::Go, 0, "east"}, err, player);
+        CHECK(calls == 1);
+        CHECK(queryInt(db, "SELECT container FROM location WHERE entity = 3") == 1);
+        CHECK(queryText(db, "SELECT detail FROM events ORDER BY id DESC LIMIT 1") ==
+              "You can't go that way.");
+        CHECK(queryInt(db, "SELECT COUNT(*) FROM exits WHERE room = 1 "
+                           "AND direction = 'east' AND dest IS NULL") == 1);
+    }
+
+    // --- (c) RAN_QUEUED / WAITED reach the same commit. A queued job run on the
+    // main thread commits exactly as a hit does — the proposal's provenance is
+    // invisible to Phase 2.
+    {
+        pregenResetForTest();
+        const TempDbFile worldPath("textworld_pregen_ranqueued.db");
+        Db db = openWorld(worldPath.string(), "tests/fixture.sql");
+        db.exec("INSERT INTO exits(room, direction, dest) VALUES (1, 'east', NULL)");
+        PregenJob job;
+        job.room = 1;
+        job.direction = "east";
+        job.contextPayload = R"({"setting":"","origin_name":"stone hall"})";
+        job.snapshotTurn = 1;
+        pregenSubmit(job);
+
+        int calls = 0;
+        HttpTransport fake = [&](const std::string&) {
+            ++calls;
+            return cannedCreateRoom(roomName, roomProse, roomExits);
+        };
+        tickT(db, Action{Verb::Go, 0, "east"}, fake, player);
+        CHECK(calls == 1);  // the queued job, run here — not a second call
+        CHECK(canonSnapshot(db) == syncCanon);
+    }
+
+    // --- (d) REQ-PREGEN-14 / -18, the enemy half, BOTH ways. Omitting it would
+    // silently stop spawning on the pregen path, which no room-shape assertion
+    // would ever catch.
+    {
+        auto hostilesIn = [](Db& db, int64_t room) {
+            return queryInt(db, ("SELECT COUNT(*) FROM hostile h JOIN location l "
+                                 "ON l.entity = h.entity WHERE l.container = " +
+                                 std::to_string(room)).c_str());
+        };
+
+        // (d1) an ELIGIBLE blurb on a hit places the enemy and ticks the ledger.
+        {
+            pregenResetForTest();
+            const TempDbFile worldPath("textworld_pregen_enemy_ok.db");
+            Db db = openWorld(worldPath.string(), "tests/combat_fixture.sql");
+            db.exec("INSERT INTO exits(room, direction, dest) VALUES (1, 'east', NULL)");
+            const std::string goblinBlurb = queryText(
+                db, "SELECT blurb FROM bestiary WHERE archetype = 'goblin_grunt'");
+
+            RoomProposal armed = candidate;
+            armed.enemyBlurb = goblinBlurb;
+            pregenInjectReadyForTest(1, "east", armed, /*snapshotTurn=*/1);
+
+            int calls = 0;
+            HttpTransport fake = [&](const std::string&) {
+                ++calls;
+                return cannedCreateRoom("wrong", "never built");
+            };
+            tickT(db, Action{Verb::Go, 0, "east"}, fake, player);
+            CHECK(calls == 0);
+
+            const int64_t newRoom = queryInt(
+                db, "SELECT dest FROM exits WHERE room = 1 AND direction = 'east'");
+            CHECK(hostilesIn(db, newRoom) == 1);
+            CHECK(queryInt(db, "SELECT value FROM meta WHERE key = "
+                               "'architect_spawn_count'") == 1);
+        }
+
+        // (d2) a STALE / ineligible blurb places nothing and STILL makes the
+        // room — the live re-check declining is not a failure (REQ-PREGEN-18).
+        {
+            pregenResetForTest();
+            const TempDbFile worldPath("textworld_pregen_enemy_stale.db");
+            Db db = openWorld(worldPath.string(), "tests/combat_fixture.sql");
+            db.exec("INSERT INTO exits(room, direction, dest) VALUES (1, 'east', NULL)");
+
+            RoomProposal stale = candidate;
+            stale.enemyBlurb = "a dragon of pure invention";
+            pregenInjectReadyForTest(1, "east", stale, /*snapshotTurn=*/1);
+
+            tickT(db, Action{Verb::Go, 0, "east"},
+                  [](const std::string&) {
+                      return cannedCreateRoom("wrong", "never built");
+                  },
+                  player);
+
+            const int64_t newRoom = queryInt(
+                db, "SELECT dest FROM exits WHERE room = 1 AND direction = 'east'");
+            CHECK(newRoom > 15);  // the room IS made
+            CHECK(hostilesIn(db, newRoom) == 0);
+            CHECK(queryInt(db, "SELECT COUNT(*) FROM meta WHERE key = "
+                               "'architect_spawn_count'") == 0);
+            CHECK(queryInt(db, "SELECT container FROM location WHERE entity = 3") ==
+                  newRoom);
+        }
+    }
+
+    pregenResetForTest();
+    unsetenv("TEXTWORLD_PREGEN");
+    pregenRefreshEnabledForTest();
+}
+
+// --- Step 7, REQ-PREGEN-23: exactly ONE outcome record per latent-exit walk,
+// each optional key on its own outcome and nowhere else, and the `generate`
+// stage accompanying a MISS alone. That last clause is the one worth a test:
+// reusing `generate` for a ran_queued path would give one stage name two
+// different spans and quietly skew every miss-versus-ran_queued comparison. ---
+static void testPregenOutcomeRecords() {
+    const ScopedEnvVar keyGuard("ANTHROPIC_API_KEY");
+    const ScopedEnvVar aiGuard("TEXTWORLD_AI");
+    const ScopedEnvVar pregenGuard("TEXTWORLD_PREGEN");
+    const ScopedEnvVar profGuard("TEXTWORLD_PROFILE");
+    setenv("ANTHROPIC_API_KEY", "test-key-never-used", 1);
+    unsetenv("TEXTWORLD_AI");
+    unsetenv("TEXTWORLD_PREGEN");
+    pregenRefreshEnabledForTest();
+    const int64_t player = 3;
+
+    std::vector<std::string> captured;
+    profileSetSink(
+        [&captured](const std::string& line) { captured.push_back(line); });
+    setenv("TEXTWORLD_PROFILE", "1", 1);
+    profileRefreshEnabled();
+
+    // Every kind=pregen record in the capture, parsed.
+    auto pregenRecords = [&captured]() {
+        std::vector<std::map<std::string, std::string>> out;
+        for (const std::string& line : captured) {
+            auto kv = parseProfileRecord(line);
+            if (kv.at("kind") == "pregen") out.push_back(std::move(kv));
+        }
+        return out;
+    };
+    // True iff a stage=generate record was emitted.
+    auto sawGenerateStage = [&captured]() {
+        for (const std::string& line : captured) {
+            const auto kv = parseProfileRecord(line);
+            if (kv.at("kind") == "stage" && kv.at("stage") == "generate") return true;
+        }
+        return false;
+    };
+
+    // (a) HIT — age_turns only, and NO generate stage (no synchronous call ran).
+    {
+        pregenResetForTest();
+        captured.clear();
+        const TempDbFile worldPath("textworld_pregen_rec_hit.db");
+        Db db = openWorld(worldPath.string(), "tests/fixture.sql");
+        db.exec("INSERT INTO exits(room, direction, dest) VALUES (1, 'east', NULL)");
+        // meta.turn is 0 in the fixture and tickT increments it to 1, so a
+        // candidate snapshotted at turn 0 is one turn old at commit.
+        RoomProposal proposal;
+        proposal.name = "crypt";
+        proposal.description = "A cold undercroft.";
+        pregenInjectReadyForTest(1, "east", proposal, /*snapshotTurn=*/0);
+
+        tickT(db, Action{Verb::Go, 0, "east"},
+              [](const std::string&) { return cannedCreateRoom("x", "y"); }, player);
+
+        const auto records = pregenRecords();
+        CHECK(records.size() == 1);
+        if (records.size() == 1) {
+            const auto& r = records[0];
+            CHECK(r.at("outcome") == "hit");
+            CHECK(r.at("age_turns") == "1");
+            CHECK(r.count("wait_ms") == 0);
+            CHECK(r.count("run_ms") == 0);
+        }
+        CHECK(!sawGenerateStage());
+    }
+
+    // (b) MISS — no optional key at all, and the `generate` stage DOES appear:
+    // the synchronous architectGenerate really ran (D5).
+    {
+        pregenResetForTest();
+        captured.clear();
+        const TempDbFile worldPath("textworld_pregen_rec_miss.db");
+        Db db = openWorld(worldPath.string(), "tests/fixture.sql");
+        db.exec("INSERT INTO exits(room, direction, dest) VALUES (1, 'east', NULL)");
+
+        tickT(db, Action{Verb::Go, 0, "east"},
+              [](const std::string&) {
+                  return cannedCreateRoom("crypt", "A cold undercroft.");
+              },
+              player);
+
+        const auto records = pregenRecords();
+        CHECK(records.size() == 1);
+        if (records.size() == 1) {
+            const auto& r = records[0];
+            CHECK(r.at("outcome") == "miss");
+            CHECK(r.count("age_turns") == 0);
+            CHECK(r.count("wait_ms") == 0);
+            CHECK(r.count("run_ms") == 0);
+        }
+        CHECK(sawGenerateStage());
+    }
+
+    // (c) RAN_QUEUED — run_ms only, and NO generate stage: the cost rides on
+    // this record instead, because a queued run covers Phase 1 alone.
+    {
+        pregenResetForTest();
+        captured.clear();
+        const TempDbFile worldPath("textworld_pregen_rec_ranq.db");
+        Db db = openWorld(worldPath.string(), "tests/fixture.sql");
+        db.exec("INSERT INTO exits(room, direction, dest) VALUES (1, 'east', NULL)");
+        PregenJob job;
+        job.room = 1;
+        job.direction = "east";
+        job.contextPayload = R"({"setting":"","origin_name":"stone hall"})";
+        job.snapshotTurn = 0;
+        pregenSubmit(job);
+
+        tickT(db, Action{Verb::Go, 0, "east"},
+              [](const std::string&) {
+                  return cannedCreateRoom("crypt", "A cold undercroft.");
+              },
+              player);
+
+        const auto records = pregenRecords();
+        CHECK(records.size() == 1);
+        if (records.size() == 1) {
+            const auto& r = records[0];
+            CHECK(r.at("outcome") == "ran_queued");
+            CHECK(r.count("run_ms") == 1);
+            CHECK(r.count("age_turns") == 0);
+            CHECK(r.count("wait_ms") == 0);
+        }
+        CHECK(!sawGenerateStage());
+    }
+
+    // (d) WAITED — wait_ms only. The worker is pinned inside job A's transport
+    // and the tick walks that very exit, so the tick waits it out.
+    {
+        pregenResetForTest();
+        captured.clear();
+        const TempDbFile worldPath("textworld_pregen_rec_wait.db");
+        Db db = openWorld(worldPath.string(), "tests/fixture.sql");
+        db.exec("INSERT INTO exits(room, direction, dest) VALUES (1, 'east', NULL)");
+
+        BlockingTransport blocking;
+        pregenSetWorkerTransportForTest(
+            [&blocking](const std::string& body) { return blocking(body); });
+        pregenStart();
+        PregenJob job;
+        job.room = 1;
+        job.direction = "east";
+        job.contextPayload = R"({"setting":"","origin_name":"stone hall"})";
+        job.snapshotTurn = 0;
+        pregenSubmit(job);
+        spinUntil([] { return pregenStateOf(1, "east") == PregenState::Running; });
+
+        // The tick blocks, so it runs on its own thread and this one releases
+        // the worker — the same shape as the real thing.
+        std::thread releaser([&] {
+            // Wait until the tick is provably inside the Running wait, so the
+            // outcome is deterministically `waited` and never a lucky `hit`.
+            spinUntil([] { return pregenWaitingCountForTest() == 1; });
+            blocking.release();
+        });
+        tickT(db, Action{Verb::Go, 0, "east"},
+              [](const std::string&) {
+                  return cannedCreateRoom("wrong", "never built");
+              },
+              player);
+        releaser.join();
+
+        const auto records = pregenRecords();
+        CHECK(records.size() == 1);
+        if (records.size() == 1) {
+            const auto& r = records[0];
+            CHECK(r.at("outcome") == "waited");
+            CHECK(r.count("wait_ms") == 1);
+            CHECK(r.count("age_turns") == 0);
+            CHECK(r.count("run_ms") == 0);
+        }
+        // The worker's result was committed, not a second call's.
+        CHECK(blocking.callCount() == 1);
+        CHECK(queryText(db, ("SELECT value FROM name WHERE entity = " +
+                             std::to_string(queryInt(
+                                 db, "SELECT dest FROM exits WHERE room = 1 "
+                                     "AND direction = 'east'"))).c_str()) == "crypt");
+        pregenResetForTest();
+    }
+
+    profileSetSink({});
+    unsetenv("TEXTWORLD_PROFILE");
+    profileRefreshEnabled();
+    unsetenv("TEXTWORLD_PREGEN");
+    pregenRefreshEnabledForTest();
 }
 
 // --- the nested `generate` stage (REQ-LAT-2) --------------------------------
@@ -5154,6 +6498,8 @@ int main() {
     testNlResolvePrompt();
     testProseTransport();
     testProfileRecords();
+    testProfileBackgroundAndDwell();
+    testAiHttpWorkerClient();
     testProfileTurnStages();
     testAiRoleModel();
     testAiUsageParse();
@@ -5176,8 +6522,16 @@ int main() {
     testArchitectInvertible();
     testWriteGeneratedRoom();
     testArchitectGenerate();
+    testPregenStore();
+    testPregenWorker();
+    testPregenWait();
+    testPlayerRoom();
+    testArchitectQueuePregen();
+    testArchitectCommitProposal();
     testArchitectSpawn();
     testResolveGoGenerate();
+    testPregenCommit();
+    testPregenOutcomeRecords();
     testProfileGenerateStage();
     testCombatFlee();
     testGeneratedEventInvisible();

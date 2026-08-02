@@ -1,0 +1,52 @@
+twprof kind=dwell turn=0 ms=0.007
+twprof kind=call turn=1 role=resolve model=claude-haiku-4-5 status=200 namelookup_us=2519 connect_us=15033 appconnect_us=118286 starttransfer_us=1688604 total_us=1688849 input_tokens=1389 output_tokens=71
+twprof kind=stage turn=1 stage=resolve ms=1691.631
+twprof kind=stage turn=1 stage=tick ms=3.010
+twprof kind=call turn=1 role=narrate model=claude-opus-4-8 status=200 namelookup_us=40 connect_us=0 appconnect_us=0 starttransfer_us=2821368 total_us=2821525 input_tokens=676 output_tokens=112
+twprof kind=stage turn=1 stage=narrate ms=2825.882
+twprof kind=stage turn=1 stage=total ms=4520.714
+twprof kind=dwell turn=1 ms=0.015
+twprof kind=call turn=2 role=resolve model=claude-haiku-4-5 status=200 namelookup_us=25 connect_us=0 appconnect_us=0 starttransfer_us=837266 total_us=837347 input_tokens=1387 output_tokens=54
+twprof kind=stage turn=2 stage=resolve ms=839.546
+twprof kind=stage turn=2 stage=tick ms=3.402
+twprof kind=call turn=2 role=narrate model=claude-opus-4-8 status=200 namelookup_us=40 connect_us=0 appconnect_us=0 starttransfer_us=3569075 total_us=3569182 input_tokens=732 output_tokens=158
+twprof kind=stage turn=2 stage=narrate ms=3572.141
+twprof kind=stage turn=2 stage=total ms=4415.260
+twprof kind=dwell turn=2 ms=0.013
+twprof kind=call turn=3 role=generate model=claude-opus-4-8 status=200 background=1 namelookup_us=2818 connect_us=15790 appconnect_us=35236 starttransfer_us=5554561 total_us=5554719 input_tokens=2480 output_tokens=278
+twprof kind=call turn=3 role=resolve model=claude-haiku-4-5 status=200 namelookup_us=40 connect_us=0 appconnect_us=0 starttransfer_us=1308475 total_us=1308630 input_tokens=1387 output_tokens=54
+twprof kind=stage turn=3 stage=resolve ms=1311.788
+twprof kind=stage turn=3 stage=tick ms=4.231
+twprof kind=call turn=3 role=narrate model=claude-opus-4-8 status=200 namelookup_us=37 connect_us=0 appconnect_us=0 starttransfer_us=3305223 total_us=3305346 input_tokens=801 output_tokens=158
+twprof kind=stage turn=3 stage=narrate ms=3308.028
+twprof kind=stage turn=3 stage=total ms=4624.214
+twprof kind=dwell turn=3 ms=0.017
+twprof kind=call turn=4 role=resolve model=claude-haiku-4-5 status=200 namelookup_us=39 connect_us=0 appconnect_us=0 starttransfer_us=1328042 total_us=1328161 input_tokens=1391 output_tokens=54
+twprof kind=stage turn=4 stage=resolve ms=1330.225
+twprof kind=stage turn=4 stage=tick ms=2.317
+twprof kind=call turn=4 role=narrate model=claude-opus-4-8 status=200 namelookup_us=42 connect_us=0 appconnect_us=0 starttransfer_us=2331673 total_us=2331790 input_tokens=823 output_tokens=131
+twprof kind=stage turn=4 stage=narrate ms=2335.247
+twprof kind=stage turn=4 stage=total ms=3667.973
+twprof kind=dwell turn=4 ms=0.013
+twprof kind=call turn=5 role=generate model=claude-opus-4-8 status=0 failed=1 background=1 namelookup_us=36 connect_us=0 appconnect_us=0 starttransfer_us=0 total_us=8006212
+validateRoomProposal: rejected, clause a failed: HTTP status is not 200
+twprof kind=call turn=5 role=resolve model=claude-haiku-4-5 status=200 namelookup_us=42 connect_us=0 appconnect_us=0 starttransfer_us=5693871 total_us=5694130 input_tokens=1391 output_tokens=54
+twprof kind=stage turn=5 stage=resolve ms=5696.171
+twprof kind=stage turn=5 stage=tick ms=2.933
+twprof kind=call turn=5 role=narrate model=claude-opus-4-8 status=200 namelookup_us=51 connect_us=0 appconnect_us=0 starttransfer_us=2197667 total_us=2197834 input_tokens=817 output_tokens=122
+twprof kind=stage turn=5 stage=narrate ms=2200.526
+twprof kind=stage turn=5 stage=total ms=7899.841
+twprof kind=dwell turn=5 ms=0.021
+twprof kind=call turn=6 role=resolve model=claude-haiku-4-5 status=200 namelookup_us=25 connect_us=0 appconnect_us=0 starttransfer_us=906696 total_us=906874 input_tokens=1391 output_tokens=71
+twprof kind=stage turn=6 stage=resolve ms=908.410
+twprof kind=pregen turn=6 outcome=hit age_turns=5
+twprof kind=stage turn=6 stage=tick ms=2.147
+twprof kind=call turn=6 role=narrate model=claude-opus-4-8 status=200 namelookup_us=24 connect_us=0 appconnect_us=0 starttransfer_us=3430658 total_us=3430999 input_tokens=916 output_tokens=195
+twprof kind=stage turn=6 stage=narrate ms=3434.833
+twprof kind=stage turn=6 stage=total ms=4345.511
+twprof kind=dwell turn=6 ms=0.011
+twprof kind=call turn=7 role=resolve model=claude-haiku-4-5 status=200 namelookup_us=21 connect_us=0 appconnect_us=0 starttransfer_us=848563 total_us=848806 input_tokens=1394 output_tokens=54
+twprof kind=stage turn=7 stage=resolve ms=850.773
+twprof kind=stage turn=7 stage=total ms=850.823
+twprof kind=call turn=7 role=generate model=claude-opus-4-8 status=0 failed=1 background=1 namelookup_us=93 connect_us=0 appconnect_us=0 starttransfer_us=0 total_us=1005421
+validateRoomProposal: rejected, clause a failed: HTTP status is not 200

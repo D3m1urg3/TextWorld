@@ -122,3 +122,7 @@ TurnResult runTurn(Db& db, const std::string& line) {
 std::string renderStartup(Db& db) {
     return renderRoomOf(db, playerId(db));
 }
+
+// See loop.hpp: exists so main() can name the room the pre-generation scheduler
+// should look at (REQ-PREGEN-4) without duplicating this file's two lookups.
+int64_t playerRoom(Db& db) { return roomOf(db, playerId(db)); }

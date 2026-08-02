@@ -1,0 +1,7 @@
+look
+north
+take key
+inventory
+south
+wait
+quit

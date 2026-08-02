@@ -7,6 +7,8 @@
 #include "architect.hpp"  // architectGenerate + aiNarrationEnabled (via prose.hpp)
 #include "combat.hpp"      // resolveAttack (the combat verb resolution)
 #include "mutations.hpp"
+#include "pregen.hpp"      // the candidate store — the tick's one call into it
+#include "profile.hpp"     // PregenRecord — the per-walk outcome
 
 namespace {
 
@@ -95,10 +97,59 @@ void resolveGo(Db& db, const Action& action, int64_t player,
     // failure the latent row is untouched — the wall below is retryable next
     // turn (REQ-EXITS-3).
     if (state == ExitState::Latent && aiNarrationEnabled()) {
-        const bool generated =
-            transport != nullptr
-                ? architectGenerate(db, room, action.direction, player, *transport)
-                : architectGenerate(db, room, action.direction, player);
+        // Pre-generation, if it has anything for this exit (REQ-PREGEN-14/-15).
+        // An empty candidate store makes everything below byte-for-byte what it
+        // was: pregenAcquire returns Miss, and the else branch is the original
+        // code unchanged. That is what lets every existing test here pass
+        // untouched, and it is the regression proof for "a miss is today".
+        const PregenResult pre =
+            pregenAcquire(room, action.direction, transport);
+
+        bool generated = false;
+        if (pre.proposal) {
+            // A candidate arrived — by hit, by wait, or by running the queued
+            // job here. NO network on this turn's commit path: only Phase 2,
+            // and the SAME Phase 2 the synchronous path runs, so the canon is
+            // indistinguishable from a room written the old way (REQ-PREGEN-14).
+            // The enemy re-check inside it is against the LIVE menu, so a stale
+            // blurb spawns nothing and the room is still made (REQ-PREGEN-18).
+            architectCommitProposal(db, room, action.direction, *pre.proposal,
+                                    player);
+            generated = true;
+        } else {
+            // Miss, or a job that failed: today's synchronous path, verbatim.
+            generated =
+                transport != nullptr
+                    ? architectGenerate(db, room, action.direction, player, *transport)
+                    : architectGenerate(db, room, action.direction, player);
+        }
+
+        // One outcome record per latent-exit walk (REQ-PREGEN-23), whether or
+        // not a room resulted — a `miss` that then failed to generate is still
+        // a miss, and a hit rate computed from successes alone would flatter
+        // the feature.
+        if (profilingEnabled()) {
+            PregenRecord record;
+            record.turn = profileCurrentTurn();
+            record.outcome = pregenOutcomeName(pre.outcome);
+            switch (pre.outcome) {
+                case PregenOutcome::Hit:
+                    // Read ONLY here — profiling on, and only on a hit — so an
+                    // ordinary run never pays for the extra row.
+                    record.ageTurns = architectWorldTurn(db) - pre.snapshotTurn;
+                    break;
+                case PregenOutcome::Waited:
+                    record.waitMs = pre.waitMs;
+                    break;
+                case PregenOutcome::RanQueued:
+                    record.runMs = pre.runMs;
+                    break;
+                case PregenOutcome::Miss:
+                    break;  // a miss carries no optional key
+            }
+            profileEmit(record);
+        }
+
         if (generated) {
             int64_t realizedDest = 0;
             exitState(db, room, action.direction, realizedDest);

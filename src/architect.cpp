@@ -13,13 +13,16 @@
 #include <cstdlib>
 #include <exception>
 #include <optional>
+#include <set>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "aihttp.hpp"     // modelForRole + the shared production transport
 #include "combat.hpp"     // eligibleEnemyBlurbs / archetypeForEnemyBlurb — the gated menu
 #include "json.hpp"
 #include "mutations.hpp"  // writeGeneratedRoom / placeEnemy — the SOLE sanctioned write path
+#include "pregen.hpp"     // the store this schedules work into
 #include "profile.hpp"    // ScopedStage — the nested `generate` timer
 
 namespace {
@@ -103,6 +106,30 @@ std::string canonProseOf(Db& db, int64_t entity) {
     if (!s.step()) return "";
     return s.colText(0);
 }
+
+// --- the pre-generation scheduler's two reads (REQ-PREGEN-4, -5) ------------
+
+// Every ungenerated exit of a room: the directions with a row but no
+// destination (REQ-EXITS-1). These are exactly the walks that would otherwise
+// pay the architect's full cost on the critical path.
+std::vector<std::string> latentDirections(Db& db, int64_t room) {
+    std::vector<std::string> directions;
+    Stmt s = db.prepare(
+        "SELECT direction FROM exits WHERE room = ? AND dest IS NULL");
+    s.bind(1, room);
+    while (s.step()) directions.push_back(s.colText(0));
+    return directions;
+}
+
+// --- occupancy (REQ-PREGEN-4, REQ-PREGEN-10) --------------------------------
+//
+// The room the scheduler was last called with, and the directions already
+// attempted while the player has been there. A change of room clears the set.
+// That gives exactly the behavior the spec asks for: standing still never
+// re-queues a slot whose job failed, and leaving and returning does. Main
+// thread only — the scheduler is never called from the worker.
+int64_t g_occupancyRoom = 0;
+std::set<std::string> g_attempted;
 
 }  // namespace
 
@@ -394,10 +421,11 @@ bool architectGenerate(Db& db, int64_t room, const std::string& direction,
 
     std::optional<RoomProposal> proposal;
     try {  // ── Phase 1 (AI side): NO database write happens in here ──
+        // The context read stays INSIDE the catch: a DB fault here is a Phase-1
+        // failure and walls, exactly as before. Everything after it is the
+        // snapshot-only half the background worker shares.
         const std::string ctx = buildArchitectContext(db, room, direction);
-        const std::string body = buildArchitectRequestBody(ctx, enemyBlurbs);
-        const HttpResponse resp = transport(body);  // at most once, no retries
-        proposal = validateRoomProposal(resp, direction);  // never throws
+        proposal = architectProposeRoom(ctx, enemyBlurbs, direction, transport);
     } catch (const std::exception& e) {
         std::fprintf(stderr, "architectGenerate: phase 1 failed: %s\n", e.what());
         return false;  // → wall (REQ-ARCH-3c)
@@ -409,28 +437,109 @@ bool architectGenerate(Db& db, int64_t room, const std::string& direction,
 
     // ── Phase 2 (the write): OUTSIDE the catch. Runs only on a validated
     // proposal; a genuine DB fault propagates out to runTurn's tick rollback
-    // (REQ-ARCH-5), never downgraded to a wall.
+    // (REQ-ARCH-5), never downgraded to a wall. Extracted whole so the
+    // pre-generated candidate path commits through exactly this code
+    // (REQ-PREGEN-14).
+    architectCommitProposal(db, room, direction, *proposal, actor);
+    return true;
+}
+
+std::optional<RoomProposal> architectProposeRoom(
+    const std::string& contextPayload,
+    const std::vector<std::string>& enemyBlurbs, const std::string& direction,
+    const HttpTransport& transport) {
+    const std::string body =
+        buildArchitectRequestBody(contextPayload, enemyBlurbs);
+    const HttpResponse resp = transport(body);  // at most once, no retries
+    return validateRoomProposal(resp, direction);  // never throws
+}
+
+int64_t architectCommitProposal(Db& db, int64_t originRoom,
+                                const std::string& direction,
+                                const RoomProposal& proposal, int64_t actor) {
     const int64_t newRoom =
-        writeGeneratedRoom(db, room, direction, *proposal, actor);
+        writeGeneratedRoom(db, originRoom, direction, proposal, actor);
 
     // Enemy placement (REQ-COMBAT-31): if the model selected a blurb, re-check it
     // against the eligible menu and, when valid, cast the instance from the
     // catalog into the new room and tick the bootstrap ledger. A hallucinated,
     // stale, or absent selection resolves to "" → no spawn (REQ-COMBAT-35), room
     // still made. The model picked the costume; the engine mints every number.
+    //
+    // The menu is re-read LIVE here, deliberately, even when the proposal came
+    // from a candidate snapshotted turns ago (REQ-PREGEN-18): a stale blurb
+    // resolves to "" and simply spawns nothing, exactly as a hallucinated one
+    // does today. The room is still made.
     const std::string archetype =
-        archetypeForEnemyBlurb(db, room, proposal->enemyBlurb);
+        archetypeForEnemyBlurb(db, originRoom, proposal.enemyBlurb);
     if (!archetype.empty()) {
         placeEnemy(db, archetype, newRoom);
         recordArchitectSpawn(db);
     }
-    return true;
+    return newRoom;
 }
 
 bool architectGenerate(Db& db, int64_t room, const std::string& direction,
                        int64_t actor) {
     return architectGenerate(db, room, direction, actor,
                              makeAnthropicTransport(AiRole::Generate));
+}
+
+void architectQueuePregen(Db& db, int64_t room) {
+    // REQ-PREGEN-1 / REQ-PREGEN-2: off means no job is ever queued. With the
+    // architect off there are no generatable exits at all, so there is nothing
+    // to prefetch even in principle.
+    if (!pregenEnabled() || !architectEnabled()) return;
+
+    // A change of room is a new occupancy: forget what was attempted in the
+    // last one (REQ-PREGEN-10).
+    if (room != g_occupancyRoom) {
+        g_occupancyRoom = room;
+        g_attempted.clear();
+    }
+
+    // Depth 1 (REQ-PREGEN-3): the latent exits of the room the player is
+    // standing in, and nothing beyond them. A candidate's own declared exits
+    // are never chased.
+    const std::vector<std::string> directions = latentDirections(db, room);
+    if (directions.empty()) return;  // nothing here — the common case
+
+    // Both reads hoisted: they are per-room, not per-direction, and this runs
+    // on the turn path (after the output, but still).
+    const std::vector<std::string> enemyBlurbs = eligibleEnemyBlurbs(db, room);
+    const int64_t turn = architectWorldTurn(db);
+
+    for (const std::string& direction : directions) {
+        // Attempted during THIS occupancy — including one whose job failed and
+        // cleared its slot. Retries are bounded by room entries, not by time.
+        if (g_attempted.count(direction) != 0) continue;
+        // Already has a candidate, or a job queued or in flight. One room is
+        // never paid for twice (REQ-PREGEN-11).
+        if (pregenStateOf(room, direction) != PregenState::Absent) continue;
+
+        PregenJob job;
+        job.room = room;
+        job.direction = direction;
+        // The snapshot (REQ-PREGEN-5): every database read the job needs,
+        // taken HERE, on the main thread. What crosses to the worker is text.
+        job.contextPayload = buildArchitectContext(db, room, direction);
+        job.enemyBlurbs = enemyBlurbs;
+        job.snapshotTurn = turn;
+
+        g_attempted.insert(direction);
+        pregenSubmit(std::move(job));
+    }
+}
+
+int64_t architectWorldTurn(Db& db) {
+    Stmt s = db.prepare("SELECT value FROM meta WHERE key = 'turn'");
+    if (!s.step()) return 0;
+    return s.colInt(0);
+}
+
+void architectResetPregenOccupancyForTest() {
+    g_occupancyRoom = 0;
+    g_attempted.clear();
 }
 
 bool architectEnabled() {

@@ -1,0 +1,8 @@
+go north
+attack
+attack
+look
+look
+go north
+go north
+quit
