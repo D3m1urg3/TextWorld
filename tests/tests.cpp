@@ -24,6 +24,7 @@
 #include "prose.hpp"
 #include "render.hpp"
 #include "systems.hpp"
+#include "term.hpp"
 #include "world.hpp"
 
 // vendor/ is a PRIVATE include dir of twcore, so the tests reach the vendored
@@ -5081,6 +5082,307 @@ static void testArchitectPrompt() {
     CHECK(contains(p, "ids"));
 }
 
+// --- terminal services (src/term.cpp) --------------------------------------
+
+// Is every byte sequence in `s` valid UTF-8? Used to prove the wrapper never
+// splits a multi-byte code point (check 13).
+static bool isValidUtf8(const std::string& s) {
+    size_t i = 0;
+    while (i < s.size()) {
+        const unsigned char c = static_cast<unsigned char>(s[i]);
+        size_t extra = 0;
+        if (c < 0x80) {
+            extra = 0;
+        } else if ((c & 0xE0) == 0xC0) {
+            extra = 1;
+        } else if ((c & 0xF0) == 0xE0) {
+            extra = 2;
+        } else if ((c & 0xF8) == 0xF0) {
+            extra = 3;
+        } else {
+            return false;  // a lone continuation byte or an invalid lead
+        }
+        if (i + extra >= s.size()) return false;  // truncated sequence
+        for (size_t k = 1; k <= extra; ++k) {
+            if ((static_cast<unsigned char>(s[i + k]) & 0xC0) != 0x80) return false;
+        }
+        i += extra + 1;
+    }
+    return true;
+}
+
+static bool hasEscapeByte(const std::string& s) {
+    return s.find('\x1b') != std::string::npos;
+}
+
+// REQ-UI-19/-20/-21/-22/-23: the color gate's full truth table, plus the
+// guarantee that a suppressed run emits no escape bytes at all.
+static void testTermColorGate() {
+    const char* noColorVals[] = {nullptr, "", "1"};
+    const char* forceVals[] = {nullptr, "0", "1"};
+    const char* clicolorVals[] = {nullptr, "0", "1"};
+    const char* termVals[] = {nullptr, "dumb", "xterm"};
+
+    // Check 4: the full cross-product, against REQ-UI-20's table restated in
+    // reading order. `set` mirrors the requirement's "empty means unset".
+    auto set = [](const char* v) { return v != nullptr && v[0] != '\0'; };
+    for (const char* nc : noColorVals) {
+        for (const char* cf : forceVals) {
+            for (const char* cc : clicolorVals) {
+                for (const char* tm : termVals) {
+                    for (const bool tty : {false, true}) {
+                        const TermStyle got = styleFor(nc, cf, cc, tm, tty);
+
+                        const bool forced = set(cf) && std::string(cf) != "0";
+                        bool wantColor = false;
+                        // Attributes are a capability test, not a preference:
+                        // nothing styled goes to a pipe (check 7).
+                        bool wantAttrs = tty || forced;
+                        if (set(tm) && std::string(tm) == "dumb") {
+                            wantColor = false;
+                            wantAttrs = false;  // REQ-UI-21: bold dies too
+                        } else if (set(nc)) {
+                            wantColor = false;  // REQ-UI-23: bold survives
+                        } else if (forced) {
+                            wantColor = true;
+                        } else if (set(cc) && std::string(cc) == "0") {
+                            wantColor = false;
+                        } else {
+                            wantColor = tty;
+                        }
+                        CHECK(got.color == wantColor);
+                        CHECK(got.attrs == wantAttrs);
+
+                        // Check 5: whenever color is suppressed, the colorize
+                        // helpers emit the plain bytes — no empty sequence,
+                        // no bare reset (REQ-UI-22).
+                        if (!got.color) {
+                            CHECK(!hasEscapeByte(colorize("exits", Color::Cyan, got)));
+                            CHECK(colorize("exits", Color::Cyan, got) == "exits");
+                        }
+                        if (!got.attrs) {
+                            CHECK(!hasEscapeByte(bolden("x", got)));
+                            CHECK(!hasEscapeByte(
+                                boldColor("[WINDING UP]", Color::BrightRed, got)));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Check 6: bold survives NO_COLOR — the telegraph stays visually distinct
+    // on a colorless terminal (REQ-UI-23).
+    {
+        const TermStyle s = styleFor("1", nullptr, nullptr, "xterm", /*isTty=*/true);
+        CHECK(!s.color);
+        CHECK(s.attrs);
+        // ...but NOT into a pipe: NO_COLOR does not resurrect bold there.
+        CHECK(!styleFor("1", nullptr, nullptr, "xterm", /*isTty=*/false).attrs);
+        const std::string tg = boldColor("[WINDING UP]", Color::BrightRed, s);
+        CHECK(contains(tg, "\x1b[1m"));
+        CHECK(!contains(tg, "91"));
+        CHECK(contains(tg, "[WINDING UP]"));
+    }
+
+    // Check 6a: TERM=dumb strips EVERYTHING, bold included — and the telegraph
+    // remains identifiable from its text alone (REQ-UI-21).
+    {
+        const TermStyle s = styleFor(nullptr, "1", "1", "dumb", true);
+        CHECK(!s.color);
+        CHECK(!s.attrs);
+        const std::string tg = boldColor("[WINDING UP]", Color::BrightRed, s);
+        CHECK(!hasEscapeByte(tg));
+        CHECK(tg == "[WINDING UP]");
+    }
+
+    // Basic 16 only (REQ-UI-19): no 256-color or truecolor introducer anywhere.
+    {
+        const TermStyle on = styleFor(nullptr, "1", nullptr, "xterm", false);
+        CHECK(colorize("x", Color::Cyan, on) == "\x1b[36mx\x1b[0m");
+        CHECK(colorize("x", Color::BrightBlue, on) == "\x1b[94mx\x1b[0m");
+        CHECK(boldColor("x", Color::BrightRed, on) == "\x1b[1;91mx\x1b[0m");
+        const std::string src = readFileBytes("src/term.cpp");
+        CHECK(!contains(src, "38;5;"));
+        CHECK(!contains(src, "38;2;"));
+    }
+
+    // Color::None emits nothing even with color fully enabled.
+    {
+        const TermStyle on = styleFor(nullptr, "1", nullptr, "xterm", false);
+        CHECK(colorize("plain", Color::None, on) == "plain");
+    }
+
+    // stripSgr is the inverse the later band tests lean on.
+    {
+        const TermStyle on = styleFor(nullptr, "1", nullptr, "xterm", false);
+        CHECK(stripSgr(colorize("exits", Color::Cyan, on)) == "exits");
+        CHECK(stripSgr(boldColor("hall", Color::BrightRed, on)) == "hall");
+    }
+
+    // currentStyle() tracks the environment across a refresh, the way
+    // profileRefreshEnabled() does (REQ-UI-20 applied to the live process).
+    {
+        const ScopedEnvVar noColorGuard("NO_COLOR");
+        const ScopedEnvVar forceGuard("CLICOLOR_FORCE");
+        const ScopedEnvVar termGuard("TERM");
+        setenv("TERM", "xterm", 1);
+        unsetenv("NO_COLOR");
+        setenv("CLICOLOR_FORCE", "1", 1);
+        termRefreshStyle();
+        CHECK(currentStyle().color);
+        setenv("NO_COLOR", "1", 1);
+        termRefreshStyle();
+        CHECK(!currentStyle().color);
+        CHECK(currentStyle().attrs);
+        setenv("TERM", "dumb", 1);
+        termRefreshStyle();
+        CHECK(!currentStyle().attrs);
+    }
+    // Leave the cached style as the suite found it.
+    termRefreshStyle();
+}
+
+// REQ-UI-26/-27/-28: the width fallback chain and the clamp floor.
+static void testTermWidth() {
+    // Check 9: the failing-ioctl case (stdout piped under CI) still yields a
+    // usable non-zero width — no zero-width or divide-by-zero behavior.
+    CHECK(detectWidth() >= kMinWidth);
+
+    // Check 10: fallback order, exercised through the pure predicate so the
+    // test does not depend on whether the harness' stdout happens to be a tty.
+    CHECK(widthFrom(false, 0, "52") == 52);
+    CHECK(widthFrom(false, 0, nullptr) == 80);
+    CHECK(widthFrom(false, 0, "") == 80);
+    CHECK(widthFrom(false, 0, "banana") == 80);
+    CHECK(widthFrom(false, 0, "80x24") == 80);
+    CHECK(widthFrom(false, 0, "0") == 80);
+    CHECK(widthFrom(false, 0, "-5") == 80);
+
+    // REQ-UI-27: a zero ws_col is a FAILED ioctl, not a zero-width terminal —
+    // it must fall through to COLUMNS, which is exactly the piped/CI shape.
+    CHECK(widthFrom(true, 0, "52") == 52);
+    CHECK(widthFrom(true, 0, nullptr) == 80);
+
+    // A successful ioctl wins over COLUMNS.
+    CHECK(widthFrom(true, 100, "52") == 100);
+
+    // Check 11a: the clamp floor. 10, 1, and 0 all yield 20 (REQ-UI-27).
+    CHECK(clampWidth(10) == kMinWidth);
+    CHECK(clampWidth(1) == kMinWidth);
+    CHECK(clampWidth(0) == kMinWidth);
+    CHECK(clampWidth(-5) == kMinWidth);
+    CHECK(clampWidth(20) == 20);
+    CHECK(clampWidth(200) == 200);
+    // The clamp applies through the whole chain, not just at the ioctl.
+    CHECK(widthFrom(true, 3, nullptr) == kMinWidth);
+    CHECK(widthFrom(false, 0, "7") == kMinWidth);
+
+    // REQ-UI-28: queried fresh each call, and no SIGWINCH handler is installed.
+    {
+        const std::string src = readFileBytes("src/term.cpp");
+        CHECK(!contains(src, "SIGWINCH"));
+        CHECK(contains(src, "TIOCGWINSZ"));
+    }
+}
+
+// REQ-UI-30/-31/-32: word-boundary wrapping that counts code points and
+// preserves paragraph structure.
+static void testTermWrap() {
+    // utf8Length counts code points, not bytes (REQ-UI-31).
+    CHECK(utf8Length("abc") == 3);
+    CHECK(utf8Length("a—b") == 3);          // em-dash
+    CHECK(utf8Length("“quoted”") == 8);  // curly quotes
+
+    // Check 13: a paragraph of multi-byte punctuation wraps NEAR the width,
+    // never early, and no multi-byte sequence is split.
+    {
+        const std::string para =
+            "The hall breathes cold — a slow, patient cold — and the "
+            "“lantern” gutters against it, throwing shapes that will "
+            "not hold still on the worn flagstones underfoot.";
+        const int width = 40;
+        const std::string wrapped = wrapProse(para, width);
+
+        std::vector<std::string> lines;
+        {
+            std::string cur;
+            for (const char c : wrapped) {
+                if (c == '\n') {
+                    lines.push_back(cur);
+                    cur.clear();
+                } else {
+                    cur += c;
+                }
+            }
+            lines.push_back(cur);
+        }
+        CHECK(lines.size() > 1);
+        for (const std::string& l : lines) {
+            CHECK(utf8Length(l) <= static_cast<size_t>(width));
+            CHECK(isValidUtf8(l));  // no split code point
+        }
+        // Not wrapped EARLY: every line but the last is full enough that the
+        // next line's first word would not have fit. This is the property a
+        // byte-counting wrapper violates on multi-byte input.
+        for (size_t i = 0; i + 1 < lines.size(); ++i) {
+            const std::string& next = lines[i + 1];
+            const size_t sp = next.find(' ');
+            const std::string firstWord =
+                sp == std::string::npos ? next : next.substr(0, sp);
+            if (firstWord.empty()) continue;
+            CHECK(utf8Length(lines[i]) + 1 + utf8Length(firstWord) >
+                  static_cast<size_t>(width));
+        }
+
+        // Check 14: no word is broken. The word sequence survives the wrap.
+        auto words = [](const std::string& s) {
+            std::vector<std::string> w;
+            std::string cur;
+            for (const char c : s) {
+                if (c == ' ' || c == '\n') {
+                    if (!cur.empty()) w.push_back(cur);
+                    cur.clear();
+                } else {
+                    cur += c;
+                }
+            }
+            if (!cur.empty()) w.push_back(cur);
+            return w;
+        };
+        CHECK(words(para) == words(wrapped));
+    }
+
+    // Check 15: two paragraphs in, two paragraphs out — the blank line between
+    // them survives and no two source lines are joined (REQ-UI-32).
+    {
+        const std::string two =
+            "First paragraph, long enough that it must wrap at least once at "
+            "this width.\n\nSecond paragraph, likewise long enough to wrap.\n";
+        const std::string wrapped = wrapProse(two, 30);
+        CHECK(contains(wrapped, "\n\n"));
+        CHECK(wrapped.back() == '\n');  // the trailing newline survives
+        // The paragraph boundary is still where it was: nothing from the second
+        // paragraph reached the first.
+        const size_t brk = wrapped.find("\n\n");
+        CHECK(!contains(wrapped.substr(0, brk), "Second"));
+        CHECK(!contains(wrapped.substr(brk), "First"));
+    }
+
+    // A word longer than the width overflows onto its own line rather than
+    // being split mid-word (REQ-UI-30; the single case REQ-UI-27 accepts).
+    {
+        const std::string longWord(40, 'x');
+        const std::string wrapped = wrapProse("tiny " + longWord + " tail", 20);
+        CHECK(contains(wrapped, longWord));  // intact, not split
+        CHECK(contains(wrapped, "\n" + longWord + "\n"));
+    }
+
+    // Degenerate widths do not hang or corrupt.
+    CHECK(wrapProse("", 40).empty());
+    CHECK(wrapProse("one two", 0) == "one two");
+}
+
 int main() {
     // libcurl init/shutdown for the whole run (REQ-LAT-7), ABOVE the live
     // smokes: they use the production transports and must run with libcurl
@@ -5181,6 +5483,9 @@ int main() {
     testProfileGenerateStage();
     testCombatFlee();
     testGeneratedEventInvisible();
+    testTermColorGate();
+    testTermWidth();
+    testTermWrap();
 
     std::printf("%d checks, %d failures\n", g_checks, g_failures);
     return g_failures == 0 ? 0 : 1;
