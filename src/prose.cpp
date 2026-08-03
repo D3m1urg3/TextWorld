@@ -305,13 +305,18 @@ TurnFacts buildFacts(Db& db, int64_t turn) {
             }
             // The narrator sees model-facing details only. 'burned'/'froze'
             // carry an engine-internal "<archetype>|<element>" tag instead
-            // (mutations.hpp), and handing the model a raw archetype tag would
-            // invite it into the prose as a noun — violating REQ-PROSE-11's
-            // no-new-nouns rule and REQ-UI-25. render.cpp already ignores the
-            // detail for both verbs (it reads subject and object), and
-            // aiRender's clause d inspects 'failed' details only, so nothing
-            // else observes this.
-            const bool engineInternalTag = verb == "burned" || verb == "froze";
+            // (mutations.hpp), and 'materialized' carries the catalog HANDLE —
+            // a machine token like `scorched_lectern`. Handing the model a raw
+            // archetype tag or handle would invite it into the prose as a noun,
+            // violating REQ-PROSE-11's no-new-nouns rule and REQ-UI-25; the
+            // handle is doubly wrong because the entry's real parser noun is
+            // already in the world as the minted entity's `name`. render.cpp
+            // ignores the detail on 'burned'/'froze' (it reads subject and
+            // object) and has no 'materialized' branch at all — that event is
+            // renderer-invisible like 'generated' — and aiRender's clause d
+            // inspects 'failed' details only, so nothing else observes this.
+            const bool engineInternalTag =
+                verb == "burned" || verb == "froze" || verb == "materialized";
             if (!detailIsNull && !engineInternalTag) e["detail"] = detail;
             events.push_back(e);
 

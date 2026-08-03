@@ -184,3 +184,17 @@ INSERT INTO name(entity, value)
 INSERT INTO description(entity, prose) VALUES
   (12, 'A book that bites.'), (13, 'A book that bites.'), (14, 'A book that bites.');
 INSERT INTO location(entity, container) VALUES (12, 11), (13, 11), (14, 11);
+
+-- The closed motive vocabulary, duplicated from base.sql for the same reason
+-- bestiary/spell_catalog/resistance are: every bard fact-store test opens THIS
+-- fixture, because it is the only one carrying the combat constants the truth
+-- gate reads.
+INSERT INTO motive_catalog(motive, blurb) VALUES
+  ('curiosity',    'wants to know something they have not been told'),
+  ('secrecy',      'has something to keep hidden, and is arranging for it to stay that way'),
+  ('rivalry',      'wants to be first, or to be seen to be first'),
+  ('obligation',   'is bound by a duty they did not choose'),
+  ('grief',        'is holding on to someone or something already gone'),
+  ('appetite',     'wants to take and carry off'),
+  ('pride',        'would rather be wrong than corrected'),
+  ('homesickness', 'does not belong here yet, and feels it');

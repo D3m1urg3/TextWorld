@@ -9,7 +9,7 @@
 
 // Bump whenever the DDL in world.cpp changes shape. On mismatch openWorld()
 // refuses the file (no migrations until a world worth keeping exists).
-inline constexpr int64_t SCHEMA_VERSION = 5;
+inline constexpr int64_t SCHEMA_VERSION = 6;
 
 // Thrown by openWorld() when an existing world file carries a different
 // schema_version. Nothing has been written to the file when this is thrown;

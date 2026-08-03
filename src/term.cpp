@@ -244,6 +244,19 @@ size_t utf8Length(std::string_view s) {
     return n;
 }
 
+std::string utf8Truncate(std::string_view s, size_t maxChars) {
+    size_t n = 0;
+    for (size_t i = 0; i < s.size(); ++i) {
+        // Same rule as utf8Length: a non-continuation byte starts a code point.
+        // Cutting at THAT byte offset is what keeps the result valid UTF-8.
+        if ((static_cast<unsigned char>(s[i]) & 0xC0) != 0x80) {
+            if (n == maxChars) return std::string(s.substr(0, i));
+            ++n;
+        }
+    }
+    return std::string(s);  // already short enough
+}
+
 std::string wrapProse(const std::string& text, int width) {
     if (width <= 0) return text;
 

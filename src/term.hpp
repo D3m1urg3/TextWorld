@@ -139,6 +139,13 @@ void termSetWidthOverride(int width);
 // measurement would be disproportionate.
 size_t utf8Length(std::string_view s);
 
+// Truncate `s` to at most `maxChars` CODE POINTS, never splitting a multi-byte
+// character. Same counting unit as utf8Length, so a cut string stays valid
+// UTF-8 — a byte-wise cut would leave a half character behind, and the callers
+// store the result (meta.bard_focus) into strings that end up inside a JSON
+// prompt. Returns `s` unchanged when it is already short enough.
+std::string utf8Truncate(std::string_view s, size_t maxChars);
+
 // Wrap prose to `width` code points at whitespace boundaries (REQ-UI-30/-31/-32).
 //   - No word is ever split. A single word longer than `width` overflows onto
 //     its own over-long line instead.
