@@ -14,6 +14,7 @@
 //     writeGeneratedRoom, alongside that room's component + exit rows.
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 #include <string>
 
@@ -51,12 +52,14 @@ void moveEntity(Db& db, int64_t what, int64_t toContainer, int64_t actor,
 // `events.detail` now carries TWO kinds of value.
 //   1. A human-readable, MODEL-FACING fragment — what it has always been. Every
 //      such detail is handed to the narrator as a fact (prose.cpp).
-//   2. An engine-internal TAG, on the 'burned' and 'froze' verbs only, of the
-//      form "<archetype>|<element>". This is what resistance discovery derives
-//      from (REQ-UI-46), and prose.cpp deliberately WITHHOLDS it from the
-//      narrator — a raw archetype tag in front of the model would otherwise be
-//      echoed into prose as a noun (REQ-PROSE-11, REQ-UI-25).
-// Adding a third tagged verb means updating that shield too.
+//   2. An engine-internal TAG, on the 'burned', 'froze', and 'materialized'
+//      verbs only. On 'burned'/'froze' it has the form "<archetype>|<element>"
+//      and is what resistance discovery derives from (REQ-UI-46); on
+//      'materialized' it is the catalog HANDLE (a machine token like
+//      `scorched_lectern`). prose.cpp deliberately WITHHOLDS all three from the
+//      narrator — a raw archetype tag or handle in front of the model would
+//      otherwise be echoed into prose as a noun (REQ-PROSE-11, REQ-UI-25).
+// Adding a fourth tagged verb means updating that shield too.
 //
 // Throws std::runtime_error (engine error) if `target` has no health row —
 // before any event is appended — so the log never records damage that did not
@@ -167,3 +170,93 @@ void recordArchitectSpawn(Db& db);
 int64_t writeGeneratedRoom(Db& db, int64_t originRoom,
                            const std::string& direction,
                            const RoomProposal& proposal, int64_t actor);
+
+// --- The bard's fact store (specs/bard-fact-store.md) ------------------------
+
+// Mint one catalog entry (the overture's bulk write, and the micro wake's
+// append path). INSERT-only: there is deliberately NO helper that edits an
+// existing entry's kind/handle/name/blurb/motive/tier — appending a corrected
+// entry is the only way to change the bard's mind, so drift stays VISIBLE in
+// the table instead of being absorbed into it (REQ-BARD-STORE-17).
+//
+// Throws std::runtime_error on an invalid argument (REQ-BARD-STORE-9): a `kind`
+// other than 'character'/'beat', a `motive` with no motive_catalog row (the menu
+// is closed, so the bard cannot invent a ninth), an empty-after-trim `handle`/
+// `name`/`blurb`, or a negative `tier`. Every check runs BEFORE any write, so a
+// refusal leaves the table untouched. These are engine faults — the caller
+// offers only valid values — and the caller rolls back.
+//
+// THE TRUTH GATE (REQ-BARD-STORE-10). `factArchetype`/`factElement` are both
+// empty (an ordinary entry) or both set (a knowledge beat); one alone throws.
+// When set, the entry is REFUSED unless the archetype exists in `bestiary`, the
+// element appears in `spell_catalog.element`, and a `resistance` row exists for
+// the pair. A catalog entry may not promise a falsehood about the rules — the
+// same discipline as the narrator's canon-verbatim gate, applied to
+// foreshadowing. Trimmed strings are stored; empty fact fields store SQL NULL,
+// so "both NULL or both non-NULL" is literally true in the data.
+//
+// Event-free — a latent entry has not happened (the dropGrimoire/placeEnemy
+// precedent). It becomes an event when it materializes. Returns the minted id.
+// Never begins/commits.
+int64_t writeCatalogEntry(Db& db, const std::string& kind,
+                          const std::string& handle, const std::string& name,
+                          const std::string& blurb, const std::string& motive,
+                          int64_t tier,
+                          const std::string& factArchetype = "",
+                          const std::string& factElement = "");
+
+// THE L0 -> L2 transition, and the sole writer of the 'materialized' verb
+// (REQ-BARD-STORE-12). Latches catalog.entity (WHERE entity IS NULL, so it
+// fires at most once) AND appends the event — actor, subject = `entity`,
+// object = `catalog`, detail = the entry's handle — both in the caller's
+// ambient transaction. One call, one fact: the L0→L2 transition and the bard's
+// wake trigger cannot drift apart, the same shape as writeGeneratedRoom writing
+// its rows and its 'generated' event together.
+//
+// The latch is the WHERE clause, never a prior read (REQ-BARD-STORE-13): a
+// second call — or a call for a catalog id that does not exist — changes
+// nothing, appends nothing, and returns false. Never begins/commits.
+bool materializeCatalogEntry(Db& db, int64_t catalog, int64_t entity,
+                             int64_t actor);
+
+// Cast one world entity from a latent catalog entry (REQ-BARD-STORE-14), the
+// way placeEnemy casts an instance from its bestiary archetype. Mints one
+// entity and writes its `name` (from catalog.name — the parser noun, not the
+// handle), `description` (from the `description` ARGUMENT, never the blurb: the
+// blurb is selection prose the model has already seen), and `location` (=
+// `room`) rows, then calls materializeCatalogEntry to latch and log.
+//
+// Returns the minted entity id, or 0 if the entry was already materialized (or
+// does not exist) — in which case NO entity is minted. That is why the latch is
+// pre-checked before the mint rather than after. Never begins/commits.
+int64_t placeCatalogEntry(Db& db, int64_t catalog, int64_t room,
+                          const std::string& description, int64_t actor);
+
+// Latch `seeded` (WHERE seeded = 0): this entry has now been hinted in prose,
+// and is therefore costlier to walk back than one the player never heard of
+// (REQ-BARD-STORE-15). Set once, never cleared. Event-free bookkeeping; a
+// second call is a silent no-op by construction, the learnSpell idempotence
+// shape. Never begins/commits.
+void markCatalogSeeded(Db& db, int64_t catalog);
+
+// The cap on meta.bard_focus, in CODE POINTS (REQ-BARD-STORE-16a). "Tunable"
+// means this one line: nothing reads it from the environment. The cap matters
+// because this string is paid for on EVERY room generation — the architect
+// reads it via buildArchitectContext — and an unbounded focus would quietly
+// become the largest term in that context.
+inline constexpr size_t kBardFocusMaxChars = 300;
+
+// Upsert meta.bard_journal — the bard's PRIVATE working memory, read by nothing
+// else, so free rewrite is safe and the text is stored verbatim and uncapped
+// (REQ-BARD-STORE-16). A second call REPLACES the stored value; it never
+// appends. Event-free. Never begins/commits.
+void writeBardJournal(Db& db, const std::string& text);
+
+// Upsert meta.bard_focus — the SHORT public line the architect reads. Free
+// rewrite like the journal (REQ-BARD-STORE-16), but NORMALIZED first
+// (REQ-BARD-STORE-16a): each run of newlines/carriage returns collapses to a
+// single space, then the result is truncated to kBardFocusMaxChars code points.
+// This is what makes "one short line" enforced rather than merely described — a
+// length cap alone would admit a multi-line focus that reads as prose in the
+// architect's context. Event-free. Never begins/commits.
+void writeBardFocus(Db& db, const std::string& text);

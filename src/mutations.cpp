@@ -4,9 +4,11 @@
 #include <optional>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include "architect.hpp"  // RoomProposal (full definition) + inverseDirection
+#include "term.hpp"       // utf8Truncate — the code-point-safe cut for bard_focus
 
 namespace {
 
@@ -25,6 +27,48 @@ int64_t mintEntity(Db& db) {
     Stmt s = db.prepare("SELECT last_insert_rowid()");
     if (!s.step()) throw std::runtime_error("mintEntity: rowid read failed");
     return s.colInt(0);
+}
+
+// Strip leading/trailing ASCII whitespace. Local to this file because there is
+// no trim helper in the tree and only the catalog's non-empty checks need one:
+// "  " must not pass for a handle (REQ-BARD-STORE-9).
+std::string trimAscii(const std::string& s) {
+    const char* const ws = " \t\n\r\f\v";
+    const size_t first = s.find_first_not_of(ws);
+    if (first == std::string::npos) return "";
+    return s.substr(first, s.find_last_not_of(ws) - first + 1);
+}
+
+// Collapse every RUN of newlines/carriage returns to a single space
+// (REQ-BARD-STORE-16a). Per-character replacement would turn "\r\n" into two
+// spaces; a run yields exactly one. Other whitespace is untouched — the
+// requirement names line breaks only.
+std::string collapseLineBreaks(std::string_view s) {
+    std::string out;
+    out.reserve(s.size());
+    bool inBreakRun = false;
+    for (const char c : s) {
+        if (c == '\n' || c == '\r') {
+            if (!inBreakRun) out += ' ';
+            inBreakRun = true;
+        } else {
+            out += c;
+            inBreakRun = false;
+        }
+    }
+    return out;
+}
+
+// Free rewrite of one `meta` row, the shared body of the two bard lanes. Upsert
+// rather than UPDATE so a world whose row is somehow absent still gets one;
+// initialize() writes all three at init (REQ-BARD-STORE-6).
+void upsertMeta(Db& db, const char* key, const std::string& value) {
+    Stmt s = db.prepare(
+        "INSERT INTO meta(key, value) VALUES (?, ?) "
+        "ON CONFLICT(key) DO UPDATE SET value = excluded.value");
+    s.bind(1, std::string(key));
+    s.bind(2, value);
+    s.step();
 }
 
 }  // namespace
@@ -501,4 +545,215 @@ int64_t writeGeneratedRoom(Db& db, int64_t originRoom,
     appendEvent(db, actor, "generated", newRoom, originRoom, direction.c_str());
 
     return newRoom;
+}
+
+// --- The bard's fact store (specs/bard-fact-store.md) ------------------------
+
+int64_t writeCatalogEntry(Db& db, const std::string& kind,
+                          const std::string& handle, const std::string& name,
+                          const std::string& blurb, const std::string& motive,
+                          int64_t tier, const std::string& factArchetype,
+                          const std::string& factElement) {
+    // EVERY check runs before ANY write, so a refusal leaves the catalog
+    // byte-identical — the placeEnemy/moveEntity discipline (throw before
+    // mutating). All of these are engine faults: the caller offers only valid
+    // values, so the caller rolls back the ambient transaction.
+    if (kind != "character" && kind != "beat") {
+        throw std::runtime_error(
+            "writeCatalogEntry: kind must be 'character' or 'beat', got '" +
+            kind + "'");
+    }
+    // Trim first, then test: a whitespace-only handle is empty (REQ-BARD-STORE-9).
+    const std::string trimmedHandle = trimAscii(handle);
+    const std::string trimmedName = trimAscii(name);
+    const std::string trimmedBlurb = trimAscii(blurb);
+    if (trimmedHandle.empty()) {
+        throw std::runtime_error("writeCatalogEntry: handle is empty after trim");
+    }
+    if (trimmedName.empty()) {
+        throw std::runtime_error("writeCatalogEntry: name is empty after trim");
+    }
+    if (trimmedBlurb.empty()) {
+        throw std::runtime_error("writeCatalogEntry: blurb is empty after trim");
+    }
+    if (tier < 0) {
+        throw std::runtime_error("writeCatalogEntry: tier is negative (" +
+                                 std::to_string(tier) + ")");
+    }
+    {
+        // The motive vocabulary is CLOSED (REQ-BARD-STORE-5): the table is the
+        // enforcement, so the bard cannot invent a ninth motive.
+        Stmt s = db.prepare("SELECT 1 FROM motive_catalog WHERE motive = ?");
+        s.bind(1, motive);
+        if (!s.step()) {
+            throw std::runtime_error("writeCatalogEntry: unknown motive '" +
+                                     motive + "'");
+        }
+    }
+
+    // THE TRUTH GATE (REQ-BARD-STORE-10). Both fact fields or neither.
+    const bool hasArchetype = !factArchetype.empty();
+    const bool hasElement = !factElement.empty();
+    if (hasArchetype != hasElement) {
+        throw std::runtime_error(
+            "writeCatalogEntry: fact_archetype and fact_element must be both "
+            "set or both empty (got archetype '" + factArchetype +
+            "', element '" + factElement + "')");
+    }
+    if (hasArchetype) {
+        // a. The archetype must exist. Same refusal as placeEnemy's.
+        {
+            Stmt s = db.prepare("SELECT 1 FROM bestiary WHERE archetype = ?");
+            s.bind(1, factArchetype);
+            if (!s.step()) {
+                throw std::runtime_error(
+                    "writeCatalogEntry: no bestiary row for fact_archetype '" +
+                    factArchetype + "'");
+            }
+        }
+        // b. The element must be a live ELEMENT, not merely a spell name. Plain
+        // equality suffices: SQL's three-valued logic already excludes the
+        // NULL-element rows (ward/stun/dispel/blast), so the admissible
+        // vocabulary is exactly {fire, frost} and a beat naming a spell is
+        // refused here.
+        {
+            Stmt s = db.prepare("SELECT 1 FROM spell_catalog WHERE element = ?");
+            s.bind(1, factElement);
+            if (!s.step()) {
+                throw std::runtime_error(
+                    "writeCatalogEntry: '" + factElement +
+                    "' is not an element in spell_catalog");
+            }
+        }
+        // c. The pair must be materially NON-NEUTRAL. The engine can check the
+        // pair but not the blurb's English claim about it, so "the entry may
+        // not promise a falsehood" is enforceable only in this form: a missing
+        // resistance row means x1, a beat about a neutral matchup teaches the
+        // player nothing, and admitting it would let a blurb assert a weakness
+        // that does not exist. Refusing it is the honest reading of the rule.
+        {
+            Stmt s = db.prepare(
+                "SELECT 1 FROM resistance WHERE archetype = ? AND element = ?");
+            s.bind(1, factArchetype);
+            s.bind(2, factElement);
+            if (!s.step()) {
+                throw std::runtime_error(
+                    "writeCatalogEntry: no resistance row for ('" +
+                    factArchetype + "', '" + factElement +
+                    "') — a neutral matchup teaches nothing");
+            }
+        }
+    }
+
+    Stmt ins = db.prepare(
+        "INSERT INTO catalog(kind, handle, name, blurb, motive, tier, "
+        "fact_archetype, fact_element) VALUES (?, ?, ?, ?, ?, ?, ?, ?)");
+    ins.bind(1, kind);
+    ins.bind(2, trimmedHandle);
+    ins.bind(3, trimmedName);
+    ins.bind(4, trimmedBlurb);
+    ins.bind(5, motive);
+    ins.bind(6, tier);
+    if (hasArchetype) {  // unbound params store SQL NULL: both NULL, or neither
+        ins.bind(7, factArchetype);
+        ins.bind(8, factElement);
+    }
+    ins.step();
+    // No event: a latent entry has not happened. It becomes one when it
+    // materializes (dropGrimoire/placeEnemy set the same precedent).
+    Stmt id = db.prepare("SELECT last_insert_rowid()");
+    if (!id.step()) throw std::runtime_error("writeCatalogEntry: rowid read failed");
+    return id.colInt(0);
+}
+
+bool materializeCatalogEntry(Db& db, int64_t catalog, int64_t entity,
+                             int64_t actor) {
+    {
+        // The one-way latch, guarded in SQL rather than by a prior read
+        // (REQ-BARD-STORE-13). A second call — or a call for an id that does
+        // not exist — matches no row and falls through to `return false`.
+        Stmt upd = db.prepare(
+            "UPDATE catalog SET entity = ? WHERE id = ? AND entity IS NULL");
+        upd.bind(1, entity);
+        upd.bind(2, catalog);
+        upd.step();
+    }
+    if (db.changes() == 0) return false;
+
+    std::string handle;
+    {
+        Stmt s = db.prepare("SELECT handle FROM catalog WHERE id = ?");
+        s.bind(1, catalog);
+        if (s.step()) handle = s.colText(0);
+    }
+    // The latch and the event are ONE fact (design decision 5): the L0→L2
+    // transition and the bard's wake trigger read the same write, so they
+    // cannot drift. `detail` is the handle — an engine-internal tag, shielded
+    // from the narrator in prose.cpp (see the contract note in mutations.hpp).
+    appendEvent(db, actor, "materialized", entity, catalog, handle.c_str());
+    return true;
+}
+
+int64_t placeCatalogEntry(Db& db, int64_t catalog, int64_t room,
+                          const std::string& description, int64_t actor) {
+    // Read the entry AND pre-check the latch BEFORE minting. The order is
+    // load-bearing: REQ-BARD-STORE-14 requires that a second call mint no
+    // entity, which a check placed after the mint could not deliver. The
+    // authoritative guarantee remains materializeCatalogEntry's WHERE clause
+    // below; this pre-check is what keeps `entities` clean.
+    std::string name;
+    {
+        Stmt s = db.prepare(
+            "SELECT name FROM catalog WHERE id = ? AND entity IS NULL");
+        s.bind(1, catalog);
+        if (!s.step()) return 0;  // absent, or already materialized
+        name = s.colText(0);
+    }
+
+    const int64_t what = mintEntity(db);
+    {
+        // The parser noun comes from the catalog; the handle never does.
+        Stmt s = db.prepare("INSERT INTO name(entity, value) VALUES (?, ?)");
+        s.bind(1, what);
+        s.bind(2, name);
+        s.step();
+    }
+    {
+        // Canon prose is the PASSED description, never the blurb — the blurb is
+        // selection prose the model has already seen.
+        Stmt s = db.prepare("INSERT INTO description(entity, prose) VALUES (?, ?)");
+        s.bind(1, what);
+        s.bind(2, description);
+        s.step();
+    }
+    {
+        Stmt s = db.prepare("INSERT INTO location(entity, container) VALUES (?, ?)");
+        s.bind(1, what);
+        s.bind(2, room);
+        s.step();
+    }
+    materializeCatalogEntry(db, catalog, what, actor);  // latches + logs
+    return what;
+}
+
+void markCatalogSeeded(Db& db, int64_t catalog) {
+    // Event-free bookkeeping. The guard makes a second call a no-op BY
+    // CONSTRUCTION, not by discipline — the learnSpell idempotence shape.
+    Stmt upd = db.prepare(
+        "UPDATE catalog SET seeded = 1 WHERE id = ? AND seeded = 0");
+    upd.bind(1, catalog);
+    upd.step();
+}
+
+void writeBardJournal(Db& db, const std::string& text) {
+    upsertMeta(db, "bard_journal", text);  // verbatim, uncapped, free rewrite
+}
+
+void writeBardFocus(Db& db, const std::string& text) {
+    // Normalize, THEN cut (REQ-BARD-STORE-16a): collapsing first means the cap
+    // is spent on the line the architect will actually read, and truncating a
+    // multi-byte character in half would store invalid UTF-8 into a string that
+    // ends up inside a JSON prompt on every room generation.
+    upsertMeta(db, "bard_focus",
+               utf8Truncate(collapseLineBreaks(text), kBardFocusMaxChars));
 }

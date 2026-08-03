@@ -128,3 +128,20 @@ INSERT INTO spell_catalog(spell, element, cooldown, tier, effect) VALUES
 INSERT INTO resistance(archetype, element, multiplier_num, multiplier_den) VALUES
   ('rime_touched', 'fire', 2, 1),
   ('rime_touched', 'frost', 1, 2);
+
+-- The closed motive vocabulary (REQ-BARD-STORE-5), engine-owned constants like
+-- spell_catalog and bestiary: seeded here, never written at runtime. The model
+-- sees `blurb`, never the key, and writeCatalogEntry throws on a motive absent
+-- from this table — so the bard cannot invent a ninth.
+--
+-- AUTHORED CONTENT, PROVISIONAL pending author approval. Changing the vocabulary
+-- is this one edit plus a world-file delete; nothing in code names these keys.
+INSERT INTO motive_catalog(motive, blurb) VALUES
+  ('curiosity',    'wants to know something they have not been told'),
+  ('secrecy',      'has something to keep hidden, and is arranging for it to stay that way'),
+  ('rivalry',      'wants to be first, or to be seen to be first'),
+  ('obligation',   'is bound by a duty they did not choose'),
+  ('grief',        'is holding on to someone or something already gone'),
+  ('appetite',     'wants to take and carry off'),
+  ('pride',        'would rather be wrong than corrected'),
+  ('homesickness', 'does not belong here yet, and feels it');

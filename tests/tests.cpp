@@ -7629,7 +7629,12 @@ static void testBandResistance() {
     // rather than bump, because world.cpp's gate has no migration path and a
     // bump makes every existing world file unopenable.
     {
-        CHECK(SCHEMA_VERSION == 5);  // unchanged by this feature
+        // No SCHEMA_VERSION assertion here on purpose. This check was written as
+        // "group G bumped nothing", and pinning it to the current value would
+        // make every future bump edit a band test for no reason. (It has since
+        // moved 5 → 6 — from the bard fact store, REQ-BARD-STORE-1, not from
+        // here.) The verbatim table list below carries the real guarantee: any
+        // shape group G added would show up in it.
         const TempDbFile p("textworld_resist_schema_tests.db");
         Db db = openWorld(p.string(), "tests/combat_fixture.sql");
         std::vector<std::string> tables;
@@ -7640,13 +7645,15 @@ static void testBandResistance() {
         }
         // The pre-feature table list, verbatim. A shadow discovery table would
         // satisfy every behavioural check below while violating REQ-UI-46;
-        // this is what makes that requirement falsifiable.
+        // this is what makes that requirement falsifiable. `catalog` and
+        // `motive_catalog` are the bard fact store's (REQ-BARD-STORE-2, -4) —
+        // not group G's, and asserted in full by testBardStoreSchema.
         const std::vector<std::string> expected = {
-            "barrier", "bestiary", "cooldowns", "description", "drop_table",
-            "entities", "events", "exits", "grimoire", "health", "hostile",
-            "known_spells", "location", "meta", "name", "pending_strike",
-            "player", "portable", "resistance", "room", "spell_catalog",
-            "status_effects"};
+            "barrier", "bestiary", "catalog", "cooldowns", "description",
+            "drop_table", "entities", "events", "exits", "grimoire", "health",
+            "hostile", "known_spells", "location", "meta", "motive_catalog",
+            "name", "pending_strike", "player", "portable", "resistance", "room",
+            "spell_catalog", "status_effects"};
         CHECK(tables == expected);
         // And no DDL was added to the band or the mutation helper.
         CHECK(!contains(readFileBytes("src/band.cpp"), "CREATE TABLE"));
@@ -7852,6 +7859,548 @@ static void testBandNonGoals() {
     CHECK(contains(cmake, "src/term.cpp"));
     CHECK(contains(cmake, "src/band.cpp"));
 }
+
+// --- The bard fact store (specs/bard-fact-store.md). Schema, seed data, and
+// mutation helpers only: no AI call, no network, no fixture beyond seed SQL.
+// Every test here opens tests/combat_fixture.sql, the one fixture carrying the
+// combat constants the truth gate reads. ---
+
+// Steps 1 + 2: the two new tables, the three meta rows, the eight motives, and
+// the SCHEMA_VERSION gate. Modeled on testCombatSchema.
+static void testBardStoreSchema() {
+    const TempDbFile worldPath("textworld_bard_schema_tests.db");
+    Db db = openWorld(worldPath.string(), "tests/combat_fixture.sql");
+
+    // REQ-BARD-STORE-2: catalog, exactly eleven columns, exactly these names.
+    CHECK(queryInt(db, "SELECT COUNT(*) FROM sqlite_master "
+                       "WHERE type='table' AND name='catalog'") == 1);
+    CHECK(queryInt(db, "SELECT COUNT(*) FROM pragma_table_info('catalog')") == 11);
+    CHECK(queryInt(db, "SELECT COUNT(*) FROM pragma_table_info('catalog') "
+                       "WHERE name IN ('id','kind','handle','name','blurb','motive',"
+                       "'tier','seeded','entity','fact_archetype','fact_element')") == 11);
+
+    // REQ-BARD-STORE-4: motive_catalog(motive, blurb), exactly two columns.
+    CHECK(queryInt(db, "SELECT COUNT(*) FROM pragma_table_info('motive_catalog')") == 2);
+    CHECK(queryInt(db, "SELECT COUNT(*) FROM pragma_table_info('motive_catalog') "
+                       "WHERE name IN ('motive','blurb')") == 2);
+
+    // REQ-BARD-STORE-3 stays DEFERRED: no inert binding table ships through the
+    // bump. This is the assertion that keeps it deferred.
+    CHECK(queryInt(db, "SELECT COUNT(*) FROM sqlite_master "
+                       "WHERE type='table' AND name='catalog_binding'") == 0);
+
+    // REQ-BARD-STORE-6: three meta ROWS, present at init (spec test 5).
+    CHECK(queryInt(db, "SELECT COUNT(*) FROM meta WHERE key IN "
+                       "('bard_journal','bard_focus','bard_last_wake_turn')") == 3);
+    CHECK(queryText(db, "SELECT value FROM meta WHERE key='bard_journal'").empty());
+    CHECK(queryText(db, "SELECT value FROM meta WHERE key='bard_focus'").empty());
+    CHECK(queryInt(db, "SELECT value FROM meta WHERE key='bard_last_wake_turn'") == 0);
+
+    // REQ-BARD-STORE-5: exactly eight motives, every blurb non-empty, and the
+    // key set is the authored vocabulary — not merely eight of something.
+    CHECK(queryInt(db, "SELECT COUNT(*) FROM motive_catalog") == 8);
+    CHECK(queryInt(db, "SELECT COUNT(*) FROM motive_catalog "
+                       "WHERE blurb IS NULL OR blurb = ''") == 0);
+    CHECK(queryInt(db, "SELECT COUNT(*) FROM motive_catalog WHERE motive IN "
+                       "('curiosity','secrecy','rivalry','obligation','grief',"
+                       "'appetite','pride','homesickness')") == 8);
+
+    // REQ-BARD-STORE-7: the verb vocabulary comment names 'materialized'.
+    CHECK(contains(readFileBytes("src/world.cpp"), "'materialized'"));
+}
+
+// The SHIPPED seed carries the same eight motives (a fixture/seed divergence
+// would let every test above pass against a world the game never builds).
+static void testBardStoreShippedSeedMotives() {
+    const TempDbFile worldPath("textworld_bard_seed_tests.db");
+    Db db = openWorld(worldPath.string());  // default seed/base.sql
+    CHECK(queryInt(db, "SELECT COUNT(*) FROM motive_catalog") == 8);
+    CHECK(queryInt(db, "SELECT COUNT(*) FROM motive_catalog WHERE motive IN "
+                       "('curiosity','secrecy','rivalry','obligation','grief',"
+                       "'appetite','pride','homesickness')") == 8);
+    CHECK(queryInt(db, "SELECT COUNT(*) FROM meta WHERE key IN "
+                       "('bard_journal','bard_focus','bard_last_wake_turn')") == 3);
+}
+
+// REQ-BARD-STORE-1 (mechanical check 4): a world file written at the PREVIOUS
+// version is refused, and the refusal writes nothing. Same shape as testWorld's
+// 999999 case, with the real predecessor value.
+static void testBardStoreVersionGate() {
+    const TempDbFile worldPath("textworld_bard_version_tests.db");
+    {
+        Db db = openWorld(worldPath.string(), "tests/combat_fixture.sql");
+        CHECK(queryInt(db, "SELECT value FROM meta WHERE key='schema_version'") == 6);
+    }
+    {
+        Db db(worldPath.string());
+        db.exec("UPDATE meta SET value = 5 WHERE key = 'schema_version'");
+    }
+    const std::string bytesBefore = readFileBytes(worldPath);
+    CHECK(!bytesBefore.empty());
+
+    bool refused = false;
+    try {
+        Db db = openWorld(worldPath.string(), "tests/combat_fixture.sql");
+    } catch (const SchemaMismatch&) {
+        refused = true;
+    }
+    CHECK(refused);
+    CHECK(readFileBytes(worldPath) == bytesBefore);  // nothing written on refusal
+}
+
+// Did `fn` throw std::runtime_error? Every writeCatalogEntry refusal is one
+// (REQ-BARD-STORE-9, -10), so the throw cases read as one line each.
+template <typename Fn>
+static bool threwRuntimeError(Fn fn) {
+    try {
+        fn();
+    } catch (const std::runtime_error&) {
+        return true;
+    }
+    return false;
+}
+
+// Steps 3, 4, 7: writeCatalogEntry's mint and argument validation, the truth
+// gate, and markCatalogSeeded (spec tests 6, 7, 8, 12).
+static void testBardStoreWrite() {
+    const TempDbFile worldPath("textworld_bard_write_tests.db");
+    Db db = openWorld(worldPath.string(), "tests/combat_fixture.sql");
+
+    const auto catalogCount = [&db] {
+        return queryInt(db, "SELECT COUNT(*) FROM catalog");
+    };
+    const auto eventCount = [&db] {
+        return queryInt(db, "SELECT COUNT(*) FROM events");
+    };
+
+    // --- spec test 6: a valid entry mints a row and appends NO event --------
+    const int64_t eventsBefore = eventCount();
+    const int64_t id = writeCatalogEntry(db, "character", "cloistered_scribe",
+                                         "cloistered scribe",
+                                         "a scribe who has not left the annex in years",
+                                         "curiosity", 1);
+    CHECK(id > 0);
+    CHECK(catalogCount() == 1);
+    CHECK(eventCount() == eventsBefore);  // a latent entry has not HAPPENED
+
+    // Every column round-trips, and the fact fields are SQL NULL — not "" — so
+    // the DDL's "both NULL or both non-NULL" invariant is true in the data.
+    {
+        Stmt s = db.prepare(
+            "SELECT kind, handle, name, blurb, motive, tier, seeded, "
+            "entity IS NULL, fact_archetype IS NULL, fact_element IS NULL "
+            "FROM catalog WHERE id = ?");
+        s.bind(1, id);
+        CHECK(s.step());
+        CHECK(s.colText(0) == "character");
+        CHECK(s.colText(1) == "cloistered_scribe");
+        CHECK(s.colText(2) == "cloistered scribe");
+        CHECK(s.colText(3) == "a scribe who has not left the annex in years");
+        CHECK(s.colText(4) == "curiosity");
+        CHECK(s.colInt(5) == 1);
+        CHECK(s.colInt(6) == 0);  // seeded defaults to 0
+        CHECK(s.colInt(7) == 1);  // entity IS NULL — latent
+        CHECK(s.colInt(8) == 1);
+        CHECK(s.colInt(9) == 1);
+    }
+
+    // Surrounding whitespace is trimmed on the way in, not merely tolerated.
+    {
+        const int64_t trimmed = writeCatalogEntry(db, "beat", "  spilled_ink  ",
+                                                  "  spilled ink  ",
+                                                  "  a dark stain, still wet  ",
+                                                  "secrecy", 0);
+        Stmt s = db.prepare("SELECT handle, name, blurb FROM catalog WHERE id = ?");
+        s.bind(1, trimmed);
+        CHECK(s.step());
+        CHECK(s.colText(0) == "spilled_ink");
+        CHECK(s.colText(1) == "spilled ink");
+        CHECK(s.colText(2) == "a dark stain, still wet");
+    }
+
+    // --- spec test 7: every refusal throws, and writes NOTHING -------------
+    const int64_t rows = catalogCount();
+    const auto write = [&db](const char* kind, const char* handle,
+                             const char* name, const char* blurb,
+                             const char* motive, int64_t tier) {
+        return [&db, kind, handle, name, blurb, motive, tier] {
+            writeCatalogEntry(db, kind, handle, name, blurb, motive, tier);
+        };
+    };
+    CHECK(threwRuntimeError(write("place", "h1", "n", "b", "curiosity", 1)));
+    CHECK(threwRuntimeError(write("", "h2", "n", "b", "curiosity", 1)));
+    CHECK(threwRuntimeError(write("beat", "h3", "n", "b", "envy", 1)));  // not in the eight
+    CHECK(threwRuntimeError(write("beat", "", "n", "b", "curiosity", 1)));
+    CHECK(threwRuntimeError(write("beat", "   ", "n", "b", "curiosity", 1)));  // whitespace-only
+    CHECK(threwRuntimeError(write("beat", "h4", "", "b", "curiosity", 1)));
+    CHECK(threwRuntimeError(write("beat", "h5", " \t ", "b", "curiosity", 1)));
+    CHECK(threwRuntimeError(write("beat", "h6", "n", "", "curiosity", 1)));
+    CHECK(threwRuntimeError(write("beat", "h7", "n", "\n", "curiosity", 1)));
+    CHECK(threwRuntimeError(write("beat", "h8", "n", "b", "curiosity", -1)));
+    // Both fact fields or neither — one alone throws, in either direction.
+    CHECK(threwRuntimeError([&db] {
+        writeCatalogEntry(db, "beat", "h9", "n", "b", "curiosity", 1, "rime_touched", "");
+    }));
+    CHECK(threwRuntimeError([&db] {
+        writeCatalogEntry(db, "beat", "h10", "n", "b", "curiosity", 1, "", "fire");
+    }));
+    CHECK(catalogCount() == rows);  // not one refusal left a row behind
+
+    // --- spec test 8: the truth gate, driven from the SEEDED matchups ------
+    // rime_touched is weak to fire (2x) and shrugs off frost (1/2x); both are
+    // real resistance rows, so both are admissible knowledge beats.
+    CHECK(writeCatalogEntry(db, "beat", "scorched_lectern", "scorched lectern",
+                            "a lectern burned black, as if someone learned "
+                            "something here the hard way",
+                            "curiosity", 1, "rime_touched", "fire") > 0);
+    CHECK(writeCatalogEntry(db, "beat", "rimed_margin", "rimed margin",
+                            "a margin note about cold things and colder answers",
+                            "curiosity", 1, "rime_touched", "frost") > 0);
+    const int64_t afterAccepted = catalogCount();
+
+    // Clause c: goblin_grunt/fire has NO resistance row, so the matchup is
+    // neutral. A beat about a neutral matchup teaches the player nothing, and
+    // the engine cannot inspect the blurb's English claim about it — refusing
+    // is the enforceable form of "may not promise a falsehood".
+    CHECK(threwRuntimeError([&db] {
+        writeCatalogEntry(db, "beat", "neutral_beat", "n", "b", "curiosity", 1,
+                          "goblin_grunt", "fire");
+    }));
+    // Clause a: an archetype absent from the bestiary.
+    CHECK(threwRuntimeError([&db] {
+        writeCatalogEntry(db, "beat", "absent_beast", "n", "b", "curiosity", 1,
+                          "no_such_beast", "fire");
+    }));
+    // Clause b: an element absent from spell_catalog…
+    CHECK(threwRuntimeError([&db] {
+        writeCatalogEntry(db, "beat", "acid_beat", "n", "b", "curiosity", 1,
+                          "rime_touched", "acid");
+    }));
+    // …and a SPELL that is not an element. ward/stun/dispel/blast all carry a
+    // NULL element, so the live vocabulary is exactly {fire, frost}.
+    CHECK(threwRuntimeError([&db] {
+        writeCatalogEntry(db, "beat", "ward_beat", "n", "b", "curiosity", 1,
+                          "rime_touched", "ward");
+    }));
+    CHECK(catalogCount() == afterAccepted);  // every refusal wrote nothing
+
+    // --- spec test 12: markCatalogSeeded is idempotent ---------------------
+    const int64_t eventsBeforeSeed = eventCount();
+    markCatalogSeeded(db, id);
+    CHECK(queryInt(db, ("SELECT seeded FROM catalog WHERE id = " +
+                        std::to_string(id)).c_str()) == 1);
+    markCatalogSeeded(db, id);  // a second call is a no-op BY CONSTRUCTION
+    CHECK(queryInt(db, ("SELECT seeded FROM catalog WHERE id = " +
+                        std::to_string(id)).c_str()) == 1);
+    CHECK(eventCount() == eventsBeforeSeed);  // event-free bookkeeping
+}
+
+// Steps 5, 6, 9: the L0 → L2 latch, its event, placeCatalogEntry, and the
+// narrator shield on the handle (spec tests 9, 10 + micro-decision 2).
+static void testBardStoreMaterialize() {
+    const TempDbFile worldPath("textworld_bard_materialize_tests.db");
+    Db db = openWorld(worldPath.string(), "tests/combat_fixture.sql");
+
+    const int64_t entry = writeCatalogEntry(db, "character", "wandering_proctor",
+                                            "wandering proctor",
+                                            "a proctor who keeps arriving from "
+                                            "the wrong direction",
+                                            "obligation", 1);
+
+    // --- spec test 9: the latch and its event ------------------------------
+    const int64_t before = queryInt(db, "SELECT COUNT(*) FROM events");
+    CHECK(materializeCatalogEntry(db, entry, 4, 3) == true);
+    CHECK(queryInt(db, ("SELECT entity FROM catalog WHERE id = " +
+                        std::to_string(entry)).c_str()) == 4);
+    CHECK(queryInt(db, "SELECT COUNT(*) FROM events") == before + 1);
+    {
+        Stmt s = db.prepare(
+            "SELECT subject, object, detail FROM events WHERE verb = 'materialized'");
+        CHECK(s.step());
+        CHECK(s.colInt(0) == 4);      // subject = the world entity
+        CHECK(s.colInt(1) == entry);  // object  = the catalog id
+        CHECK(s.colText(2) == "wandering_proctor");  // detail = the handle
+        CHECK(!s.step());             // exactly one
+    }
+
+    // A second call changes nothing, appends nothing, returns false — the
+    // guarantee is the WHERE clause, not a prior read.
+    CHECK(materializeCatalogEntry(db, entry, 5, 3) == false);
+    CHECK(queryInt(db, ("SELECT entity FROM catalog WHERE id = " +
+                        std::to_string(entry)).c_str()) == 4);  // unchanged
+    CHECK(queryInt(db, "SELECT COUNT(*) FROM events") == before + 1);
+
+    // A nonexistent catalog id is the same no-op, not a throw.
+    CHECK(materializeCatalogEntry(db, 99999, 5, 3) == false);
+    CHECK(queryInt(db, "SELECT COUNT(*) FROM events") == before + 1);
+
+    // --- spec test 10: placeCatalogEntry -----------------------------------
+    const int64_t second = writeCatalogEntry(db, "beat", "moving_stair",
+                                             "moving stair",
+                                             "a stair that is not where it was",
+                                             "rivalry", 1);
+    const int64_t entitiesBefore = queryInt(db, "SELECT COUNT(*) FROM entities");
+    const int64_t minted = placeCatalogEntry(db, second, 2,
+                                             "It ends on a landing that was not "
+                                             "there a moment ago.", 3);
+    CHECK(minted > 0);
+    CHECK(queryInt(db, "SELECT COUNT(*) FROM entities") == entitiesBefore + 1);
+    CHECK(queryText(db, ("SELECT value FROM name WHERE entity = " +
+                         std::to_string(minted)).c_str()) == "moving stair");
+    {
+        const std::string prose = queryText(
+            db, ("SELECT prose FROM description WHERE entity = " +
+                 std::to_string(minted)).c_str());
+        CHECK(prose == "It ends on a landing that was not there a moment ago.");
+        // Explicitly NOT the blurb: the blurb is selection prose the model has
+        // already seen, and reusing it would put it in the room twice.
+        CHECK(prose != "a stair that is not where it was");
+    }
+    CHECK(queryInt(db, ("SELECT container FROM location WHERE entity = " +
+                        std::to_string(minted)).c_str()) == 2);
+    CHECK(queryInt(db, ("SELECT entity FROM catalog WHERE id = " +
+                        std::to_string(second)).c_str()) == minted);
+
+    // Called twice, the second call returns 0 and mints NO entity — the
+    // assertion that catches a mint-then-check ordering bug.
+    const int64_t entitiesAfter = queryInt(db, "SELECT COUNT(*) FROM entities");
+    CHECK(placeCatalogEntry(db, second, 2, "another landing", 3) == 0);
+    CHECK(queryInt(db, "SELECT COUNT(*) FROM entities") == entitiesAfter);
+    // …and an id that does not exist behaves the same way.
+    CHECK(placeCatalogEntry(db, 99999, 2, "nowhere", 3) == 0);
+    CHECK(queryInt(db, "SELECT COUNT(*) FROM entities") == entitiesAfter);
+
+    // --- micro-decision 2: the handle never reaches the narrator -----------
+    // Modeled on testGeneratedEventInvisible. `materialized` is a real event —
+    // it appears in the payload — but its detail is an engine-internal machine
+    // token, so buildFacts must withhold it the way it withholds burned/froze.
+    {
+        const int64_t turn = queryInt(db, "SELECT value FROM meta WHERE key = 'turn'");
+        const TurnFacts facts = buildFacts(db, turn);
+        const nlohmann::json j = nlohmann::json::parse(facts.payload);
+        bool sawMaterialized = false;
+        for (const auto& e : j["events"]) {
+            if (e.value("verb", "") == "materialized") {
+                sawMaterialized = true;
+                CHECK(!e.contains("detail"));  // the handle is withheld
+            }
+        }
+        CHECK(sawMaterialized);
+        // And the handle string appears NOWHERE in the payload — not in a
+        // detail, not smuggled through some other key.
+        CHECK(!contains(facts.payload, "wandering_proctor"));
+        CHECK(!contains(facts.payload, "moving_stair"));
+    }
+}
+
+// Step 8a: utf8Truncate cuts by code point and never splits a character.
+static void testTermTruncate() {
+    // Shorter than the cap: returned unchanged.
+    CHECK(utf8Truncate("abc", 10) == "abc");
+    CHECK(utf8Truncate("abc", 3) == "abc");
+    CHECK(utf8Truncate("", 5).empty());
+    // A zero cap yields empty, not the input.
+    CHECK(utf8Truncate("abc", 0).empty());
+    // ASCII longer than the cap: one code point is one byte here.
+    CHECK(utf8Truncate("abcdef", 3) == "abc");
+    CHECK(utf8Truncate("abcdef", 3).size() == 3);
+
+    // Multi-byte: an em-dash is 3 bytes, 'é' is 2. Cutting mid-string must
+    // count CODE POINTS and leave valid UTF-8 behind.
+    const std::string wide = "a—éb—éc";  // 7 code points, 12 bytes
+    CHECK(utf8Length(wide) == 7);
+    for (size_t n = 0; n <= 7; ++n) {
+        const std::string cut = utf8Truncate(wide, n);
+        CHECK(utf8Length(cut) == n);
+        // A byte-prefix of the input…
+        CHECK(wide.compare(0, cut.size(), cut) == 0);
+        // …cut on a CODE POINT BOUNDARY, which is what keeps it valid UTF-8.
+        // The check is on the byte the cut stopped before, not on the result's
+        // last byte: a string legitimately ENDING in a multi-byte character has
+        // a continuation byte last, so asserting on cut.back() would be wrong.
+        if (cut.size() < wide.size()) {
+            CHECK((static_cast<unsigned char>(wide[cut.size()]) & 0xC0) != 0x80);
+        }
+    }
+    CHECK(utf8Truncate(wide, 99) == wide);
+}
+
+// Step 8b: the two free-rewrite meta lanes (spec tests 13, 13a).
+static void testBardStoreMeta() {
+    const TempDbFile worldPath("textworld_bard_meta_tests.db");
+    Db db = openWorld(worldPath.string(), "tests/combat_fixture.sql");
+
+    const auto focus = [&db] {
+        return queryText(db, "SELECT value FROM meta WHERE key = 'bard_focus'");
+    };
+    const auto journal = [&db] {
+        return queryText(db, "SELECT value FROM meta WHERE key = 'bard_journal'");
+    };
+
+    // --- spec test 13a: FREE REWRITE, never append -------------------------
+    writeBardJournal(db, "first thought");
+    CHECK(journal() == "first thought");
+    writeBardJournal(db, "second thought");
+    CHECK(journal() == "second thought");  // exact equality: not a concatenation
+    writeBardFocus(db, "the proctor is circling");
+    CHECK(focus() == "the proctor is circling");
+    writeBardFocus(db, "the stair has moved again");
+    CHECK(focus() == "the stair has moved again");
+    // Exactly one row each, still — an upsert, not an insert-per-call.
+    CHECK(queryInt(db, "SELECT COUNT(*) FROM meta WHERE key = 'bard_focus'") == 1);
+    CHECK(queryInt(db, "SELECT COUNT(*) FROM meta WHERE key = 'bard_journal'") == 1);
+
+    // --- spec test 13: normalize, then truncate ----------------------------
+    // length() counts CHARACTERS in SQLite, which is the right unit for a cap
+    // measured in code points.
+    writeBardFocus(db, std::string(kBardFocusMaxChars + 200, 'x'));
+    CHECK(queryInt(db, "SELECT length(value) FROM meta WHERE key = 'bard_focus'") ==
+          static_cast<int64_t>(kBardFocusMaxChars));
+
+    // Line breaks are collapsed, so no stored focus is ever multi-line.
+    writeBardFocus(db, "one\ntwo\rthree");
+    CHECK(focus() == "one two three");
+    CHECK(focus().find('\n') == std::string::npos);
+    CHECK(focus().find('\r') == std::string::npos);
+    // A RUN of breaks yields exactly ONE space (micro-decision 4) — read
+    // per-character, "\r\n" would have produced two.
+    writeBardFocus(db, "a\r\nb");
+    CHECK(focus() == "a b");
+    writeBardFocus(db, "a\n\n\n\rb");
+    CHECK(focus() == "a b");
+    // Other whitespace is untouched: the requirement names line breaks only.
+    writeBardFocus(db, "a\tb  c");
+    CHECK(focus() == "a\tb  c");
+
+    // Normalization happens BEFORE the cut, so the cap is spent on the line the
+    // architect will actually read.
+    writeBardFocus(db, std::string(kBardFocusMaxChars, 'y') + "\n" +
+                           std::string(50, 'z'));
+    CHECK(focus() == std::string(kBardFocusMaxChars, 'y'));
+
+    // Multi-byte input is cut by code point, and stays valid UTF-8.
+    {
+        std::string wide;
+        for (size_t i = 0; i < kBardFocusMaxChars + 20; ++i) wide += "é";
+        writeBardFocus(db, wide);
+        CHECK(queryInt(db, "SELECT length(value) FROM meta WHERE key = 'bard_focus'") ==
+              static_cast<int64_t>(kBardFocusMaxChars));
+        CHECK(utf8Length(focus()) == kBardFocusMaxChars);
+    }
+
+    // The journal is NOT truncated — it is private working memory, and only the
+    // focus is paid for on every room generation.
+    {
+        const std::string big(kBardFocusMaxChars * 3, 'j');
+        writeBardJournal(db, big);
+        CHECK(journal() == big);
+    }
+    // …nor normalized: the journal is never read by the architect.
+    writeBardJournal(db, "line one\nline two");
+    CHECK(journal() == "line one\nline two");
+}
+
+// Step 10: the append-only guarantee (REQ-BARD-STORE-17, -18), encoded as
+// source-text assertions so it survives as a regression guard rather than being
+// grepped once by hand — the testCombatFinalSweep no-RNG precedent. Plus the
+// transaction test (spec test 14).
+static void testBardStoreAppendOnly() {
+    // --- REQ-BARD-STORE-18: mutations.cpp is the ONLY writer ---------------
+    // Enumerated explicitly, the way the no-RNG guard enumerates its files —
+    // but this list must be EVERY src/*.cpp except mutations.cpp, because the
+    // spec states the guarantee as a glob. Each file is asserted non-empty so a
+    // rename fails the test loudly instead of silently voiding its check
+    // (readFileBytes yields "" for a path that does not exist).
+    for (const char* path : {"src/aihttp.cpp", "src/architect.cpp", "src/band.cpp",
+                             "src/combat.cpp", "src/db.cpp", "src/loop.cpp",
+                             "src/main.cpp", "src/nlresolve.cpp", "src/parser.cpp",
+                             "src/pregen.cpp", "src/profile.cpp", "src/prose.cpp",
+                             "src/render.cpp", "src/systems.cpp", "src/term.cpp",
+                             "src/world.cpp"}) {
+        const std::string code = readFileBytes(path);
+        CHECK(!code.empty());
+        std::istringstream lines(code);
+        std::string line;
+        while (std::getline(lines, line)) {
+            const bool writes = contains(line, "INSERT") ||
+                                contains(line, "UPDATE") || contains(line, "DELETE");
+            if (!writes) continue;
+            CHECK(!contains(line, "catalog"));
+            // world.cpp is EXCEPTED for the bard_* keys, and only there: its
+            // one INSERT names all three and is REQ-BARD-STORE-6's init write.
+            if (std::string(path) == "src/world.cpp") continue;
+            CHECK(!contains(line, "bard_journal"));
+            CHECK(!contains(line, "bard_focus"));
+            CHECK(!contains(line, "bard_last_wake_turn"));
+        }
+    }
+
+    // --- REQ-BARD-STORE-17: exactly two latches, no edit path --------------
+    const std::string mut = readFileBytes("src/mutations.cpp");
+    {
+        std::istringstream lines(mut);
+        std::string line;
+        int latches = 0;
+        bool sawEntityLatch = false, sawSeededLatch = false;
+        while (std::getline(lines, line)) {
+            if (!contains(line, "UPDATE catalog SET")) continue;
+            ++latches;
+            // The guard must be on the SAME source line as the SET: a wrapped
+            // SQL string would pass a naive count and lose the guarantee.
+            if (contains(line, "entity = ?") && contains(line, "entity IS NULL")) {
+                sawEntityLatch = true;
+            }
+            if (contains(line, "seeded = 1") && contains(line, "seeded = 0")) {
+                sawSeededLatch = true;
+            }
+        }
+        CHECK(latches == 2);
+        CHECK(sawEntityLatch);
+        CHECK(sawSeededLatch);
+    }
+    // No edit path exists for any authored column. This is the mechanical form
+    // of "corrections append a new entry" — the bard cannot rewrite its mind.
+    for (const char* column : {"kind", "handle", "name", "blurb", "motive",
+                               "tier", "fact_archetype", "fact_element"}) {
+        CHECK(!contains(mut, std::string("UPDATE catalog SET ") + column));
+    }
+
+    // --- spec test 14: every helper honors the caller's transaction --------
+    const TempDbFile worldPath("textworld_bard_txn_tests.db");
+    Db db = openWorld(worldPath.string(), "tests/combat_fixture.sql");
+
+    db.begin();
+    const int64_t entry = writeCatalogEntry(db, "character", "rolled_back",
+                                            "rolled back", "never happened",
+                                            "grief", 1);
+    CHECK(entry > 0);
+    CHECK(queryInt(db, "SELECT COUNT(*) FROM catalog") == 1);  // visible inside
+    db.rollback();
+    CHECK(queryInt(db, "SELECT COUNT(*) FROM catalog") == 0);  // and gone after
+
+    // materializeCatalogEntry + its event roll back together — the "one fact"
+    // claim has to survive a rollback to mean anything.
+    db.begin();
+    const int64_t kept = writeCatalogEntry(db, "character", "kept", "kept",
+                                           "this one commits", "pride", 1);
+    db.commit();
+    const int64_t eventsBefore = queryInt(db, "SELECT COUNT(*) FROM events");
+    db.begin();
+    CHECK(materializeCatalogEntry(db, kept, 4, 3));
+    CHECK(queryInt(db, "SELECT COUNT(*) FROM events WHERE verb = 'materialized'") == 1);
+    db.rollback();
+    CHECK(queryInt(db, "SELECT COUNT(*) FROM events") == eventsBefore);
+    CHECK(queryInt(db, ("SELECT entity IS NULL FROM catalog WHERE id = " +
+                        std::to_string(kept)).c_str()) == 1);  // latch rolled back too
+
+    db.begin();
+    writeBardFocus(db, "a focus that never was");
+    CHECK(queryText(db, "SELECT value FROM meta WHERE key = 'bard_focus'") ==
+          "a focus that never was");
+    db.rollback();
+    CHECK(queryText(db, "SELECT value FROM meta WHERE key = 'bard_focus'").empty());
+}
+
 int main() {
     // libcurl init/shutdown for the whole run (REQ-LAT-7), ABOVE the live
     // smokes: they use the production transports and must run with libcurl
@@ -8001,6 +8550,14 @@ int main() {
     testBandResistance();
     testBandProseUnstyled();
     testBandNonGoals();
+    testBardStoreSchema();
+    testBardStoreShippedSeedMotives();
+    testBardStoreVersionGate();
+    testBardStoreWrite();
+    testBardStoreMaterialize();
+    testTermTruncate();
+    testBardStoreMeta();
+    testBardStoreAppendOnly();
 
     std::printf("%d checks, %d failures\n", g_checks, g_failures);
     return g_failures == 0 ? 0 : 1;

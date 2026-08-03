@@ -49,12 +49,42 @@ CREATE TABLE bestiary(archetype TEXT PRIMARY KEY, name TEXT, blurb TEXT,        
                       tier INTEGER, barrier INTEGER);                             -- tier = front-intensity rank; barrier = 1 → a defense-lock archetype
 CREATE TABLE drop_table(archetype TEXT PRIMARY KEY, spell TEXT);                  -- the fixed archetype → grimoire-spell it drops (REQ-COMBAT-20)
 
+-- The story catalog: entries authored by the bard, materialized at most once.
+-- Mirrors `bestiary` — a record the world is cast from — except that rows are
+-- minted at RUNTIME by the bard rather than seeded, and each is cast ONCE.
+-- APPEND-ONLY: no helper updates kind/handle/name/blurb/motive/tier/fact_*;
+-- `entity` and `seeded` are one-way latches guarded in SQL (REQ-BARD-STORE-17).
+CREATE TABLE catalog(
+  id      INTEGER PRIMARY KEY,          -- engine-minted; NEVER on the wire
+  kind    TEXT NOT NULL,                -- 'character' | 'beat'
+  handle  TEXT NOT NULL UNIQUE,         -- the model-facing SELECTION token
+  name    TEXT NOT NULL,                -- the in-world parser noun; becomes the
+                                        -- minted entity's name row
+  blurb   TEXT NOT NULL,                -- the ONLY prose the model sees to select
+  motive  TEXT NOT NULL,                -- motive_catalog.motive (closed vocab,
+                                        -- enforced in writeCatalogEntry)
+  tier    INTEGER NOT NULL,             -- placement gate vs distanceFromSeed
+  seeded  INTEGER NOT NULL DEFAULT 0,   -- 1 = hinted in prose, not yet materialized
+  entity  INTEGER,                      -- NULL = latent; non-NULL = MATERIALIZED
+  -- A KNOWLEDGE beat asserts something TRUE about combat. Both NULL on every
+  -- other entry; both non-NULL together, never one. Validated at admission
+  -- against bestiary/spell_catalog/resistance (REQ-BARD-STORE-10).
+  fact_archetype TEXT,
+  fact_element   TEXT
+);
+
+-- The closed motive vocabulary, authored for Thornmere. Engine-owned constants
+-- like spell_catalog: seeded in base.sql, never written at runtime. The model
+-- sees `blurb`, never the key.
+CREATE TABLE motive_catalog(motive TEXT PRIMARY KEY, blurb TEXT);
+
 -- the event log (append-only)
 CREATE TABLE events(
   id INTEGER PRIMARY KEY,
   turn INTEGER NOT NULL,
   actor INTEGER,            -- who did it (player entity for now)
   verb TEXT NOT NULL,       -- 'moved','took','dropped','looked','waited','failed'; combat: 'attacked','chip',…
+                            -- world-gen: 'generated'; story: 'materialized' (REQ-BARD-STORE-7)
   subject INTEGER,          -- primary entity acted on
   object INTEGER,           -- secondary entity (destination room, container…)
   detail TEXT               -- human-readable fragment or NULL
@@ -118,6 +148,11 @@ void initialize(Db& db, const std::string& seedPath,
             "INSERT INTO meta(key, value) VALUES ('setting', ?)");
         settingStmt.bind(1, setting);
         settingStmt.step();
+        // The bard's three meta rows (REQ-BARD-STORE-6): rows, not shapes. Written
+        // at init so every helper can UPDATE rather than branch on absence.
+        db.exec(
+            "INSERT INTO meta(key, value) VALUES "
+            "('bard_journal', ''), ('bard_focus', ''), ('bard_last_wake_turn', 0)");
         db.commit();
     } catch (...) {
         db.rollback();
