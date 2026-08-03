@@ -59,6 +59,18 @@ std::string collapseLineBreaks(std::string_view s) {
     return out;
 }
 
+// Does a row match this one- or two-parameter lookup? The shape every
+// writeCatalogEntry admission check shares: prepare, bind, step. Collapsing
+// them here means a future gate is one call rather than a fifth copy of the
+// same eight lines.
+bool rowExists(Db& db, const char* sql, const std::string& a,
+               const std::string& b = "") {
+    Stmt s = db.prepare(sql);
+    s.bind(1, a);
+    if (!b.empty()) s.bind(2, b);
+    return s.step();
+}
+
 // Free rewrite of one `meta` row, the shared body of the two bard lanes. Upsert
 // rather than UPDATE so a world whose row is somehow absent still gets one;
 // initialize() writes all three at init (REQ-BARD-STORE-6).
@@ -558,72 +570,48 @@ int64_t writeCatalogEntry(Db& db, const std::string& kind,
     // byte-identical — the placeEnemy/moveEntity discipline (throw before
     // mutating). All of these are engine faults: the caller offers only valid
     // values, so the caller rolls back the ambient transaction.
+    const auto refuse = [](const std::string& why) {
+        throw std::runtime_error("writeCatalogEntry: " + why);
+    };
     if (kind != "character" && kind != "beat") {
-        throw std::runtime_error(
-            "writeCatalogEntry: kind must be 'character' or 'beat', got '" +
-            kind + "'");
+        refuse("kind must be 'character' or 'beat', got '" + kind + "'");
     }
     // Trim first, then test: a whitespace-only handle is empty (REQ-BARD-STORE-9).
     const std::string trimmedHandle = trimAscii(handle);
     const std::string trimmedName = trimAscii(name);
     const std::string trimmedBlurb = trimAscii(blurb);
-    if (trimmedHandle.empty()) {
-        throw std::runtime_error("writeCatalogEntry: handle is empty after trim");
-    }
-    if (trimmedName.empty()) {
-        throw std::runtime_error("writeCatalogEntry: name is empty after trim");
-    }
-    if (trimmedBlurb.empty()) {
-        throw std::runtime_error("writeCatalogEntry: blurb is empty after trim");
-    }
-    if (tier < 0) {
-        throw std::runtime_error("writeCatalogEntry: tier is negative (" +
-                                 std::to_string(tier) + ")");
-    }
-    {
-        // The motive vocabulary is CLOSED (REQ-BARD-STORE-5): the table is the
-        // enforcement, so the bard cannot invent a ninth motive.
-        Stmt s = db.prepare("SELECT 1 FROM motive_catalog WHERE motive = ?");
-        s.bind(1, motive);
-        if (!s.step()) {
-            throw std::runtime_error("writeCatalogEntry: unknown motive '" +
-                                     motive + "'");
-        }
+    if (trimmedHandle.empty()) refuse("handle is empty after trim");
+    if (trimmedName.empty()) refuse("name is empty after trim");
+    if (trimmedBlurb.empty()) refuse("blurb is empty after trim");
+    if (tier < 0) refuse("tier is negative (" + std::to_string(tier) + ")");
+    // The motive vocabulary is CLOSED (REQ-BARD-STORE-5): the table is the
+    // enforcement, so the bard cannot invent a ninth motive.
+    if (!rowExists(db, "SELECT 1 FROM motive_catalog WHERE motive = ?", motive)) {
+        refuse("unknown motive '" + motive + "'");
     }
 
     // THE TRUTH GATE (REQ-BARD-STORE-10). Both fact fields or neither.
     const bool hasArchetype = !factArchetype.empty();
     const bool hasElement = !factElement.empty();
     if (hasArchetype != hasElement) {
-        throw std::runtime_error(
-            "writeCatalogEntry: fact_archetype and fact_element must be both "
-            "set or both empty (got archetype '" + factArchetype +
-            "', element '" + factElement + "')");
+        refuse("fact_archetype and fact_element must be both set or both empty "
+               "(got archetype '" + factArchetype + "', element '" +
+               factElement + "')");
     }
     if (hasArchetype) {
         // a. The archetype must exist. Same refusal as placeEnemy's.
-        {
-            Stmt s = db.prepare("SELECT 1 FROM bestiary WHERE archetype = ?");
-            s.bind(1, factArchetype);
-            if (!s.step()) {
-                throw std::runtime_error(
-                    "writeCatalogEntry: no bestiary row for fact_archetype '" +
-                    factArchetype + "'");
-            }
+        if (!rowExists(db, "SELECT 1 FROM bestiary WHERE archetype = ?",
+                       factArchetype)) {
+            refuse("no bestiary row for fact_archetype '" + factArchetype + "'");
         }
         // b. The element must be a live ELEMENT, not merely a spell name. Plain
         // equality suffices: SQL's three-valued logic already excludes the
         // NULL-element rows (ward/stun/dispel/blast), so the admissible
         // vocabulary is exactly {fire, frost} and a beat naming a spell is
         // refused here.
-        {
-            Stmt s = db.prepare("SELECT 1 FROM spell_catalog WHERE element = ?");
-            s.bind(1, factElement);
-            if (!s.step()) {
-                throw std::runtime_error(
-                    "writeCatalogEntry: '" + factElement +
-                    "' is not an element in spell_catalog");
-            }
+        if (!rowExists(db, "SELECT 1 FROM spell_catalog WHERE element = ?",
+                       factElement)) {
+            refuse("'" + factElement + "' is not an element in spell_catalog");
         }
         // c. The pair must be materially NON-NEUTRAL. The engine can check the
         // pair but not the blurb's English claim about it, so "the entry may
@@ -631,17 +619,11 @@ int64_t writeCatalogEntry(Db& db, const std::string& kind,
         // resistance row means x1, a beat about a neutral matchup teaches the
         // player nothing, and admitting it would let a blurb assert a weakness
         // that does not exist. Refusing it is the honest reading of the rule.
-        {
-            Stmt s = db.prepare(
-                "SELECT 1 FROM resistance WHERE archetype = ? AND element = ?");
-            s.bind(1, factArchetype);
-            s.bind(2, factElement);
-            if (!s.step()) {
-                throw std::runtime_error(
-                    "writeCatalogEntry: no resistance row for ('" +
-                    factArchetype + "', '" + factElement +
-                    "') — a neutral matchup teaches nothing");
-            }
+        if (!rowExists(db,
+                       "SELECT 1 FROM resistance WHERE archetype = ? AND element = ?",
+                       factArchetype, factElement)) {
+            refuse("no resistance row for ('" + factArchetype + "', '" +
+                   factElement + "') — a neutral matchup teaches nothing");
         }
     }
 
@@ -662,7 +644,7 @@ int64_t writeCatalogEntry(Db& db, const std::string& kind,
     // No event: a latent entry has not happened. It becomes one when it
     // materializes (dropGrimoire/placeEnemy set the same precedent).
     Stmt id = db.prepare("SELECT last_insert_rowid()");
-    if (!id.step()) throw std::runtime_error("writeCatalogEntry: rowid read failed");
+    if (!id.step()) refuse("rowid read failed");
     return id.colInt(0);
 }
 

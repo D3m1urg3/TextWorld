@@ -8020,30 +8020,30 @@ static void testBardStoreWrite() {
 
     // --- spec test 7: every refusal throws, and writes NOTHING -------------
     const int64_t rows = catalogCount();
-    const auto write = [&db](const char* kind, const char* handle,
-                             const char* name, const char* blurb,
-                             const char* motive, int64_t tier) {
-        return [&db, kind, handle, name, blurb, motive, tier] {
-            writeCatalogEntry(db, kind, handle, name, blurb, motive, tier);
-        };
+    // One idiom for every refusal below, including the truth-gate cases: name
+    // the arguments that make this call illegal, assert it throws.
+    const auto refused = [&db](const char* kind, const char* handle,
+                               const char* name, const char* blurb,
+                               const char* motive, int64_t tier,
+                               const char* archetype = "", const char* element = "") {
+        return threwRuntimeError([&] {
+            writeCatalogEntry(db, kind, handle, name, blurb, motive, tier,
+                              archetype, element);
+        });
     };
-    CHECK(threwRuntimeError(write("place", "h1", "n", "b", "curiosity", 1)));
-    CHECK(threwRuntimeError(write("", "h2", "n", "b", "curiosity", 1)));
-    CHECK(threwRuntimeError(write("beat", "h3", "n", "b", "envy", 1)));  // not in the eight
-    CHECK(threwRuntimeError(write("beat", "", "n", "b", "curiosity", 1)));
-    CHECK(threwRuntimeError(write("beat", "   ", "n", "b", "curiosity", 1)));  // whitespace-only
-    CHECK(threwRuntimeError(write("beat", "h4", "", "b", "curiosity", 1)));
-    CHECK(threwRuntimeError(write("beat", "h5", " \t ", "b", "curiosity", 1)));
-    CHECK(threwRuntimeError(write("beat", "h6", "n", "", "curiosity", 1)));
-    CHECK(threwRuntimeError(write("beat", "h7", "n", "\n", "curiosity", 1)));
-    CHECK(threwRuntimeError(write("beat", "h8", "n", "b", "curiosity", -1)));
+    CHECK(refused("place", "h1", "n", "b", "curiosity", 1));
+    CHECK(refused("", "h2", "n", "b", "curiosity", 1));
+    CHECK(refused("beat", "h3", "n", "b", "envy", 1));  // not in the eight
+    CHECK(refused("beat", "", "n", "b", "curiosity", 1));
+    CHECK(refused("beat", "   ", "n", "b", "curiosity", 1));  // whitespace-only
+    CHECK(refused("beat", "h4", "", "b", "curiosity", 1));
+    CHECK(refused("beat", "h5", " \t ", "b", "curiosity", 1));
+    CHECK(refused("beat", "h6", "n", "", "curiosity", 1));
+    CHECK(refused("beat", "h7", "n", "\n", "curiosity", 1));
+    CHECK(refused("beat", "h8", "n", "b", "curiosity", -1));
     // Both fact fields or neither — one alone throws, in either direction.
-    CHECK(threwRuntimeError([&db] {
-        writeCatalogEntry(db, "beat", "h9", "n", "b", "curiosity", 1, "rime_touched", "");
-    }));
-    CHECK(threwRuntimeError([&db] {
-        writeCatalogEntry(db, "beat", "h10", "n", "b", "curiosity", 1, "", "fire");
-    }));
+    CHECK(refused("beat", "h9", "n", "b", "curiosity", 1, "rime_touched", ""));
+    CHECK(refused("beat", "h10", "n", "b", "curiosity", 1, "", "fire"));
     CHECK(catalogCount() == rows);  // not one refusal left a row behind
 
     // --- spec test 8: the truth gate, driven from the SEEDED matchups ------
@@ -8062,36 +8062,30 @@ static void testBardStoreWrite() {
     // neutral. A beat about a neutral matchup teaches the player nothing, and
     // the engine cannot inspect the blurb's English claim about it — refusing
     // is the enforceable form of "may not promise a falsehood".
-    CHECK(threwRuntimeError([&db] {
-        writeCatalogEntry(db, "beat", "neutral_beat", "n", "b", "curiosity", 1,
-                          "goblin_grunt", "fire");
-    }));
+    CHECK(refused("beat", "neutral_beat", "n", "b", "curiosity", 1,
+                  "goblin_grunt", "fire"));
     // Clause a: an archetype absent from the bestiary.
-    CHECK(threwRuntimeError([&db] {
-        writeCatalogEntry(db, "beat", "absent_beast", "n", "b", "curiosity", 1,
-                          "no_such_beast", "fire");
-    }));
+    CHECK(refused("beat", "absent_beast", "n", "b", "curiosity", 1,
+                  "no_such_beast", "fire"));
     // Clause b: an element absent from spell_catalog…
-    CHECK(threwRuntimeError([&db] {
-        writeCatalogEntry(db, "beat", "acid_beat", "n", "b", "curiosity", 1,
-                          "rime_touched", "acid");
-    }));
+    CHECK(refused("beat", "acid_beat", "n", "b", "curiosity", 1,
+                  "rime_touched", "acid"));
     // …and a SPELL that is not an element. ward/stun/dispel/blast all carry a
     // NULL element, so the live vocabulary is exactly {fire, frost}.
-    CHECK(threwRuntimeError([&db] {
-        writeCatalogEntry(db, "beat", "ward_beat", "n", "b", "curiosity", 1,
-                          "rime_touched", "ward");
-    }));
+    CHECK(refused("beat", "ward_beat", "n", "b", "curiosity", 1,
+                  "rime_touched", "ward"));
     CHECK(catalogCount() == afterAccepted);  // every refusal wrote nothing
 
     // --- spec test 12: markCatalogSeeded is idempotent ---------------------
+    const auto seededOf = [&db](int64_t row) {
+        return queryInt(db, ("SELECT seeded FROM catalog WHERE id = " +
+                             std::to_string(row)).c_str());
+    };
     const int64_t eventsBeforeSeed = eventCount();
     markCatalogSeeded(db, id);
-    CHECK(queryInt(db, ("SELECT seeded FROM catalog WHERE id = " +
-                        std::to_string(id)).c_str()) == 1);
+    CHECK(seededOf(id) == 1);
     markCatalogSeeded(db, id);  // a second call is a no-op BY CONSTRUCTION
-    CHECK(queryInt(db, ("SELECT seeded FROM catalog WHERE id = " +
-                        std::to_string(id)).c_str()) == 1);
+    CHECK(seededOf(id) == 1);
     CHECK(eventCount() == eventsBeforeSeed);  // event-free bookkeeping
 }
 
@@ -8106,12 +8100,15 @@ static void testBardStoreMaterialize() {
                                             "a proctor who keeps arriving from "
                                             "the wrong direction",
                                             "obligation", 1);
+    const auto entityOf = [&db](int64_t row) {
+        return queryInt(db, ("SELECT entity FROM catalog WHERE id = " +
+                             std::to_string(row)).c_str());
+    };
 
     // --- spec test 9: the latch and its event ------------------------------
     const int64_t before = queryInt(db, "SELECT COUNT(*) FROM events");
     CHECK(materializeCatalogEntry(db, entry, 4, 3) == true);
-    CHECK(queryInt(db, ("SELECT entity FROM catalog WHERE id = " +
-                        std::to_string(entry)).c_str()) == 4);
+    CHECK(entityOf(entry) == 4);
     CHECK(queryInt(db, "SELECT COUNT(*) FROM events") == before + 1);
     {
         Stmt s = db.prepare(
@@ -8126,8 +8123,7 @@ static void testBardStoreMaterialize() {
     // A second call changes nothing, appends nothing, returns false — the
     // guarantee is the WHERE clause, not a prior read.
     CHECK(materializeCatalogEntry(db, entry, 5, 3) == false);
-    CHECK(queryInt(db, ("SELECT entity FROM catalog WHERE id = " +
-                        std::to_string(entry)).c_str()) == 4);  // unchanged
+    CHECK(entityOf(entry) == 4);  // unchanged
     CHECK(queryInt(db, "SELECT COUNT(*) FROM events") == before + 1);
 
     // A nonexistent catalog id is the same no-op, not a throw.
@@ -8158,8 +8154,7 @@ static void testBardStoreMaterialize() {
     }
     CHECK(queryInt(db, ("SELECT container FROM location WHERE entity = " +
                         std::to_string(minted)).c_str()) == 2);
-    CHECK(queryInt(db, ("SELECT entity FROM catalog WHERE id = " +
-                        std::to_string(second)).c_str()) == minted);
+    CHECK(entityOf(second) == minted);
 
     // Called twice, the second call returns 0 and mints NO entity — the
     // assertion that catches a mint-then-check ordering bug.
@@ -8306,19 +8301,19 @@ static void testBardStoreMeta() {
 // transaction test (spec test 14).
 static void testBardStoreAppendOnly() {
     // --- REQ-BARD-STORE-18: mutations.cpp is the ONLY writer ---------------
-    // Enumerated explicitly, the way the no-RNG guard enumerates its files —
-    // but this list must be EVERY src/*.cpp except mutations.cpp, because the
-    // spec states the guarantee as a glob. Each file is asserted non-empty so a
-    // rename fails the test loudly instead of silently voiding its check
-    // (readFileBytes yields "" for a path that does not exist).
-    for (const char* path : {"src/aihttp.cpp", "src/architect.cpp", "src/band.cpp",
-                             "src/combat.cpp", "src/db.cpp", "src/loop.cpp",
-                             "src/main.cpp", "src/nlresolve.cpp", "src/parser.cpp",
-                             "src/pregen.cpp", "src/profile.cpp", "src/prose.cpp",
-                             "src/render.cpp", "src/systems.cpp", "src/term.cpp",
-                             "src/world.cpp"}) {
-        const std::string code = readFileBytes(path);
+    // The spec states this guarantee as a GLOB over src/*.cpp, so the test
+    // globs too rather than naming files: a hardcoded list silently stops
+    // covering the next translation unit someone adds, which is exactly the
+    // case the guarantee exists for. The count is asserted so a broken path or
+    // an empty directory fails loudly instead of vacuously passing.
+    int scanned = 0;
+    for (const auto& entry : std::filesystem::directory_iterator("src")) {
+        if (entry.path().extension() != ".cpp") continue;
+        const std::string filename = entry.path().filename().string();
+        if (filename == "mutations.cpp") continue;  // the sanctioned writer
+        const std::string code = readFileBytes(entry.path());
         CHECK(!code.empty());
+        ++scanned;
         std::istringstream lines(code);
         std::string line;
         while (std::getline(lines, line)) {
@@ -8328,12 +8323,13 @@ static void testBardStoreAppendOnly() {
             CHECK(!contains(line, "catalog"));
             // world.cpp is EXCEPTED for the bard_* keys, and only there: its
             // one INSERT names all three and is REQ-BARD-STORE-6's init write.
-            if (std::string(path) == "src/world.cpp") continue;
+            if (filename == "world.cpp") continue;
             CHECK(!contains(line, "bard_journal"));
             CHECK(!contains(line, "bard_focus"));
             CHECK(!contains(line, "bard_last_wake_turn"));
         }
     }
+    CHECK(scanned >= 15);  // the tree today; a collapse to 0 must not pass
 
     // --- REQ-BARD-STORE-17: exactly two latches, no edit path --------------
     const std::string mut = readFileBytes("src/mutations.cpp");
