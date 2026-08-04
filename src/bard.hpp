@@ -278,6 +278,53 @@ std::string catalogEntryRefusal(Db& db, const CatalogEntryProposal& entry,
 // catalogEntryRefusal.
 int admitOvertureProposal(Db& db, const OvertureProposal& proposal);
 
+// A DELIBERATE EXCEPTION to the uniform 8 s budget (REQ-BARD-WAKE-5). The
+// overture is a bulk generation of the whole catalog at high effort, run ONCE
+// per world file, with the player already waiting and told so, with nothing
+// else running, and with no fallback that produces a better catalog — the
+// alternative to waiting is an empty one. 8 s would cut it off mid-write.
+// Do NOT normalize this back to kAiHttpTimeoutSeconds.
+inline constexpr long kBardOvertureTimeoutSeconds = 60;
+
+// The one cold call, on the MAIN thread, before any worker exists. Blocking.
+// Runs only when the world was created THIS launch (the caller's half of the
+// condition, since only main() knows it) and only when the bard and AI are
+// enabled — checked here, FIRST THING, so a disabled run constructs no
+// transport and makes no call at all, which is a fact a test can assert and a
+// guard buried in main() would not be.
+//
+// NEVER THROWS. Every failure yields an empty catalog and today's game
+// (REQ-BARD-WAKE-6), and the whole body is inside the guard rather than just
+// the transport call: the context builders and the admission path are ordinary
+// db.hpp callers, and db.hpp raises std::runtime_error for any SQLite fault, so
+// an unguarded builder would propagate into main()'s catch and end the session
+// on world creation — the exact inverse of the degradation claim.
+//
+// `transport` overrides the production transport; pass nullptr in production,
+// exactly as pregenAcquire does.
+void bardOverture(Db& db, const HttpTransport* transport);
+
+// The rate ceiling (REQ-BARD-WAKE-9). Engine-owned, NOT model-visible and not
+// configurable at runtime by the model — the same standing the combat constants
+// have. At a 5-turn floor the bard cannot exceed 0.2 wakes/turn no matter how
+// frantically the player generates irreversible events. "Tunable" means this
+// one line.
+inline constexpr int64_t kBardMinTurnGap = 5;
+
+// THE ONE CALL THE TURN LOOP MAKES, on the main thread, AFTER the tick's
+// transaction has committed and AFTER the player's text has been flushed — so
+// neither half of it can ever delay the turn the player waited on
+// (REQ-BARD-WAKE-8). Commits a ready result FIRST, in its own transaction, then
+// evaluates the trigger; committing first is what lets REQ-BARD-WAKE-14's "one
+// further evaluation after that wake commits" happen on the same turn rather
+// than the next one.
+//
+// No-op when the bard or AI is off. NEVER THROWS: like bardOverture, the whole
+// body is inside the guard, because the trigger query, the snapshot builders,
+// and the stamp are all ordinary db.hpp callers and an escape from here would
+// kill a turn the player has already been shown.
+void bardAfterTurn(Db& db);
+
 // Apply an accepted wake, in order: focus, journal, appended entries (through
 // the same pre-flight), then each mark_seeded handle resolved with
 // catalogIdForHandle (REQ-BARD-SEL-24 — room-free and gate-free, NOT

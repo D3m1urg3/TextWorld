@@ -6,7 +6,9 @@
 #include <string>
 
 #include "aihttp.hpp"
-#include "architect.hpp"  // architectQueuePregen — the pre-generation scheduler
+#include "architect.hpp"   // architectQueuePregen — the pre-generation scheduler
+#include "bard.hpp"        // bardOverture — the one cold call, at creation
+#include "bardworker.hpp"  // BardGuard — worker two
 #include "loop.hpp"
 #include "pregen.hpp"
 #include "profile.hpp"    // ScopedDwell — how long the player took to answer
@@ -20,14 +22,30 @@ int main() {
         // quit, EOF, SchemaMismatch, and the generic catch.
         const AiHttpGuard httpGuard;
 
-        // The pre-generation worker. SECOND local, deliberately: reverse
-        // destruction joins the thread BEFORE aiHttpShutdown() runs
-        // curl_global_cleanup, on every one of those same exit paths
-        // (REQ-PREGEN-19). This is the only pregenStart/pregenStop pair in the
-        // binary — add a second and there are two things to keep in step.
-        const PregenGuard pregenGuard;
+        auto world = openWorld("world.db");
+        Db& db = world.db;
 
-        Db db = openWorld("world.db");
+        // The overture (REQ-BARD-WAKE-2, -3): ONCE per world file, on the MAIN
+        // thread, blocking, and before either worker thread exists. `created`
+        // is the half of the condition only main() knows; the bard/AI half is
+        // checked inside, first thing. Blocking is the point — generated rooms
+        // are canon forever, so a story-less opening area would be permanent.
+        // Never throws: a failure here leaves an empty catalog and today's game.
+        if (world.created) bardOverture(db, nullptr);
+
+        // The two background workers. What is load-bearing is that BOTH are
+        // declared BELOW the AiHttpGuard: reverse destruction then joins both
+        // threads BEFORE aiHttpShutdown() runs curl_global_cleanup, on every
+        // one of the exit paths above — normal return, quit, EOF,
+        // SchemaMismatch, and both catches (REQ-PREGEN-19, REQ-BARD-WAKE-18).
+        // REQ-BARD-WAKE-18 also fixes their order relative to each other, and
+        // a source-order test pins it — though only the "below AiHttpGuard"
+        // half is what makes the difference between defined and undefined
+        // behavior; the two workers themselves are independent. These are the
+        // only start/stop pairs in the binary — add a call site and there are
+        // two things to keep in step.
+        const PregenGuard pregenGuard;
+        const BardGuard bardGuard;
 
         // One-line mode notice (REQ-PROSE-2): told once, before the first
         // prompt, when AI narration is off. Silence means AI mode.
@@ -79,6 +97,14 @@ int main() {
             // text, so this can never delay the turn they waited on. Uniform
             // and idempotent: a room with nothing to queue queues nothing.
             architectQueuePregen(db, playerRoom(db));
+
+            // The bard's one turn-loop call (REQ-BARD-WAKE-8): AFTER the tick's
+            // transaction has committed and AFTER the fflush above, so neither
+            // half of it — committing a wake that landed, or evaluating whether
+            // to queue a new one — can delay the turn the player waited on.
+            // Same rule and same call-site shape as architectQueuePregen.
+            // Never throws: a broken bard costs the session nothing.
+            bardAfterTurn(db);
         }
         return 0;
     } catch (const SchemaMismatch&) {

@@ -40,6 +40,17 @@ public:
 // seed, it is read TOLERANTLY: an absent or empty file leaves meta.setting
 // empty/absent and init still succeeds — an empty setting simply yields a
 // thinner architect prompt. Zero DDL: this is a new meta *row*, not a shape.
-Db openWorld(const std::string& path,
-             const std::string& seedPath = "seed/base.sql",
-             const std::string& settingPath = "seed/setting.txt");
+//
+// The return carries `created` alongside the handle (REQ-BARD-WAKE-1): true
+// IFF initialize() ran on THIS call. It is the once-ever hook the bard's
+// overture hangs on, and it is FALSE for every resumed session — a world is
+// authored once and then only played. The SchemaMismatch path returns nothing
+// at all, so `created` is never observed on a refused file.
+struct OpenedWorld {
+    Db db;
+    bool created = false;
+};
+
+OpenedWorld openWorld(const std::string& path,
+                      const std::string& seedPath = "seed/base.sql",
+                      const std::string& settingPath = "seed/setting.txt");

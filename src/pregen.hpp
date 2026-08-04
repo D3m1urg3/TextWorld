@@ -193,13 +193,17 @@ std::size_t pregenPendingCountForTest();
 
 // Process-lifetime RAII for the worker, mirroring AiHttpGuard.
 //
-// DECLARE IT AS main()'s SECOND LOCAL, immediately below the AiHttpGuard.
-// Reverse destruction then gives join-before-curl_global_cleanup on EVERY exit
-// path the binary has — normal return, quit, EOF, SchemaMismatch, and both
-// catches — without a single explicit call (REQ-PREGEN-19). That ordering is
-// not optional; violating it is undefined behavior, which is exactly the kind
-// of thing that should fall out of the code's shape rather than out of anyone
-// remembering it.
+// DECLARE IT BELOW main()'s AiHttpGuard. Reverse destruction then gives
+// join-before-curl_global_cleanup on EVERY exit path the binary has — normal
+// return, quit, EOF, SchemaMismatch, and both catches — without a single
+// explicit call (REQ-PREGEN-19). That ordering is not optional; violating it is
+// undefined behavior, which is exactly the kind of thing that should fall out
+// of the code's shape rather than out of anyone remembering it.
+//
+// "Below AiHttpGuard" is the whole invariant — NOT "second local", which is
+// what this said while there was only one worker. There are now two (the bard's
+// BardGuard is the other), they are independent, and their order relative to
+// each other carries nothing.
 struct PregenGuard {
     PregenGuard() { pregenStart(); }
     ~PregenGuard() { pregenStop(); }
