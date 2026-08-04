@@ -51,6 +51,15 @@ struct PregenJob {
     std::string direction;                 // the latent exit being prefetched
     std::string contextPayload;            // buildArchitectContext, snapshotted
     std::vector<std::string> enemyBlurbs;  // eligibleEnemyBlurbs, snapshotted
+    std::vector<std::string> storyHandles;  // eligible catalog handles,
+                                            // snapshotted (REQ-BARD-ARCH-14).
+                                            // HANDLES ONLY: the blurbs are
+                                            // already inside contextPayload, and
+                                            // carrying both would put the same
+                                            // strings on the job twice and
+                                            // invite them to disagree. The
+                                            // worker needs these solely to
+                                            // build the schema enum
     int64_t snapshotTurn = 0;              // meta.turn when the snapshot was
                                            // taken; RECORDED AND REPORTED ONLY
                                            // (REQ-PREGEN-13) — it invalidates

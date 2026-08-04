@@ -52,6 +52,22 @@ bool blankAfterTrim(const std::string& s) {
     return true;
 }
 
+// Leading/trailing ASCII whitespace removed, case preserved. Lifted out of the
+// enemy block, which inlined it, because the story block needs the same thing
+// twice more (REQ-BARD-ARCH-8) and three copies of a trim is how they drift.
+// Behavior-preserving by construction: testArchitectGate passes unmodified.
+std::string trimmed(const std::string& s) {
+    auto isWs = [](unsigned char c) {
+        return c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\f' ||
+               c == '\v';
+    };
+    size_t begin = 0;
+    size_t end = s.size();
+    while (begin < end && isWs(static_cast<unsigned char>(s[begin]))) ++begin;
+    while (end > begin && isWs(static_cast<unsigned char>(s[end - 1]))) --end;
+    return s.substr(begin, end - begin);
+}
+
 // Trim leading/trailing ASCII whitespace and lowercase, so an exit like
 // "North" or " up " matches the fixed direction table (REQ-EXITS-7).
 std::string normalizeDirection(const std::string& s) {
@@ -87,6 +103,16 @@ std::string normalizeDirection(const std::string& s) {
 // The setting text loaded at init (REQ-ARCH-1), or empty if absent.
 std::string settingText(Db& db) {
     Stmt s = db.prepare("SELECT value FROM meta WHERE key = 'setting'");
+    if (!s.step()) return "";
+    return s.colText(0);
+}
+
+// The bard's SHORT public line (meta.bard_focus, REQ-BARD-ARCH-1), or empty if
+// absent. Deliberately NOT the bard's journal: that key is its private working
+// memory and no other unit reads it. Capped at write time
+// (kBardFocusMaxChars, mutations.hpp), so this read is bounded by construction.
+std::string bardFocusText(Db& db) {
+    Stmt s = db.prepare("SELECT value FROM meta WHERE key = 'bard_focus'");
     if (!s.step()) return "";
     return s.colText(0);
 }
@@ -160,10 +186,12 @@ Rules, absolute:
 - The description is of THIS room only. Declare in exits the directions that lead onward, and describe those declared exits in the prose; name no opening you did not declare. EXCLUDE the direction back the way the player came - the engine adds that return exit itself. Do NOT narrate the player's arrival, movement, or the act of entering ("you step into...") - describe the standing room, not the journey to it.
 - Invent no ids, numbers, or identifiers of any kind. You name, describe, and declare exit directions; the engine assigns everything else.
 - Introduce nothing that contradicts the setting or the origin room.
-- If (and only if) the create_room tool offers an "enemy" field, you may place one of the invaders described there by setting enemy to exactly one of its listed values, choosing the one that best fits this room and the setting - or omit it to leave the room clear. Never invent an enemy or any of its powers; the choices offered are the only ones, and the engine owns everything about the creature but the fact that it is here. When you place one, let it show in the description.)";
+- If (and only if) the create_room tool offers an "enemy" field, you may place one of the invaders described there by setting enemy to exactly one of its listed values, choosing the one that best fits this room and the setting - or omit it to leave the room clear. Never invent an enemy or any of its powers; the choices offered are the only ones, and the engine owns everything about the creature but the fact that it is here. When you place one, let it show in the description.
+- If (and only if) the create_room tool offers a "story" field, you may bring one of the entries listed there into this room: set story.handle to exactly one of its listed values, and story.description to how that entry appears HERE, in this room's own words - or omit story entirely to leave the room without one. Never invent a handle; the entries offered are the only ones. The listed blurb tells you who or what the entry is; it is not the prose - you write the prose. When you bring one in, let it show in the room description.)";
 
 std::string buildArchitectContext(Db& db, int64_t room,
-                                  const std::string& direction) {
+                                  const std::string& direction,
+                                  const std::vector<CatalogChoice>& menu) {
     // EXACTLY the REQ-ARCH-7a fields, nothing else. No ids ever enter the
     // payload (REQ-ARCH-6): `room` is used only to SELECT the origin's name and
     // canon description. nlohmann/json handles all escaping. Empty setting or
@@ -173,12 +201,31 @@ std::string buildArchitectContext(Db& db, int64_t room,
     payload["origin_name"] = nameOf(db, room);
     payload["origin_description"] = canonProseOf(db, room);
     payload["direction"] = direction;
+
+    // Both keys are OMITTED when empty, never present-and-empty (REQ-BARD-ARCH-4):
+    // with no catalog and no focus the payload is EXACTLY today's four fields, which
+    // is what makes REQ-BARD-ARCH-15's non-regression claim free rather than argued.
+    const std::string focus = bardFocusText(db);
+    if (!focus.empty()) payload["focus"] = focus;
+    if (!menu.empty()) {
+        // No id, no catalog.id, no tier, no seeded — CatalogChoice carries none
+        // of them by construction (bard.hpp), and `motive` is the motive BLURB,
+        // never the key (REQ-BARD-ARCH-17).
+        json options = json::array();
+        for (const CatalogChoice& c : menu) {
+            options.push_back({{"handle", c.handle},
+                               {"blurb", c.blurb},
+                               {"motive", c.motiveBlurb}});
+        }
+        payload["story_options"] = std::move(options);
+    }
     return payload.dump();
 }
 
 std::string buildArchitectRequestBody(
     const std::string& contextPayload,
-    const std::vector<std::string>& enemyBlurbs) {
+    const std::vector<std::string>& enemyBlurbs,
+    const std::vector<std::string>& storyHandles) {
     // Model: the GENERATE role (room prose is quality work, so it keeps the
     // expensive default). The default and the TEXTWORLD_MODEL override rule
     // both live in aihttp.hpp — never restate them here.
@@ -225,12 +272,44 @@ std::string buildArchitectRequestBody(
              "descriptions, or omit for none. Pick the one that best fits the "
              "room and setting; you may place at most one."}};
     }
+    // Optional `story` field (REQ-BARD-ARCH-5/-6/-7): present ONLY when the
+    // engine offered an eligible catalog menu. `handle` is a schema-enforced
+    // ENUM of exactly those handles — the model can neither invent one nor see
+    // an id, a tier, or the seeded flag — and `description` is the instance
+    // prose it writes for THIS room. Both are required WITHIN the story object,
+    // so a half-filled story is a schema error rather than a half-placed entry;
+    // `story` itself stays OUT of the tool's top-level required array, so the
+    // model may bring at most one entry and possibly none. Absent menu → no
+    // `story` field at all, byte-identical to the pre-bard body. Written
+    // INDEPENDENTLY of `enemy`, so a room may carry both.
+    if (!storyHandles.empty()) {
+        properties["story"] = {
+            {"type", "object"},
+            {"properties",
+             {{"handle",
+               {{"type", "string"},
+                {"enum", storyHandles},
+                {"description",
+                 "Exactly one of the handles offered in story_options. Never "
+                 "invent one."}}},
+              {"description",
+               {{"type", "string"},
+                {"description",
+                 "How this entry appears in THIS room, in this room's own "
+                 "words. Not the blurb - the blurb told you who or what it is; "
+                 "you write the prose."}}}}},
+            {"required", json::array({"handle", "description"})},
+            {"description",
+             "Optional. One story entry to bring into this room, or omit for "
+             "none."}};
+    }
 
     json inputSchema;
     inputSchema["type"] = "object";
     inputSchema["properties"] = std::move(properties);
-    // exits and enemy are OPTIONAL — absent/empty exits is a dead end, absent
-    // enemy is a clear room; only name+description are required (REQ-EXITS-5).
+    // exits, enemy and story are OPTIONAL — absent/empty exits is a dead end,
+    // absent enemy is a clear room, absent story is a room without one; only
+    // name+description are required (REQ-EXITS-5, REQ-BARD-ARCH-7).
     inputSchema["required"] = json::array({"name", "description"});
     createRoom["input_schema"] = std::move(inputSchema);
 
@@ -387,15 +466,47 @@ std::optional<RoomProposal> validateRoomProposal(
     if (input.contains("enemy") && input["enemy"].is_string()) {
         const std::string raw = input["enemy"].get<std::string>();
         if (!blankAfterTrim(raw)) {
-            size_t begin = 0;
-            size_t end = raw.size();
-            auto isWs = [](unsigned char c) {
-                return c == ' ' || c == '\t' || c == '\n' || c == '\r' ||
-                       c == '\f' || c == '\v';
-            };
-            while (begin < end && isWs(static_cast<unsigned char>(raw[begin]))) ++begin;
-            while (end > begin && isWs(static_cast<unsigned char>(raw[end - 1]))) --end;
-            proposal.enemyBlurb = raw.substr(begin, end - begin);
+            proposal.enemyBlurb = trimmed(raw);
+        }
+    }
+
+    // --- story selection (REQ-BARD-ARCH-8): LENIENT, like exits and enemy. `name`
+    // and `description` remain the ONLY strict clauses. A malformed, empty, or
+    // absent story is dropped with ONE diagnostic and NEVER rejects the room, and
+    // a story missing EITHER field is dropped IN FULL (REQ-BARD-ARCH-9) — an entry
+    // without instance prose has nothing to write into the world. No id is read:
+    // a spurious `id` or `catalog` field inside the story object is never
+    // touched (REQ-BARD-ARCH-17), exactly as a spurious room id is not.
+    //
+    // ABSENCE IS SILENT. Every other drop gets a line on stderr, but "the model
+    // brought no story" is the common case on a room the catalog has nothing
+    // for, not a fault, and a diagnostic per generation would be noise.
+    if (input.contains("story")) {
+        const json& story = input["story"];
+        if (!story.is_object()) {
+            std::fprintf(stderr,
+                         "validateRoomProposal: dropped story, not an object\n");
+        } else if (!story.contains("handle") || !story["handle"].is_string()) {
+            std::fprintf(stderr,
+                         "validateRoomProposal: dropped story, handle missing "
+                         "or not a string\n");
+        } else if (blankAfterTrim(story["handle"].get<std::string>())) {
+            std::fprintf(stderr,
+                         "validateRoomProposal: dropped story, handle is empty "
+                         "after trim\n");
+        } else if (!story.contains("description") ||
+                   !story["description"].is_string()) {
+            std::fprintf(stderr,
+                         "validateRoomProposal: dropped story, description "
+                         "missing or not a string\n");
+        } else if (blankAfterTrim(story["description"].get<std::string>())) {
+            std::fprintf(stderr,
+                         "validateRoomProposal: dropped story, description is "
+                         "empty after trim\n");
+        } else {
+            proposal.story.handle = trimmed(story["handle"].get<std::string>());
+            proposal.story.description =
+                trimmed(story["description"].get<std::string>());
         }
     }
 
@@ -421,11 +532,25 @@ bool architectGenerate(Db& db, int64_t room, const std::string& direction,
 
     std::optional<RoomProposal> proposal;
     try {  // ── Phase 1 (AI side): NO database write happens in here ──
+        // The eligible STORY menu for that same prospective room
+        // (REQ-BARD-ARCH-2), read ONCE and used twice: its blurbs go into the
+        // context and its handles become the tool schema's enum, so the two
+        // agree BY CONSTRUCTION rather than by review. INSIDE the catch, like
+        // the context read below and unlike the enemy read above — it is a DB
+        // read with a BFS in it, and a fault here is a Phase-1 failure that
+        // walls exactly as before.
+        const std::vector<CatalogChoice> menu =
+            eligibleCatalogForNewRoom(db, room);
+        std::vector<std::string> storyHandles;
+        storyHandles.reserve(menu.size());
+        for (const CatalogChoice& c : menu) storyHandles.push_back(c.handle);
+
         // The context read stays INSIDE the catch: a DB fault here is a Phase-1
         // failure and walls, exactly as before. Everything after it is the
         // snapshot-only half the background worker shares.
-        const std::string ctx = buildArchitectContext(db, room, direction);
-        proposal = architectProposeRoom(ctx, enemyBlurbs, direction, transport);
+        const std::string ctx = buildArchitectContext(db, room, direction, menu);
+        proposal = architectProposeRoom(ctx, enemyBlurbs, storyHandles, direction,
+                                        transport);
     } catch (const std::exception& e) {
         std::fprintf(stderr, "architectGenerate: phase 1 failed: %s\n", e.what());
         return false;  // → wall (REQ-ARCH-3c)
@@ -446,10 +571,11 @@ bool architectGenerate(Db& db, int64_t room, const std::string& direction,
 
 std::optional<RoomProposal> architectProposeRoom(
     const std::string& contextPayload,
-    const std::vector<std::string>& enemyBlurbs, const std::string& direction,
+    const std::vector<std::string>& enemyBlurbs,
+    const std::vector<std::string>& storyHandles, const std::string& direction,
     const HttpTransport& transport) {
     const std::string body =
-        buildArchitectRequestBody(contextPayload, enemyBlurbs);
+        buildArchitectRequestBody(contextPayload, enemyBlurbs, storyHandles);
     const HttpResponse resp = transport(body);  // at most once, no retries
     return validateRoomProposal(resp, direction);  // never throws
 }
@@ -475,6 +601,33 @@ int64_t architectCommitProposal(Db& db, int64_t originRoom,
     if (!archetype.empty()) {
         placeEnemy(db, archetype, newRoom);
         recordArchitectSpawn(db);
+    }
+
+    // Story placement (REQ-BARD-ARCH-10), beside the enemy and with the same shape:
+    // re-check, place, record. The menu is re-read LIVE against the room that now
+    // EXISTS (REQ-BARD-ARCH-11) — a pregen candidate may have been snapshotted many
+    // turns before it commits, and an entry materialized elsewhere since must place
+    // nothing. An unknown, stale, or already-materialized handle resolves to 0; the
+    // room is still created normally. placeCatalogEntry writes the ARCHITECT's
+    // instance prose as the description; the catalog supplies only the name
+    // (REQ-BARD-ARCH-12). The blurb is never written into the world.
+    //
+    // Checked against `newRoom` and not the origin, deliberately: the room exists
+    // by now, so its seed distance is the origin's plus one — the same tier gate
+    // the menu was built with — and the knowledge-beat gate evaluates against its
+    // REAL neighborhood, INCLUDING the enemy placed two lines above. A beat about
+    // the goblin is admissible in the room with the goblin.
+    //
+    // This sits in Phase 2, OUTSIDE architectGenerate's Phase-1 catch by
+    // construction (REQ-BARD-ARCH-13): a DB fault here propagates to the tick's
+    // rollback rather than being downgraded to a silent wall. architect.cpp
+    // writes nothing itself — placeCatalogEntry is the mutations.cpp helper
+    // (REQ-BARD-ARCH-16).
+    //
+    // No guard on the empty handle: catalogForHandle already returns 0 for one.
+    const int64_t entry = catalogForHandle(db, newRoom, proposal.story.handle);
+    if (entry != 0) {
+        placeCatalogEntry(db, entry, newRoom, proposal.story.description, actor);
     }
     return newRoom;
 }
@@ -507,6 +660,15 @@ void architectQueuePregen(Db& db, int64_t room) {
     // Both reads hoisted: they are per-room, not per-direction, and this runs
     // on the turn path (after the output, but still).
     const std::vector<std::string> enemyBlurbs = eligibleEnemyBlurbs(db, room);
+    // The story menu is PER-ROOM, not per-direction (REQ-BARD-ARCH-2): every
+    // latent exit of this room leads to a prospective room one hop out, so they
+    // all share one menu. Hoisted for the same reason enemyBlurbs is — reading
+    // it inside the loop would repeat a distanceFromSeed BFS and a neighborhood
+    // read once per direction, on the turn path.
+    const std::vector<CatalogChoice> menu = eligibleCatalogForNewRoom(db, room);
+    std::vector<std::string> storyHandles;
+    storyHandles.reserve(menu.size());
+    for (const CatalogChoice& c : menu) storyHandles.push_back(c.handle);
     const int64_t turn = architectWorldTurn(db);
 
     for (const std::string& direction : directions) {
@@ -522,8 +684,12 @@ void architectQueuePregen(Db& db, int64_t room) {
         job.direction = direction;
         // The snapshot (REQ-PREGEN-5): every database read the job needs,
         // taken HERE, on the main thread. What crosses to the worker is text.
-        job.contextPayload = buildArchitectContext(db, room, direction);
+        job.contextPayload = buildArchitectContext(db, room, direction, menu);
         job.enemyBlurbs = enemyBlurbs;
+        // Handles only — the blurbs already rode across inside contextPayload
+        // (REQ-BARD-ARCH-14). No SQL enters pregen.cpp; that is why this is a
+        // job field at all (REQ-PREGEN-5/-7).
+        job.storyHandles = storyHandles;
         job.snapshotTurn = turn;
 
         g_attempted.insert(direction);

@@ -26,6 +26,7 @@
 #include "band.hpp"
 #include "combat.hpp"
 #include "db.hpp"
+#include "lookup.hpp"  // lookupNoun — the shared recognition rule (Brick 4 Step 9)
 #include "loop.hpp"
 #include "mutations.hpp"
 #include "nlresolve.hpp"
@@ -4321,6 +4322,117 @@ static void testArchitectContext() {
     }
 }
 
+// --- Brick 4 Step 2, REQ-BARD-ARCH-1/-2/-3/-4/-17: the context gains `focus`
+// (meta.bard_focus, verbatim) and `story_options` (the caller-supplied menu, as
+// handle + blurb + motive BLURB), both OMITTED ENTIRELY when empty. The
+// four-key payload of testArchitectContext above is the byte-identity proof and
+// passes unmodified; this test owns everything the menu adds. No ids, no tier,
+// no seeded flag, and no motive KEY may appear. Pure SELECTs; no network. ---
+static void testArchitectStoryContext() {
+    const TempDbFile worldPath("textworld_arch_story_context.db");
+    Db db = openWorld(worldPath.string(), "tests/combat_fixture.sql").db;
+
+    // Three tiers. The origin (room 1) is the seed at distance 0, so the
+    // PROSPECTIVE room one hop out is at distance 1 and its menu is exactly
+    // {t0_scribe, t1_ink} — tier 2 stays out, which is what makes "the menu is
+    // the prospective room's" assertable rather than assumed.
+    writeCatalogEntry(db, "character", "t0_scribe", "cloistered scribe",
+                      "a scribe who has not left the annex in years",
+                      "curiosity", 0);
+    writeCatalogEntry(db, "beat", "t1_ink", "spilled ink",
+                      "a dark stain, still wet", "secrecy", 1);
+    writeCatalogEntry(db, "character", "t2_pilgrim", "late pilgrim",
+                      "a pilgrim arrived long after the gate closed",
+                      "homesickness", 2);
+
+    const std::string focusLine =
+        "The scribe's annex has gone quiet; someone has been at the ink.";
+    writeBardFocus(db, focusLine);
+
+    const std::vector<CatalogChoice> menu = eligibleCatalogForNewRoom(db, 1);
+    CHECK(menu.size() == 2);
+
+    const std::string payload = buildArchitectContext(db, 1, "east", menu);
+    const nlohmann::json j = nlohmann::json::parse(payload);
+
+    // (d) both present → the four base fields plus two.
+    CHECK(j.is_object());
+    CHECK(j.size() == 6);
+    CHECK(j.contains("focus"));
+    CHECK(j.contains("story_options"));
+
+    // (b) the focus line is verbatim — not summarized, not truncated here.
+    CHECK(j["focus"] == focusLine);
+
+    // (a) exactly the eligible handles, in catalog.id order, each with its
+    // blurb and its motive BLURB.
+    const nlohmann::json& opts = j["story_options"];
+    CHECK(opts.is_array());
+    CHECK(opts.size() == 2);
+    CHECK(opts[0]["handle"] == "t0_scribe");
+    CHECK(opts[0]["blurb"] == "a scribe who has not left the annex in years");
+    CHECK(opts[0]["motive"] == "wants to know something they have not been told");
+    CHECK(opts[1]["handle"] == "t1_ink");
+    CHECK(opts[1]["blurb"] == "a dark stain, still wet");
+    CHECK(opts[1]["motive"] == menu[1].motiveBlurb);
+    // The order is the menu's order, entry for entry.
+    for (size_t i = 0; i < menu.size(); ++i) {
+        CHECK(opts[i]["handle"] == menu[i].handle);
+        CHECK(opts[i]["blurb"] == menu[i].blurb);
+        CHECK(opts[i]["motive"] == menu[i].motiveBlurb);
+    }
+
+    // (c) the model-facing shape, structurally: THREE keys per option and no
+    // fourth can slip in, plus no id key anywhere (REQ-BARD-ARCH-17).
+    for (const auto& o : opts) {
+        CHECK(o.is_object());
+        CHECK(o.size() == 3);
+        CHECK(o.contains("handle") && o.contains("blurb") && o.contains("motive"));
+    }
+    checkNoIdKeys(j);
+    CHECK(!contains(payload, "tier"));
+    CHECK(!contains(payload, "seeded"));
+    CHECK(!contains(payload, "catalog"));
+    // The motive KEY is never on the wire — only its blurb (REQ-BARD-SEL-8).
+    CHECK(!contains(payload, "curiosity"));
+    CHECK(!contains(payload, "secrecy"));
+    // Nor the in-world name, nor the tier-2 entry the prospective room cannot
+    // reach.
+    CHECK(!contains(payload, "cloistered scribe"));
+    CHECK(!contains(payload, "t2_pilgrim"));
+
+    // (d) the three remaining corners of REQ-BARD-ARCH-4, driven off ONE world
+    // by varying only what is supplied.
+    {
+        // menu only → 5 keys.
+        writeBardFocus(db, "");
+        const nlohmann::json m =
+            nlohmann::json::parse(buildArchitectContext(db, 1, "east", menu));
+        CHECK(m.size() == 5);
+        CHECK(!m.contains("focus"));
+        CHECK(m.contains("story_options"));
+
+        // focus only → 5 keys.
+        writeBardFocus(db, focusLine);
+        const nlohmann::json f =
+            nlohmann::json::parse(buildArchitectContext(db, 1, "east", {}));
+        CHECK(f.size() == 5);
+        CHECK(f.contains("focus"));
+        CHECK(!f.contains("story_options"));
+
+        // neither → EXACTLY today's four fields. This is the omit-when-empty
+        // rule doing the work REQ-BARD-ARCH-15 rests on.
+        writeBardFocus(db, "");
+        const std::string bare = buildArchitectContext(db, 1, "east", {});
+        const nlohmann::json n = nlohmann::json::parse(bare);
+        CHECK(n.size() == 4);
+        CHECK(!n.contains("focus"));
+        CHECK(!n.contains("story_options"));
+        CHECK(!contains(bare, "story_options"));
+        CHECK(!contains(bare, "focus"));
+    }
+}
+
 // --- Step 4, REQ-ARCH-7b: the request body carries the create_room tool with
 // required name+description and no other input fields; tool_choice REQUIRES the
 // tool; max_tokens 1024; model default + TEXTWORLD_MODEL override; and the EXACT
@@ -4395,6 +4507,83 @@ static void testArchitectRequestBody() {
     }
 }
 
+// --- Brick 4 Step 3, REQ-BARD-ARCH-5/-6/-7: the OPTIONAL `story` object on the
+// create_room schema. Its `handle` is a schema-enforced enum of the supplied
+// catalog handles and nothing else; both its fields are required WITHIN it,
+// while `story` itself stays out of the tool's top-level required set. An empty
+// menu means the substring "story" never appears in the body at all — the
+// non-regression claim, worded as spec test 6 words it. Pure string→string. ---
+static void testArchitectStoryRequestBody() {
+    const ScopedModelEnv guard;
+    unsetenv("TEXTWORLD_MODEL");
+
+    const std::string payload =
+        "{\"setting\":\"grey stone\",\"direction\":\"east\"}";
+    const std::vector<std::string> handles = {"t0_scribe", "t1_ink"};
+
+    // --- handles supplied: the story object, in full ---
+    {
+        const nlohmann::json j = nlohmann::json::parse(
+            buildArchitectRequestBody(payload, {}, handles));
+        const nlohmann::json& schema = j["tools"][0]["input_schema"];
+        const nlohmann::json& props = schema["properties"];
+
+        // name, description, exits, story — and no fifth without an enemy menu.
+        CHECK(props.size() == 4);
+        CHECK(props.contains("story"));
+        CHECK(props["story"]["type"] == "object");
+
+        // The enum is EXACTLY the supplied handles, in order. This is the whole
+        // of "the model cannot invent a handle".
+        CHECK(props["story"]["properties"]["handle"]["enum"] ==
+              nlohmann::json(handles));
+        CHECK(props["story"]["properties"]["handle"]["type"] == "string");
+        CHECK(props["story"]["properties"]["description"]["type"] == "string");
+        CHECK(props["story"]["properties"].size() == 2);
+
+        // Both required WITHIN story: a half-filled story is a schema error.
+        CHECK(props["story"]["required"] ==
+              nlohmann::json::array({"handle", "description"}));
+
+        // But story is NOT top-level required — at most one, possibly none
+        // (REQ-BARD-ARCH-7).
+        CHECK(schema["required"] == nlohmann::json::array({"name", "description"}));
+
+        // No id, tier, or seeded flag reaches the schema (REQ-BARD-ARCH-17).
+        checkNoIdKeys(props["story"]);
+    }
+
+    // --- enemy AND story together: independent fields, both present ---
+    {
+        const nlohmann::json j = nlohmann::json::parse(buildArchitectRequestBody(
+            payload, {"a squat grey-skinned thing"}, handles));
+        const nlohmann::json& props = j["tools"][0]["input_schema"]["properties"];
+        CHECK(props.size() == 5);  // name, description, exits, enemy, story
+        CHECK(props.contains("enemy"));
+        CHECK(props.contains("story"));
+        // Still neither is required — a room may carry both, one, or neither.
+        CHECK(j["tools"][0]["input_schema"]["required"] ==
+              nlohmann::json::array({"name", "description"}));
+    }
+
+    // --- empty handles: the substring is ABSENT from the body entirely
+    // (REQ-BARD-ARCH-6, spec test 6). Asserted on the raw string, not the
+    // parsed object, because "no story field" and "no story text anywhere in
+    // the tool schema" are different claims and the spec makes the stronger one.
+    {
+        const std::string body = buildArchitectRequestBody(payload, {}, {});
+        const nlohmann::json j = nlohmann::json::parse(body);
+        CHECK(j["tools"][0]["input_schema"]["properties"].size() == 3);
+        CHECK(!j["tools"][0]["input_schema"]["properties"].contains("story"));
+        // The system prompt is stripped before the substring check: the story
+        // CLAUSE lives in kArchitectPrompt unconditionally (Step 4), which the
+        // header states and testArchitectStoryPrompt owns. What must be absent
+        // is the story SCHEMA.
+        CHECK(j["tools"].dump().find("story") == std::string::npos);
+        CHECK(j["messages"].dump().find("story") == std::string::npos);
+    }
+}
+
 // Canned 200 tool_use response in the documented Anthropic shape (Step-5
 // fixture): stop_reason "tool_use" + one create_room tool_use block carrying
 // name + description. The architect analog of cannedToolUse — built from
@@ -4429,6 +4618,45 @@ static HttpResponse cannedCreateRoom(
     r.status = 200;
     r.body = j.dump();
     return r;
+}
+
+// Brick 4 fixture: the same canned create_room shape, with an arbitrary JSON
+// value spliced in as `story`. Deliberately takes a raw nlohmann::json rather
+// than (handle, description) strings, because the gate's whole job here is
+// leniency and half of the arms that must be proven are stories that are NOT
+// well-formed objects — a null, a string, an object missing a field, an object
+// carrying a spurious id. A typed helper could not express them.
+static HttpResponse cannedCreateRoomWithStory(
+    const std::string& name, const std::string& description,
+    const nlohmann::json& story, const std::string& enemy = "") {
+    nlohmann::json input;
+    input["name"] = name;
+    input["description"] = description;
+    if (!enemy.empty()) input["enemy"] = enemy;
+    // Note: a null `story` is still WRITTEN — "the key is present and useless"
+    // is one of the drop reasons, distinct from the key being absent.
+    input["story"] = story;
+
+    nlohmann::json block;
+    block["type"] = "tool_use";
+    block["id"] = "toolu_test";
+    block["name"] = "create_room";
+    block["input"] = std::move(input);
+
+    nlohmann::json j;
+    j["stop_reason"] = "tool_use";
+    j["content"] = nlohmann::json::array({std::move(block)});
+
+    HttpResponse r;
+    r.status = 200;
+    r.body = j.dump();
+    return r;
+}
+
+// A well-formed story object, the shape the schema requires.
+static nlohmann::json storyInput(const std::string& handle,
+                                 const std::string& description) {
+    return nlohmann::json{{"handle", handle}, {"description", description}};
 }
 
 // --- Step 5, REQ-ARCH-9a–c: the validation gate. Pure function of the
@@ -4574,6 +4802,164 @@ static void testArchitectGate() {
     // Blank name / description remain FATAL even when exits are present.
     CHECK(!validateRoomProposal(cannedCreateRoom("", "prose", {"north"}), "east"));
     CHECK(!validateRoomProposal(cannedCreateRoom("name", "  ", {"north"}), "east"));
+}
+
+// --- Brick 4 Step 5, REQ-BARD-ARCH-8/-9/-17: `story` extraction is LENIENT. A
+// malformed story is DROPPED, never a rejection — the room survives every
+// single one of these arms with its name, description and exits intact, which
+// is the whole of REQ-BARD-ARCH-8. A story missing EITHER field is dropped IN
+// FULL (REQ-BARD-ARCH-9): a handle with no instance prose has nothing to write
+// into the world, so half a story is no story. `name` and `description` remain
+// the only strict clauses. Pure function of the response; no DB, no network. ---
+static void testArchitectStoryGate() {
+    // Every arm below asserts this same shape: the ROOM survived. Factored so
+    // the eight drop arms cannot quietly stop checking it.
+    auto checkRoomIntact = [](const std::optional<RoomProposal>& p) {
+        CHECK(p.has_value());
+        CHECK(p->name == "hall");
+        CHECK(p->description == "A long room of grey stone.");
+        CHECK(p->exits == std::vector<std::string>({"north"}));
+    };
+
+    // A canned response carrying `story` AND a declared exit, so every drop arm
+    // proves the exits half is untouched too.
+    auto withStory = [](const nlohmann::json& story) {
+        nlohmann::json input;
+        input["name"] = "hall";
+        input["description"] = "A long room of grey stone.";
+        input["exits"] = nlohmann::json::array({"north"});
+        input["story"] = story;
+        nlohmann::json block;
+        block["type"] = "tool_use";
+        block["id"] = "toolu_test";
+        block["name"] = "create_room";
+        block["input"] = std::move(input);
+        nlohmann::json j;
+        j["stop_reason"] = "tool_use";
+        j["content"] = nlohmann::json::array({std::move(block)});
+        HttpResponse r;
+        r.status = 200;
+        r.body = j.dump();
+        return r;
+    };
+
+    // --- positive 1: a well-formed story survives, both fields TRIMMED ---
+    {
+        auto p = validateRoomProposal(
+            withStory(storyInput("  t0_scribe  ",
+                                 "\tA scribe bends over a ledger here.\n")));
+        checkRoomIntact(p);
+        CHECK(p->story.handle == "t0_scribe");
+        CHECK(p->story.description == "A scribe bends over a ledger here.");
+    }
+
+    // --- the eight drop reasons. Each yields a NON-NULL proposal with an empty
+    // story handle and the room fully intact (spec test 15). ---
+
+    // (1) absent — the common case, and the ONLY one that is silent.
+    {
+        auto p = validateRoomProposal(cannedCreateRoom("hall",
+                                                       "A long room of grey stone.",
+                                                       {"north"}));
+        checkRoomIntact(p);
+        CHECK(p->story.handle.empty());
+        CHECK(p->story.description.empty());
+    }
+    // (2) present but not an object: a bare string, the likeliest malformation
+    // (the model answering the enum instead of the object).
+    {
+        auto p = validateRoomProposal(withStory("t0_scribe"));
+        checkRoomIntact(p);
+        CHECK(p->story.handle.empty());
+    }
+    // (2b) and a null, which is "the key is there and says nothing".
+    {
+        auto p = validateRoomProposal(withStory(nlohmann::json()));
+        checkRoomIntact(p);
+        CHECK(p->story.handle.empty());
+    }
+    // (3) handle missing entirely.
+    {
+        auto p = validateRoomProposal(
+            withStory(nlohmann::json{{"description", "A scribe bends here."}}));
+        checkRoomIntact(p);
+        CHECK(p->story.handle.empty());
+        // Dropped IN FULL (REQ-BARD-ARCH-9) — the description does not survive
+        // its handle.
+        CHECK(p->story.description.empty());
+    }
+    // (4) handle present but not a string.
+    {
+        auto p = validateRoomProposal(withStory(
+            nlohmann::json{{"handle", 7}, {"description", "A scribe bends here."}}));
+        checkRoomIntact(p);
+        CHECK(p->story.handle.empty());
+        CHECK(p->story.description.empty());
+    }
+    // (5) handle blank after trim.
+    {
+        auto p = validateRoomProposal(
+            withStory(storyInput("   \t ", "A scribe bends here.")));
+        checkRoomIntact(p);
+        CHECK(p->story.handle.empty());
+        CHECK(p->story.description.empty());
+    }
+    // (6) description missing entirely — the mirror of (3), and the arm that
+    // matters most: a handle alone would otherwise place a nameless entry.
+    {
+        auto p =
+            validateRoomProposal(withStory(nlohmann::json{{"handle", "t0_scribe"}}));
+        checkRoomIntact(p);
+        CHECK(p->story.handle.empty());
+        CHECK(p->story.description.empty());
+    }
+    // (7) description present but not a string.
+    {
+        auto p = validateRoomProposal(withStory(
+            nlohmann::json{{"handle", "t0_scribe"}, {"description", 42}}));
+        checkRoomIntact(p);
+        CHECK(p->story.handle.empty());
+    }
+    // (8) description blank after trim.
+    {
+        auto p = validateRoomProposal(withStory(storyInput("t0_scribe", "  \n ")));
+        checkRoomIntact(p);
+        CHECK(p->story.handle.empty());
+    }
+
+    // --- positive 2: a spurious id / catalog field inside the story object is
+    // IGNORED, not read (REQ-BARD-ARCH-17). StoryProposal has two fields and no
+    // third for an id to land in — the model can put none on the wire.
+    {
+        nlohmann::json story = storyInput("t0_scribe", "A scribe bends here.");
+        story["id"] = 999;
+        story["catalog"] = 17;
+        story["tier"] = 3;
+        auto p = validateRoomProposal(withStory(story));
+        checkRoomIntact(p);
+        CHECK(p->story.handle == "t0_scribe");
+        CHECK(p->story.description == "A scribe bends here.");
+    }
+
+    // --- positive 3: a story ALONGSIDE an enemy — both extracted, neither
+    // shadowing the other (REQ-BARD-ARCH-7).
+    {
+        auto p = validateRoomProposal(cannedCreateRoomWithStory(
+            "hall", "A long room of grey stone.",
+            storyInput("t0_scribe", "A scribe bends here."),
+            "a squat grey-skinned thing"));
+        CHECK(p.has_value());
+        CHECK(p->enemyBlurb == "a squat grey-skinned thing");
+        CHECK(p->story.handle == "t0_scribe");
+        CHECK(p->story.description == "A scribe bends here.");
+    }
+
+    // --- and the strict clauses stay strict: a perfectly good story cannot
+    // rescue a blank name or description.
+    CHECK(!validateRoomProposal(cannedCreateRoomWithStory(
+        "", "prose", storyInput("t0_scribe", "A scribe bends here."))));
+    CHECK(!validateRoomProposal(cannedCreateRoomWithStory(
+        "hall", "  ", storyInput("t0_scribe", "A scribe bends here."))));
 }
 
 // --- Step 6, REQ-ARCH-9 (write) / REQ-ARCH-6: writeGeneratedRoom mints a room
@@ -4751,6 +5137,153 @@ static void testArchitectGenerate() {
         // Specifically: no 'east' exit was ever created off the hall.
         CHECK(queryInt(db,
                        "SELECT COUNT(*) FROM exits WHERE room = 1 AND direction = 'east'") == 0);
+    }
+}
+
+// --- Brick 4 Step 7, REQ-BARD-ARCH-1/-2/-6/-15: the SYNC path, end to end.
+// architectGenerate reads the story menu ONCE and spends it twice — blurbs into
+// the context, handles into the tool schema's enum.
+//
+// This test drives architectGenerate rather than buildArchitectRequestBody in
+// isolation, and that is forced rather than stylistic: once the menu is HOISTED
+// into the caller (micro-decision 1), "the enum is the PROSPECTIVE room's menu
+// and not the origin's" stops being a property of the builder and becomes a
+// property of the CALL SITE. Only an end-to-end drive with a body-capturing
+// transport can observe it. No network. ---
+static void testArchitectStoryGenerate() {
+    const int64_t player = 3;
+
+    // Room 1 is the seed, at distance 0. So the ORIGIN's own menu stops at tier
+    // 0 while the PROSPECTIVE room one hop east reaches tier 1 — the two differ
+    // by exactly one entry, and a menu built against the wrong room cannot pass.
+    // t2_pilgrim is beyond both, so "the whole catalog" cannot pass either.
+    auto seedCatalog = [](Db& db) {
+        writeCatalogEntry(db, "character", "t0_scribe", "cloistered scribe",
+                          "a scribe who has not left the annex in years",
+                          "curiosity", 0);
+        writeCatalogEntry(db, "beat", "t1_ink", "spilled ink",
+                          "a dark stain, still wet", "secrecy", 1);
+        writeCatalogEntry(db, "character", "t2_pilgrim", "late pilgrim",
+                          "a pilgrim arrived long after the gate closed",
+                          "homesickness", 2);
+    };
+
+    // --- spec test 10: the enum is the PROSPECTIVE menu ---------------------
+    {
+        const TempDbFile worldPath("textworld_arch_story_gen.db");
+        Db db = openWorld(worldPath.string(), "tests/combat_fixture.sql").db;
+        seedCatalog(db);
+        const std::string focusLine = "Someone has been at the ink.";
+        writeBardFocus(db, focusLine);
+
+        // The three menus, computed independently of the code under test.
+        std::vector<std::string> originMenu;
+        for (const char* kind : {"character", "beat"}) {
+            for (const CatalogChoice& c : eligibleCatalog(db, 1, kind)) {
+                originMenu.push_back(c.handle);
+            }
+        }
+        std::vector<std::string> prospective;
+        for (const CatalogChoice& c : eligibleCatalogForNewRoom(db, 1)) {
+            prospective.push_back(c.handle);
+        }
+        CHECK(originMenu == std::vector<std::string>{"t0_scribe"});
+        CHECK(prospective == (std::vector<std::string>{"t0_scribe", "t1_ink"}));
+
+        std::string sentBody;
+        HttpTransport recorder = [&](const std::string& body) {
+            sentBody = body;
+            return cannedCreateRoom("scriptorium", "A low room of slanted desks.");
+        };
+        db.begin();
+        CHECK(architectGenerate(db, 1, "east", player, recorder));
+        db.commit();
+
+        const nlohmann::json j = nlohmann::json::parse(sentBody);
+        const nlohmann::json& props = j["tools"][0]["input_schema"]["properties"];
+        CHECK(props.contains("story"));
+        const nlohmann::json& en = props["story"]["properties"]["handle"]["enum"];
+
+        // It IS the prospective menu...
+        CHECK(en == nlohmann::json(prospective));
+        // ...and it is neither the origin's (one short) nor the whole catalog
+        // (one long). Both negatives are asserted, because the prospective set
+        // sits BETWEEN them and only stating all three pins it.
+        CHECK(en != nlohmann::json(originMenu));
+        CHECK(en.size() == 2);
+        CHECK(std::find(en.begin(), en.end(), "t1_ink") != en.end());
+        CHECK(std::find(en.begin(), en.end(), "t2_pilgrim") == en.end());
+
+        // The CONTEXT agrees with the schema, entry for entry — the whole point
+        // of reading the menu once and passing it to both (REQ-BARD-ARCH-1).
+        const nlohmann::json ctx =
+            nlohmann::json::parse(j["messages"][0]["content"].get<std::string>());
+        CHECK(ctx["story_options"].size() == 2);
+        CHECK(ctx["story_options"][0]["handle"] == "t0_scribe");
+        CHECK(ctx["story_options"][1]["handle"] == "t1_ink");
+        CHECK(ctx["focus"] == focusLine);
+        // And no id reached either surface.
+        checkNoIdKeys(ctx);
+    }
+
+    // --- end to end: one call produces a room AND a placed entity ----------
+    {
+        const TempDbFile worldPath("textworld_arch_story_gen_e2e.db");
+        Db db = openWorld(worldPath.string(), "tests/combat_fixture.sql").db;
+        seedCatalog(db);
+        const std::string prose = "A dark stain has dried across the flagstones.";
+
+        int calls = 0;
+        HttpTransport fake = [&](const std::string&) {
+            ++calls;
+            return cannedCreateRoomWithStory("scriptorium",
+                                             "A low room of slanted desks.",
+                                             storyInput("t1_ink", prose));
+        };
+        db.begin();
+        CHECK(architectGenerate(db, 1, "east", player, fake));
+        db.commit();
+        CHECK(calls == 1);  // still one transport call, no retries
+
+        const int64_t newRoom = queryInt(
+            db, "SELECT dest FROM exits WHERE room = 1 AND direction = 'east'");
+        const int64_t entity =
+            queryInt(db, "SELECT entity FROM catalog WHERE handle = 't1_ink'");
+        CHECK(entity != 0);
+        CHECK(queryInt(db, ("SELECT container FROM location WHERE entity = " +
+                            std::to_string(entity)).c_str()) == newRoom);
+        CHECK(queryText(db, ("SELECT value FROM name WHERE entity = " +
+                             std::to_string(entity)).c_str()) == "spilled ink");
+        CHECK(queryText(db, ("SELECT prose FROM description WHERE entity = " +
+                             std::to_string(entity)).c_str()) == prose);
+        CHECK(queryInt(db, "SELECT COUNT(*) FROM events WHERE verb = 'materialized'") == 1);
+    }
+
+    // --- REQ-BARD-ARCH-15: an EMPTY catalog leaves the body exactly as it was.
+    // testArchitectGenerate above passes unmodified and is the real proof; this
+    // states the claim positively, on the wire, in the same world shape the
+    // story arms use.
+    {
+        const TempDbFile worldPath("textworld_arch_story_gen_empty.db");
+        Db db = openWorld(worldPath.string(), "tests/combat_fixture.sql").db;
+        // No catalog, no focus — a pre-bard world.
+        std::string sentBody;
+        HttpTransport recorder = [&](const std::string& body) {
+            sentBody = body;
+            return cannedCreateRoom("scriptorium", "A low room of slanted desks.");
+        };
+        db.begin();
+        CHECK(architectGenerate(db, 1, "east", player, recorder));
+        db.commit();
+
+        const nlohmann::json j = nlohmann::json::parse(sentBody);
+        CHECK(!j["tools"][0]["input_schema"]["properties"].contains("story"));
+        CHECK(j["tools"].dump().find("story") == std::string::npos);
+        const nlohmann::json ctx =
+            nlohmann::json::parse(j["messages"][0]["content"].get<std::string>());
+        CHECK(ctx.size() == 4);
+        CHECK(!ctx.contains("story_options"));
+        CHECK(!ctx.contains("focus"));
     }
 }
 
@@ -5682,6 +6215,334 @@ static void testArchitectSpawn() {
     }
 }
 
+// --- Brick 4 Step 6, REQ-BARD-ARCH-10/-11/-12/-13/-16: STORY MATERIALIZATION.
+// The seam where catalog intent becomes world state. The model SELECTS a handle
+// from the engine's menu and writes the instance prose; the engine re-checks the
+// handle LIVE against the room that now exists and mints the entity. Driven
+// through architectGenerate with canned responses — the menu is not yet threaded
+// into the request here (that is Step 7), which is exactly the isolation this
+// step wants: the commit-time re-check is proven on its own, independent of what
+// was offered. No network. ---
+static void testArchitectStoryPlacement() {
+    const int64_t player = 3;
+
+    // Seeds the same three-tier catalog into a combat_fixture world. Room 1 is
+    // the seed at distance 0, so the room generated one hop east of it is at
+    // distance 1 and its live menu is {t0_scribe, t1_ink} — t2_pilgrim is
+    // OUT OF REACH, which is what makes "the re-check is a real gate" provable.
+    auto seedCatalog = [](Db& db) {
+        writeCatalogEntry(db, "character", "t0_scribe", "cloistered scribe",
+                          "a scribe who has not left the annex in years",
+                          "curiosity", 0);
+        writeCatalogEntry(db, "beat", "t1_ink", "spilled ink",
+                          "a dark stain, still wet", "secrecy", 1);
+        writeCatalogEntry(db, "character", "t2_pilgrim", "late pilgrim",
+                          "a pilgrim arrived long after the gate closed",
+                          "homesickness", 2);
+    };
+    // The architect's INSTANCE prose — deliberately unlike the blurb, so
+    // "the description is the architect's, not the catalog's" is assertable by
+    // inequality rather than by inspection (REQ-BARD-ARCH-12).
+    // NOTE: no apostrophe, deliberately — one arm below inlines this into a SQL
+    // literal to prove no stray row carries it.
+    const std::string instanceProse =
+        "Ink has run off the lectern and dried in a long black tongue across "
+        "the flagstones.";
+
+    // --- spec test 11: an ELIGIBLE handle materializes. -------------------
+    {
+        const TempDbFile worldPath("textworld_arch_story_place.db");
+        Db db = openWorld(worldPath.string(), "tests/combat_fixture.sql").db;
+        seedCatalog(db);
+        const int64_t entities0 = queryInt(db, "SELECT COUNT(*) FROM entities");
+
+        HttpTransport fake = [&](const std::string&) {
+            return cannedCreateRoomWithStory("scriptorium",
+                                             "A low room of slanted desks.",
+                                             storyInput("t1_ink", instanceProse));
+        };
+        db.begin();
+        CHECK(architectGenerate(db, 1, "east", player, fake));
+        db.commit();
+
+        const int64_t newRoom = queryInt(
+            db, "SELECT dest FROM exits WHERE room = 1 AND direction = 'east'");
+        CHECK(newRoom > 15);
+
+        // ONE entity beyond the room itself: the room and the story entry.
+        CHECK(queryInt(db, "SELECT COUNT(*) FROM entities") == entities0 + 2);
+
+        // The catalog row is LATCHED to the minted entity (REQ-BARD-STORE-13).
+        const int64_t entity =
+            queryInt(db, "SELECT entity FROM catalog WHERE handle = 't1_ink'");
+        CHECK(entity != 0);
+
+        // The parser noun is catalog.name — never the handle, never the blurb.
+        CHECK(queryText(db, ("SELECT value FROM name WHERE entity = " +
+                             std::to_string(entity)).c_str()) == "spilled ink");
+
+        // The description is the ARCHITECT's instance prose, and is EXPLICITLY
+        // not the blurb: the blurb is selection text the model already saw, and
+        // writing it into the world would put the menu on the page.
+        const std::string prose =
+            queryText(db, ("SELECT prose FROM description WHERE entity = " +
+                           std::to_string(entity)).c_str());
+        CHECK(prose == instanceProse);
+        CHECK(prose != "a dark stain, still wet");
+
+        // It is IN the new room.
+        CHECK(queryInt(db, ("SELECT container FROM location WHERE entity = " +
+                            std::to_string(entity)).c_str()) == newRoom);
+
+        // Exactly ONE materialized event, carrying the handle as its detail.
+        CHECK(queryInt(db,
+                       "SELECT COUNT(*) FROM events WHERE verb = 'materialized'") == 1);
+        CHECK(queryText(db,
+                        "SELECT detail FROM events WHERE verb = 'materialized'") ==
+              "t1_ink");
+
+        // And the room was made normally alongside it.
+        CHECK(queryInt(db, "SELECT COUNT(*) FROM events WHERE verb = 'generated'") == 1);
+    }
+
+    // --- spec test 12: an OFF-MENU handle places nothing. -----------------
+    // Two flavors in one world, because they fail at different gates: a handle
+    // that is not in the catalog at all, and one that IS but is out of reach at
+    // this distance (t2_pilgrim, tier 2, in a room at distance 1). The second
+    // is the one that matters — it proves the re-check is the eligibility
+    // menu and not a mere existence check.
+    for (const std::string& handle : {std::string("no_such_handle"),
+                                      std::string("t2_pilgrim")}) {
+        const TempDbFile worldPath("textworld_arch_story_offmenu.db");
+        Db db = openWorld(worldPath.string(), "tests/combat_fixture.sql").db;
+        seedCatalog(db);
+        const int64_t entities0 = queryInt(db, "SELECT COUNT(*) FROM entities");
+
+        HttpTransport fake = [&](const std::string&) {
+            return cannedCreateRoomWithStory("scriptorium",
+                                             "A low room of slanted desks.",
+                                             storyInput(handle, instanceProse));
+        };
+        db.begin();
+        CHECK(architectGenerate(db, 1, "east", player, fake));  // the room is STILL made
+        db.commit();
+
+        CHECK(queryInt(
+                  db, "SELECT dest FROM exits WHERE room = 1 AND direction = 'east'") > 15);
+        CHECK(queryInt(db, "SELECT COUNT(*) FROM entities") == entities0 + 1);  // room only
+        CHECK(queryInt(db, "SELECT COUNT(*) FROM events WHERE verb = 'materialized'") == 0);
+        CHECK(queryInt(db, "SELECT COUNT(*) FROM catalog WHERE entity IS NOT NULL") == 0);
+        // No stray entity carries the prose the model wrote — only the room's
+        // own description was added.
+        CHECK(queryInt(db, ("SELECT COUNT(*) FROM description WHERE prose = '" +
+                            instanceProse + "'").c_str()) == 0);
+    }
+
+    // --- spec test 13: an entry materialized BETWEEN snapshot and commit. ---
+    // The live re-check's reason for existing (REQ-BARD-ARCH-11): a pregen
+    // candidate may be many turns old, and the entry it chose may have been
+    // placed elsewhere since. It must resolve to 0 — not mint a SECOND copy of
+    // a one-of-a-kind entry.
+    {
+        const TempDbFile worldPath("textworld_arch_story_stale.db");
+        Db db = openWorld(worldPath.string(), "tests/combat_fixture.sql").db;
+        seedCatalog(db);
+
+        // Materialize t1_ink somewhere else first, exactly as another room's
+        // commit would have.
+        const int64_t catalogId =
+            queryInt(db, "SELECT id FROM catalog WHERE handle = 't1_ink'");
+        db.begin();
+        const int64_t elsewhere =
+            placeCatalogEntry(db, catalogId, 2, "A stain on the corridor flags.", player);
+        db.commit();
+        CHECK(elsewhere != 0);
+        const int64_t entities0 = queryInt(db, "SELECT COUNT(*) FROM entities");
+
+        HttpTransport fake = [&](const std::string&) {
+            return cannedCreateRoomWithStory("scriptorium",
+                                             "A low room of slanted desks.",
+                                             storyInput("t1_ink", instanceProse));
+        };
+        db.begin();
+        CHECK(architectGenerate(db, 1, "east", player, fake));
+        db.commit();
+
+        // The room is made; NO second entity is minted; the latch still points
+        // at the first placement, in the room it was actually placed in.
+        CHECK(queryInt(db, "SELECT COUNT(*) FROM entities") == entities0 + 1);
+        CHECK(queryInt(db, "SELECT entity FROM catalog WHERE handle = 't1_ink'") ==
+              elsewhere);
+        CHECK(queryInt(db, ("SELECT container FROM location WHERE entity = " +
+                            std::to_string(elsewhere)).c_str()) == 2);
+        // Still exactly one materialized event — the first one.
+        CHECK(queryInt(db, "SELECT COUNT(*) FROM events WHERE verb = 'materialized'") == 1);
+    }
+
+    // --- spec test 14: an enemy AND a story in one proposal — both placed. ---
+    // The two halves of Phase 2 are independent, and the story is placed AFTER
+    // the enemy (REQ-BARD-ARCH-10).
+    {
+        const TempDbFile worldPath("textworld_arch_story_both.db");
+        Db db = openWorld(worldPath.string(), "tests/combat_fixture.sql").db;
+        seedCatalog(db);
+        const std::string goblinBlurb = queryText(
+            db, "SELECT blurb FROM bestiary WHERE archetype = 'goblin_grunt'");
+
+        HttpTransport fake = [&](const std::string&) {
+            return cannedCreateRoomWithStory(
+                "scriptorium", "A low room of slanted desks, and something in them.",
+                storyInput("t1_ink", instanceProse), goblinBlurb);
+        };
+        db.begin();
+        CHECK(architectGenerate(db, 1, "east", player, fake));
+        db.commit();
+
+        const int64_t newRoom = queryInt(
+            db, "SELECT dest FROM exits WHERE room = 1 AND direction = 'east'");
+        // One hostile AND one materialized story entry, in the same room.
+        CHECK(queryInt(db, ("SELECT COUNT(*) FROM hostile h JOIN location l "
+                            "ON l.entity = h.entity WHERE l.container = " +
+                            std::to_string(newRoom)).c_str()) == 1);
+        const int64_t entity =
+            queryInt(db, "SELECT entity FROM catalog WHERE handle = 't1_ink'");
+        CHECK(entity != 0);
+        CHECK(queryInt(db, ("SELECT container FROM location WHERE entity = " +
+                            std::to_string(entity)).c_str()) == newRoom);
+        CHECK(queryInt(db, "SELECT COUNT(*) FROM events WHERE verb = 'materialized'") == 1);
+    }
+
+    // --- spec test 15: a MALFORMED story still creates the room. -----------
+    // Inherited from the gate (testArchitectStoryGate owns the eight arms); the
+    // point here is that leniency survives all the way to canon rather than
+    // stopping at the struct.
+    {
+        const TempDbFile worldPath("textworld_arch_story_malformed.db");
+        Db db = openWorld(worldPath.string(), "tests/combat_fixture.sql").db;
+        seedCatalog(db);
+        const int64_t entities0 = queryInt(db, "SELECT COUNT(*) FROM entities");
+
+        HttpTransport fake = [&](const std::string&) {
+            // A handle with no instance prose: dropped IN FULL at the gate.
+            return cannedCreateRoomWithStory("scriptorium",
+                                             "A low room of slanted desks.",
+                                             nlohmann::json{{"handle", "t1_ink"}});
+        };
+        db.begin();
+        CHECK(architectGenerate(db, 1, "east", player, fake));
+        db.commit();
+
+        CHECK(queryInt(
+                  db, "SELECT dest FROM exits WHERE room = 1 AND direction = 'east'") > 15);
+        CHECK(queryInt(db, "SELECT COUNT(*) FROM entities") == entities0 + 1);
+        CHECK(queryInt(db, "SELECT COUNT(*) FROM events WHERE verb = 'materialized'") == 0);
+        CHECK(queryInt(db, "SELECT COUNT(*) FROM catalog WHERE entity IS NOT NULL") == 0);
+    }
+
+    // --- REQ-BARD-ARCH-13: story placement is OUTSIDE the Phase-1 catch. ----
+    //
+    // Nothing in the spec's other 16 items would fail if this call were moved
+    // INSIDE architectGenerate's try — the room would still be made and the
+    // story would still not be placed. The difference is the FAILURE MODE: a DB
+    // fault during placement must reach runTurn's rollback as an EngineError,
+    // not be downgraded to a silent wall. This arm is the only thing that
+    // distinguishes the two.
+    //
+    // ON THE INJECTION, which is NOT the plan's `DROP TABLE location`. That
+    // would not have been surgical: systems.cpp:19 reads the player's container
+    // from `location` to find the room BEFORE generation is even reached, so a
+    // dropped table faults the turn either way and the arm would pass whether
+    // or not the call sits outside the catch — a vacuous test. A BEFORE INSERT
+    // trigger is surgical for the same intent: moveEntity is an UPDATE
+    // (mutations.cpp:105), writeGeneratedRoom writes no location row at all
+    // (rooms have no container), and the proposal carries no enemy, so
+    // placeCatalogEntry (mutations.cpp:712) is the ONLY insert this turn can
+    // make. The control arm below proves that claim rather than asserting it.
+    //
+    // AND THE TURN IS DRIVEN THROUGH runTurn VIA A PRE-GENERATED CANDIDATE,
+    // because only runTurn owns the tick transaction whose rollback is the
+    // thing under test, and runTurn has no transport seam to inject a fake
+    // into. An injected candidate makes the turn commit-only: pregenAcquire
+    // returns it, Phase 2 runs, and NO network call is ever constructed
+    // (testPregenCommit proves the zero-call property of this path). It also
+    // means this arm covers the pregen path's commit, which is where a stale
+    // story is most likely to be found.
+    {
+        const ScopedEnvVar keyGuard("ANTHROPIC_API_KEY");
+        const ScopedEnvVar aiGuard("TEXTWORLD_AI");
+        const ScopedEnvVar pregenGuard("TEXTWORLD_PREGEN");
+        setenv("ANTHROPIC_API_KEY", "test-key-never-used", 1);
+        unsetenv("TEXTWORLD_AI");
+        unsetenv("TEXTWORLD_PREGEN");
+        pregenRefreshEnabledForTest();
+        pregenResetForTest();
+        architectResetPregenOccupancyForTest();
+
+        const TempDbFile worldPath("textworld_arch_story_fault.db");
+        Db db = openWorld(worldPath.string(), "tests/combat_fixture.sql").db;
+        seedCatalog(db);
+        db.exec("INSERT INTO exits(room, direction, dest) VALUES (1, 'east', NULL)");
+        db.exec("INSERT INTO exits(room, direction, dest) VALUES (1, 'up', NULL)");
+        db.exec(
+            "CREATE TRIGGER story_fault BEFORE INSERT ON location "
+            "BEGIN SELECT RAISE(ABORT, 'injected location fault'); END");
+
+        // CONTROL: the same world, the same trigger, a candidate with NO story.
+        // The turn ticks normally — which is what proves the trigger fires on
+        // story placement and on nothing else, rather than on the turn at large.
+        {
+            RoomProposal clean;
+            clean.name = "antechamber";
+            clean.description = "A bare stone antechamber.";
+            pregenInjectReadyForTest(1, "east", clean, /*snapshotTurn=*/1);
+
+            const int64_t turnBefore =
+                queryInt(db, "SELECT value FROM meta WHERE key = 'turn'");
+            CHECK(runTurn(db, "go east").outcome == TurnOutcome::Ticked);
+            CHECK(queryInt(db, "SELECT value FROM meta WHERE key = 'turn'") ==
+                  turnBefore + 1);
+            CHECK(queryInt(db, "SELECT container FROM location WHERE entity = 3") > 15);
+        }
+
+        // THE ARM. Back to the seed, and walk the OTHER latent exit with a
+        // candidate that carries a story.
+        db.exec("UPDATE location SET container = 1 WHERE entity = 3");
+        architectResetPregenOccupancyForTest();
+
+        RoomProposal storied;
+        storied.name = "scriptorium";
+        storied.description = "A low room of slanted desks.";
+        storied.story.handle = "t1_ink";
+        storied.story.description = instanceProse;
+        pregenInjectReadyForTest(1, "up", storied, /*snapshotTurn=*/1);
+
+        const int64_t turnBefore =
+            queryInt(db, "SELECT value FROM meta WHERE key = 'turn'");
+        const int64_t roomsBefore = queryInt(db, "SELECT COUNT(*) FROM room");
+        const int64_t eventsBefore = queryInt(db, "SELECT COUNT(*) FROM events");
+        const int64_t entitiesBefore = queryInt(db, "SELECT COUNT(*) FROM entities");
+
+        const TurnResult r = runTurn(db, "go up");
+
+        // EngineError and a FULL rollback — never Ticked with a wall.
+        CHECK(r.outcome == TurnOutcome::EngineError);
+        CHECK(queryInt(db, "SELECT value FROM meta WHERE key = 'turn'") == turnBefore);
+        CHECK(queryInt(db, "SELECT COUNT(*) FROM room") == roomsBefore);
+        CHECK(queryInt(db, "SELECT COUNT(*) FROM events") == eventsBefore);
+        CHECK(queryInt(db, "SELECT COUNT(*) FROM entities") == entitiesBefore);
+        // Specifically: the room the fault interrupted was rolled back too.
+        CHECK(queryInt(db, "SELECT COUNT(*) FROM exits WHERE room = 1 "
+                           "AND direction = 'up' AND dest IS NOT NULL") == 0);
+        CHECK(queryInt(db, "SELECT COUNT(*) FROM catalog WHERE entity IS NOT NULL") == 0);
+
+        // The connection survives: drop the trigger and a normal turn ticks,
+        // proving the error path left no transaction dangling.
+        db.exec("DROP TRIGGER story_fault");
+        CHECK(runTurn(db, "wait").outcome == TurnOutcome::Ticked);
+        pregenResetForTest();
+    }
+}
+
 // Tick helper that injects the architect's transport into resolve (Go world-gen
 // seam), mirroring the production tick but with NO network.
 static void tickT(Db& db, const Action& a, const HttpTransport& transport,
@@ -5867,6 +6728,280 @@ static std::string canonSnapshot(Db& db) {
            "] entities[" +
            std::to_string(queryInt(db, "SELECT COUNT(*) FROM entities")) + "]";
     return out;
+}
+
+// --- Brick 4 Step 9, REQ-BARD-ARCH-12 (the noun half): NOUNS MUST EXIST. The
+// whole reason this brick exists — a materialized story entry is a real world
+// entity with a real parser noun, not a sentence in a room description. What
+// this test can prove today, it proves; what it cannot, it names. ---
+static void testArchitectStoryNoun() {
+    const int64_t player = 3;
+    const TempDbFile worldPath("textworld_arch_story_noun.db");
+    Db db = openWorld(worldPath.string(), "tests/combat_fixture.sql").db;
+
+    // A lowercase catalog name, so the noun is typeable — see the second
+    // caveat at the bottom of this test for why that is a fixture choice and
+    // not a guarantee.
+    writeCatalogEntry(db, "beat", "t1_ink", "spilled ink",
+                      "a dark stain, still wet", "secrecy", 1);
+
+    const std::string instanceProse =
+        "A dark stain has dried in a long tongue across the flagstones, and "
+        "the spilled ink still smells of iron.";
+    HttpTransport fake = [&](const std::string&) {
+        return cannedCreateRoomWithStory(
+            "scriptorium",
+            "A low room of slanted desks. A dark stain has dried across the "
+            "flagstones by the near wall.",
+            storyInput("t1_ink", instanceProse));
+    };
+    db.begin();
+    CHECK(architectGenerate(db, 1, "east", player, fake));
+    db.commit();
+
+    const int64_t newRoom = queryInt(
+        db, "SELECT dest FROM exits WHERE room = 1 AND direction = 'east'");
+
+    // 1. THE NOUN RESOLVES. lookupNoun is the shared rule BOTH the deterministic
+    //    parser and the AI resolver's validation gate go through
+    //    (lookup.hpp:16), so this is the real recognition path, not a
+    //    test-only query.
+    const int64_t entity = lookupNoun(db, "spilled ink");
+    CHECK(entity != 0);
+    // It is the entity the catalog latched onto — the same one, not a namesake.
+    CHECK(queryInt(db, "SELECT entity FROM catalog WHERE handle = 't1_ink'") ==
+          entity);
+
+    // 2. IT IS IN THE ROOM.
+    CHECK(queryInt(db, ("SELECT container FROM location WHERE entity = " +
+                        std::to_string(entity)).c_str()) == newRoom);
+
+    // 3. ITS PROSE IS THE ARCHITECT'S INSTANCE PROSE, not the catalog blurb.
+    CHECK(queryText(db, ("SELECT prose FROM description WHERE entity = " +
+                         std::to_string(entity)).c_str()) == instanceProse);
+
+    // 4. AND THE PLAYER'S SURFACE FOR IT IS THE ROOM'S CANON DESCRIPTION — the
+    //    thing the Step 4 prompt clause asks the model to write the entry into.
+    //    Asserted as a property of the room's prose, since that is where a
+    //    player actually meets it.
+    const std::string roomProse =
+        queryText(db, ("SELECT prose FROM description WHERE entity = " +
+                       std::to_string(newRoom)).c_str());
+    CHECK(contains(roomProse, "stain"));
+
+    // WHAT THIS DOES NOT ASSERT, AND WHY. Spec test 17 words this as "the player
+    // can examine it." That is not implementable today: there is no examine verb
+    // (the ISA is Look/Go/Take/Drop/Inventory/Wait/Quit/Attack/Cast/Read/Spells,
+    // action.hpp:11, and Look takes no subject), and BOTH the narrator's facts
+    // (prose.cpp:105) and the resolver's scope payload (nlresolve.cpp:166)
+    // enumerate only PORTABLE entities in a room — a story entity is neither
+    // portable nor hostile, so it reaches neither. The noun genuinely exists and
+    // resolves; it cannot yet be acted on. Closing that is a separate brick
+    // (scenery-in-scope + an examine verb), deliberately out of this brick's
+    // modules.
+    //
+    // A SECOND caveat on the same claim: lookupNoun matches EXACTLY, and its
+    // header notes names are stored lowercase (lookup.hpp:16). writeCatalogEntry
+    // only TRIMS `name` (mutations.cpp:581) — it does not lowercase it. A bard
+    // that authors "Scorched Lectern" therefore mints a noun the player cannot
+    // type. This fixture controls the case, so this test passes either way; the
+    // exposure is real bard output, and the fix belongs in brick 1's
+    // writeCatalogEntry, not here. The line below is that exposure, made
+    // executable rather than merely described — it PASSES today, and it is the
+    // bug.
+    {
+        const TempDbFile w2("textworld_arch_story_noun_case.db");
+        Db db2 = openWorld(w2.string(), "tests/combat_fixture.sql").db;
+        writeCatalogEntry(db2, "beat", "t1_lectern", "Scorched Lectern",
+                          "a reading stand burned down one side", "secrecy", 1);
+        HttpTransport fake2 = [&](const std::string&) {
+            return cannedCreateRoomWithStory(
+                "scriptorium", "A low room of slanted desks.",
+                storyInput("t1_lectern", "The lectern is burned down one side."));
+        };
+        db2.begin();
+        CHECK(architectGenerate(db2, 1, "east", player, fake2));
+        db2.commit();
+
+        // The entity exists...
+        const int64_t burned =
+            queryInt(db2, "SELECT entity FROM catalog WHERE handle = 't1_lectern'");
+        CHECK(burned != 0);
+        // ...and the player cannot type its name. This assertion is documenting
+        // a live defect, not endorsing it: when brick 1 lowercases catalog.name,
+        // THIS line is the one that will fail, and that failure is the fix
+        // landing.
+        CHECK(lookupNoun(db2, "scorched lectern") == 0);
+        CHECK(lookupNoun(db2, "Scorched Lectern") == burned);
+    }
+}
+
+// --- Brick 4 Step 8, REQ-BARD-ARCH-14/-15: the PREGEN path. The scheduler
+// snapshots the story menu into the job on the MAIN thread, exactly as it does
+// the enemy menu, and commit is untouched — architectCommitProposal is already
+// the single Phase 2 both paths run, so Step 6 made story placement
+// path-identical STRUCTURALLY. This test is what turns that into a proof. ---
+static void testArchitectStoryPregen() {
+    const ScopedEnvVar keyGuard("ANTHROPIC_API_KEY");
+    const ScopedEnvVar aiGuard("TEXTWORLD_AI");
+    const ScopedEnvVar pregenGuard("TEXTWORLD_PREGEN");
+    setenv("ANTHROPIC_API_KEY", "test-key-never-used", 1);
+    unsetenv("TEXTWORLD_AI");
+    unsetenv("TEXTWORLD_PREGEN");
+    pregenRefreshEnabledForTest();
+    const int64_t player = 3;
+
+    auto seedCatalog = [](Db& db) {
+        writeCatalogEntry(db, "character", "t0_scribe", "cloistered scribe",
+                          "a scribe who has not left the annex in years",
+                          "curiosity", 0);
+        writeCatalogEntry(db, "beat", "t1_ink", "spilled ink",
+                          "a dark stain, still wet", "secrecy", 1);
+        writeCatalogEntry(db, "character", "t2_pilgrim", "late pilgrim",
+                          "a pilgrim arrived long after the gate closed",
+                          "homesickness", 2);
+    };
+
+    // --- (a) the job carries the snapshot: context blurbs AND schema handles.
+    {
+        pregenResetForTest();
+        architectResetPregenOccupancyForTest();
+        const TempDbFile worldPath("textworld_arch_story_queue.db");
+        Db db = openWorld(worldPath.string(), "tests/combat_fixture.sql").db;
+        seedCatalog(db);
+        writeBardFocus(db, "Someone has been at the ink.");
+        db.exec("INSERT INTO exits(room, direction, dest) VALUES (1, 'east', NULL)");
+
+        architectQueuePregen(db, 1);
+        CHECK(pregenStateOf(1, "east") == PregenState::Queued);
+
+        // Capture what the WORKER actually receives, the way
+        // testArchitectQueuePregen does: let the tick run the queued job with a
+        // body-recording fake. Asserting on the emitted body rather than on the
+        // PregenJob struct is the point — a handle that never reaches the wire
+        // is not a snapshot.
+        std::string sentBody;
+        HttpTransport recorder = [&](const std::string& body) {
+            sentBody = body;
+            return cannedCreateRoom("scriptorium", "A low room of slanted desks.");
+        };
+        const PregenResult r = pregenAcquire(1, "east", &recorder);
+        CHECK(r.outcome == PregenOutcome::RanQueued);
+
+        const nlohmann::json body = nlohmann::json::parse(sentBody);
+
+        // The context payload is exactly what buildArchitectContext produces
+        // for the PROSPECTIVE menu — story_options and focus included.
+        const std::string expected =
+            buildArchitectContext(db, 1, "east", eligibleCatalogForNewRoom(db, 1));
+        CHECK(body["messages"][0]["content"] == expected);
+        const nlohmann::json ctx =
+            nlohmann::json::parse(body["messages"][0]["content"].get<std::string>());
+        CHECK(ctx.contains("story_options"));
+        CHECK(ctx["story_options"].size() == 2);
+        CHECK(ctx.contains("focus"));
+
+        // And the snapshotted HANDLES became the schema enum — the prospective
+        // menu, not the origin's, on the background path too.
+        std::vector<std::string> prospective;
+        for (const CatalogChoice& c : eligibleCatalogForNewRoom(db, 1)) {
+            prospective.push_back(c.handle);
+        }
+        const nlohmann::json& en =
+            body["tools"][0]["input_schema"]["properties"]["story"]["properties"]
+                ["handle"]["enum"];
+        CHECK(en == nlohmann::json(prospective));
+        CHECK(en.size() == 2);
+        CHECK(std::find(en.begin(), en.end(), "t2_pilgrim") == en.end());
+    }
+
+    // --- (b) spec test 16: PATH EQUIVALENCE. ------------------------------
+    // The same canned proposal, committed once through the pregen hit path and
+    // once through a direct synchronous architectGenerate, into two worlds built
+    // from the same fixture. The rows and the events must be identical — not
+    // similar. This is REQ-BARD-ARCH-14 stated as an equality rather than as a
+    // claim about shared code.
+    const std::string storyProse =
+        "A dark stain has dried in a long tongue across the flagstones.";
+
+    // The story rows a world ended up with, as one comparable string. Covers
+    // exactly what the spec names: entity, name, description, location, and the
+    // catalog latch. Entity IDS are deliberately EXCLUDED — the two worlds mint
+    // in different orders and identical ids are not the claim; identical FACTS
+    // are.
+    auto storySnapshot = [](Db& db) {
+        return queryText(db,
+                         "SELECT IFNULL(group_concat(s, ';'), '') FROM ("
+                         "SELECT c.handle || '|' || n.value || '|' || d.prose || "
+                         "'|' || (SELECT value FROM name WHERE entity = l.container) "
+                         "AS s FROM catalog c "
+                         "JOIN name n ON n.entity = c.entity "
+                         "JOIN description d ON d.entity = c.entity "
+                         "JOIN location l ON l.entity = c.entity "
+                         "WHERE c.entity IS NOT NULL ORDER BY c.handle)");
+    };
+    // The materialization events, likewise id-free: verb + the handle detail.
+    auto storyEvents = [](Db& db) {
+        return queryText(db,
+                         "SELECT IFNULL(group_concat(s, ';'), '') FROM ("
+                         "SELECT verb || '|' || IFNULL(detail, '') AS s FROM events "
+                         "WHERE verb = 'materialized' ORDER BY id)");
+    };
+
+    std::string syncStory, syncEvents, syncCanon;
+    {
+        pregenResetForTest();
+        architectResetPregenOccupancyForTest();
+        const TempDbFile worldPath("textworld_arch_story_sync.db");
+        Db db = openWorld(worldPath.string(), "tests/combat_fixture.sql").db;
+        seedCatalog(db);
+        db.exec("INSERT INTO exits(room, direction, dest) VALUES (1, 'east', NULL)");
+
+        HttpTransport fake = [&](const std::string&) {
+            return cannedCreateRoomWithStory("scriptorium",
+                                             "A low room of slanted desks.",
+                                             storyInput("t1_ink", storyProse));
+        };
+        tickT(db, Action{Verb::Go, 0, "east"}, fake, player);
+        syncStory = storySnapshot(db);
+        syncEvents = storyEvents(db);
+        syncCanon = canonSnapshot(db);
+        CHECK(!syncStory.empty());  // the sync path really did place it
+    }
+    {
+        pregenResetForTest();
+        architectResetPregenOccupancyForTest();
+        const TempDbFile worldPath("textworld_arch_story_pregen.db");
+        Db db = openWorld(worldPath.string(), "tests/combat_fixture.sql").db;
+        seedCatalog(db);
+        db.exec("INSERT INTO exits(room, direction, dest) VALUES (1, 'east', NULL)");
+
+        // The SAME proposal, as a pre-generated candidate — the exact object the
+        // gate would have produced from the canned response above.
+        RoomProposal candidate;
+        candidate.name = "scriptorium";
+        candidate.description = "A low room of slanted desks.";
+        candidate.story.handle = "t1_ink";
+        candidate.story.description = storyProse;
+        pregenInjectReadyForTest(1, "east", candidate, /*snapshotTurn=*/1);
+
+        int calls = 0;
+        HttpTransport fake = [&](const std::string&) {
+            ++calls;
+            return cannedCreateRoom("wrong", "should never be built");
+        };
+        tickT(db, Action{Verb::Go, 0, "east"}, fake, player);
+
+        CHECK(calls == 0);  // no network on the commit turn
+        // Row for row and event for event, the same world.
+        CHECK(storySnapshot(db) == syncStory);
+        CHECK(storyEvents(db) == syncEvents);
+        // And the rest of canon too — the story did not perturb anything else.
+        CHECK(canonSnapshot(db) == syncCanon);
+    }
+
+    pregenResetForTest();
+    architectResetPregenOccupancyForTest();
 }
 
 // --- Step 7, REQ-PREGEN-14/-15/-17/-18/-23: committing a candidate inside the
@@ -6488,6 +7623,37 @@ static void testArchitectPrompt() {
     // Retained prohibitions: no arrival narration, no ids.
     CHECK(contains(p, "arrival"));
     CHECK(contains(p, "ids"));
+}
+
+// --- Brick 4 Step 4, design Decision 2: the story clause. STRUCTURE ONLY, by
+// substring, exactly as testArchitectPrompt above — prompt QUALITY is judged
+// against real play, never in the suite, so this must never become a
+// tune-and-retry loop. The clause exists because the schema alone cannot say
+// that the blurb is SELECTION text and the description is ROOM text; without
+// the last two assertions here the model has a field and no statement of what
+// to put in it. ---
+static void testArchitectStoryPrompt() {
+    const std::string p = kArchitectPrompt;
+
+    // Conditional, like the enemy clause: offered or absent, never assumed.
+    CHECK(contains(p, "\"story\" field"));
+    CHECK(contains(p, "story.handle"));
+    CHECK(contains(p, "story.description"));
+    // The enum is closed and the model may decline.
+    CHECK(contains(p, "exactly one of its listed values"));
+    CHECK(contains(p, "Never invent a handle"));
+    CHECK(contains(p, "omit story entirely"));
+    // Design Decision 2: the catalog supplies WHO, the architect supplies HOW
+    // IT LOOKS HERE. These two are the reason the clause exists.
+    CHECK(contains(p, "it is not the prose"));
+    CHECK(contains(p, "you write the prose"));
+    // And it must surface to the player, not merely exist in the database.
+    CHECK(contains(p, "let it show in the room description"));
+
+    // The enemy clause is untouched beside it — appending must not have
+    // rewritten what was already there.
+    CHECK(contains(p, "\"enemy\" field"));
+    CHECK(contains(p, "Never invent an enemy"));
 }
 
 // --- terminal services (src/term.cpp) --------------------------------------
@@ -11465,9 +12631,14 @@ int main() {
     testPortability();
     testArchitectSettingLoad();
     testArchitectContext();
+    testArchitectStoryContext();
+    testArchitectStoryRequestBody();
     testArchitectPrompt();
+    testArchitectStoryPrompt();
     testArchitectRequestBody();
     testArchitectGate();
+    testArchitectStoryGate();
+    testArchitectStoryGenerate();
     testArchitectInvertible();
     testWriteGeneratedRoom();
     testArchitectGenerate();
@@ -11478,8 +12649,11 @@ int main() {
     testArchitectQueuePregen();
     testArchitectCommitProposal();
     testArchitectSpawn();
+    testArchitectStoryPlacement();
     testResolveGoGenerate();
     testPregenCommit();
+    testArchitectStoryPregen();
+    testArchitectStoryNoun();
     testPregenOutcomeRecords();
     testProfileGenerateStage();
     testCombatFlee();
