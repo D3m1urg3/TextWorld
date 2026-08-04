@@ -157,36 +157,6 @@ int64_t architectSpawnCount(Db& db) {
     return s.colInt(0);
 }
 
-// BFS hop-distance from the seed room (kDormitoryCell) to `room` over REALIZED
-// exits (dest non-NULL), or a large sentinel if unreachable — the deterministic
-// front-intensity metric (REQ-COMBAT-34). Latent (ungenerated) exits are not
-// edges: an unrealized frontier does not shorten the front.
-int64_t distanceFromSeed(Db& db, int64_t room) {
-    if (room == kDormitoryCell) return 0;
-    std::unordered_set<int64_t> visited{kDormitoryCell};
-    std::queue<int64_t> frontier;
-    frontier.push(kDormitoryCell);
-    int64_t depth = 0;
-    while (!frontier.empty()) {
-        ++depth;
-        for (size_t level = frontier.size(); level > 0; --level) {
-            const int64_t cur = frontier.front();
-            frontier.pop();
-            Stmt s = db.prepare(
-                "SELECT dest FROM exits WHERE room = ? AND dest IS NOT NULL");
-            s.bind(1, cur);
-            while (s.step()) {
-                const int64_t next = s.colInt(0);
-                if (visited.insert(next).second) {
-                    if (next == room) return depth;
-                    frontier.push(next);
-                }
-            }
-        }
-    }
-    return INT64_MAX;  // unreachable → treat as maximally far (a safe edge)
-}
-
 // A barriered archetype (defense lock, REQ-COMBAT-17): its bestiary barrier flag.
 bool barrierArchetype(Db& db, const std::string& archetype) {
     Stmt s = db.prepare("SELECT barrier FROM bestiary WHERE archetype = ?");
@@ -294,17 +264,6 @@ std::vector<std::string> gatedMenu(Db& db, bool contested) {
     return menu;
 }
 
-// The eligible menu for the room the architect is ABOUT to create beyond
-// `originRoom`. The prospective room's only initial link is back to the origin,
-// so its front distance is one hop past the origin's (REQ-COMBAT-34). Used to
-// build the architect's enemy enum and to re-check a selection authoritatively.
-std::vector<std::string> eligibleArchetypesForNewRoom(Db& db, int64_t originRoom) {
-    const int64_t originDist = distanceFromSeed(db, originRoom);
-    const int64_t newDist =
-        (originDist == INT64_MAX) ? INT64_MAX : originDist + 1;
-    return gatedMenu(db, newDist <= kFrontRadius);
-}
-
 // An archetype's blurb — the ONLY archetype field the model ever sees
 // (REQ-COMBAT-29). "" if the archetype has no bestiary row.
 std::string blurbOf(Db& db, const std::string& archetype) {
@@ -315,6 +274,50 @@ std::string blurbOf(Db& db, const std::string& archetype) {
 }
 
 }  // namespace
+
+// BFS hop-distance from the seed room (kDormitoryCell) to `room` over REALIZED
+// exits (dest non-NULL), or a large sentinel if unreachable — the deterministic
+// front-intensity metric (REQ-COMBAT-34). Latent (ungenerated) exits are not
+// edges: an unrealized frontier does not shorten the front. Public because the
+// bard's story eligibility gates on the SAME metric (REQ-BARD-SEL-2b): a second
+// BFS in bard.cpp is exactly the drift REQ-BARD-SEL-3 forbids.
+int64_t distanceFromSeed(Db& db, int64_t room) {
+    if (room == kDormitoryCell) return 0;
+    std::unordered_set<int64_t> visited{kDormitoryCell};
+    std::queue<int64_t> frontier;
+    frontier.push(kDormitoryCell);
+    int64_t depth = 0;
+    while (!frontier.empty()) {
+        ++depth;
+        for (size_t level = frontier.size(); level > 0; --level) {
+            const int64_t cur = frontier.front();
+            frontier.pop();
+            Stmt s = db.prepare(
+                "SELECT dest FROM exits WHERE room = ? AND dest IS NOT NULL");
+            s.bind(1, cur);
+            while (s.step()) {
+                const int64_t next = s.colInt(0);
+                if (visited.insert(next).second) {
+                    if (next == room) return depth;
+                    frontier.push(next);
+                }
+            }
+        }
+    }
+    return INT64_MAX;  // unreachable → treat as maximally far (a safe edge)
+}
+
+// The eligible menu for the room the architect is ABOUT to create beyond
+// `originRoom`. The prospective room's only initial link is back to the origin,
+// so its front distance is one hop past the origin's (REQ-COMBAT-34). Used to
+// build the architect's enemy enum and to re-check a selection authoritatively,
+// and by the bard for the prospective room's story menu (REQ-BARD-SEL-5).
+std::vector<std::string> eligibleArchetypesForNewRoom(Db& db, int64_t originRoom) {
+    const int64_t originDist = distanceFromSeed(db, originRoom);
+    const int64_t newDist =
+        (originDist == INT64_MAX) ? INT64_MAX : originDist + 1;
+    return gatedMenu(db, newDist <= kFrontRadius);
+}
 
 // The living hostile sharing `room` (health.current > 0), or 0 if none. Lowest
 // entity id when several share a room — deterministic; the swarm case (Brick 3)
