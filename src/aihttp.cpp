@@ -71,11 +71,11 @@ int abortIfFlagged(void* clientp, curl_off_t, curl_off_t, curl_off_t,
 // The whole of one POST, parameterized by the handle that performs it. This is
 // anthropicPost's former body verbatim, lifted so BOTH the shared main-thread
 // handle and a worker's own handle (REQ-PREGEN-8) run identical code — same
-// URL, same three headers, same 8 s timeout, same one perform, no retries
+// URL, same three headers, the caller's timeout, same one perform, no retries
 // (REQ-PREGEN-9). The handle is a PARAMETER precisely so this function can
 // never reach for the file-static shared one.
 HttpResponse performPost(CURL* handle, const std::string& requestBody,
-                         AiRole role, bool background,
+                         AiRole role, long timeoutSeconds, bool background,
                          const std::atomic<bool>* abort) {
     HttpResponse resp;
     if (handle == nullptr) {
@@ -106,7 +106,9 @@ HttpResponse performPost(CURL* handle, const std::string& requestBody,
     curl_easy_setopt(handle, CURLOPT_POSTFIELDSIZE,
                      static_cast<long>(requestBody.size()));
     curl_easy_setopt(handle, CURLOPT_HTTPHEADER, headers.list);
-    curl_easy_setopt(handle, CURLOPT_TIMEOUT, 8L);  // total budget, seconds
+    // Total budget, seconds. kAiHttpTimeoutSeconds for every caller but the
+    // bard's overture, which passes its own (REQ-BARD-WAKE-5).
+    curl_easy_setopt(handle, CURLOPT_TIMEOUT, timeoutSeconds);
     curl_easy_setopt(handle, CURLOPT_WRITEFUNCTION, appendToString);
     curl_easy_setopt(handle, CURLOPT_WRITEDATA, &resp.body);
     // All of these belong in the PER-CALL block, not a one-time setup path:
@@ -166,6 +168,8 @@ const char* roleName(AiRole role) {
             return "narrate";
         case AiRole::Generate:
             return "generate";
+        case AiRole::Bard:
+            return "bard";
     }
     return "unknown";
 }
@@ -185,6 +189,7 @@ std::string modelForRole(AiRole role) {
             return "claude-haiku-4-5";
         case AiRole::Narrate:
         case AiRole::Generate:
+        case AiRole::Bard:
             return "claude-opus-4-8";
     }
     return "claude-opus-4-8";
@@ -233,18 +238,21 @@ void aiHttpShutdown() {
     }
 }
 
-HttpResponse anthropicPost(const std::string& requestBody, AiRole role) {
+HttpResponse anthropicPost(const std::string& requestBody, AiRole role,
+                           long timeoutSeconds) {
     // The shared, main-thread-only handle, created on first use. Nothing about
     // this call changed when performPost was extracted: same handle, same
     // options, same records, and no abort flag — the main thread has nothing to
     // abort for, it is the thread waiting on the answer.
     if (g_handle == nullptr) g_handle = curl_easy_init();
-    return performPost(g_handle, requestBody, role, /*background=*/false,
-                       /*abort=*/nullptr);
+    return performPost(g_handle, requestBody, role, timeoutSeconds,
+                       /*background=*/false, /*abort=*/nullptr);
 }
 
-HttpTransport makeAnthropicTransport(AiRole role) {
-    return [role](const std::string& body) { return anthropicPost(body, role); };
+HttpTransport makeAnthropicTransport(AiRole role, long timeoutSeconds) {
+    return [role, timeoutSeconds](const std::string& body) {
+        return anthropicPost(body, role, timeoutSeconds);
+    };
 }
 
 AiHttpWorkerClient::AiHttpWorkerClient(const std::atomic<bool>* abort)
@@ -261,6 +269,8 @@ AiHttpWorkerClient::~AiHttpWorkerClient() {
 
 HttpResponse AiHttpWorkerClient::post(const std::string& requestBody,
                                       AiRole role) {
+    // The ordinary budget, always: only the overture is the exception, and it
+    // runs on the main thread, not here (REQ-BARD-WAKE-5).
     return performPost(static_cast<CURL*>(handle_), requestBody, role,
-                       /*background=*/true, abort_);
+                       kAiHttpTimeoutSeconds, /*background=*/true, abort_);
 }

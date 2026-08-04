@@ -29,6 +29,7 @@
 #include "loop.hpp"
 #include "mutations.hpp"
 #include "nlresolve.hpp"
+#include "bardworker.hpp"
 #include "pregen.hpp"
 #include "profile.hpp"
 #include "prose.hpp"
@@ -150,7 +151,12 @@ static void testWorld() {
 
     // --- fresh create: schema + seed applied ---
     {
-        Db db = openWorld(worldPath.string(), seedPath);
+        OpenedWorld world = openWorld(worldPath.string(), seedPath);
+        Db& db = world.db;
+
+        // REQ-BARD-WAKE-1: the once-ever hook. True only on the call that ran
+        // initialize(), which is the only launch the overture may run on.
+        CHECK(world.created);
 
         CHECK(queryInt(db, "SELECT COUNT(*) FROM room") == 2);
 
@@ -184,7 +190,12 @@ static void testWorld() {
 
     // --- reopen: recognized as initialized, not re-seeded ---
     {
-        Db db = openWorld(worldPath.string(), seedPath);
+        OpenedWorld world = openWorld(worldPath.string(), seedPath);
+        Db& db = world.db;
+
+        // The SAME path a second time: not created, and the world intact.
+        CHECK(!world.created);
+
         CHECK(queryInt(db, "SELECT COUNT(*) FROM entities") == 5);
         CHECK(queryInt(db, "SELECT COUNT(*) FROM room") == 2);
         CHECK(queryInt(db, "SELECT value FROM meta WHERE key = 'schema_version'") ==
@@ -201,7 +212,7 @@ static void testWorld() {
 
     bool refused = false;
     try {
-        Db db = openWorld(worldPath.string(), seedPath);
+        Db db = openWorld(worldPath.string(), seedPath).db;
     } catch (const SchemaMismatch&) {
         refused = true;
     }
@@ -218,7 +229,7 @@ static void testShippedSeedShape() {
     const TempDbFile worldPath("textworld_shipped_seed_tests.db");
 
     // Shipped seed + default settingPath (seed/setting.txt), from the repo root.
-    Db db = openWorld(worldPath.string(), "seed/base.sql");
+    Db db = openWorld(worldPath.string(), "seed/base.sql").db;
 
     // Exactly 2 rooms.
     CHECK(queryInt(db, "SELECT COUNT(*) FROM room") == 2);
@@ -304,7 +315,7 @@ static void testShippedSeedShape() {
 static void testCombatSchema() {
     const TempDbFile worldPath("textworld_combat_schema_tests.db");
 
-    Db db = openWorld(worldPath.string(), "tests/combat_fixture.sql");
+    Db db = openWorld(worldPath.string(), "tests/combat_fixture.sql").db;
 
     // Fresh world opened at the current (bumped) schema version.
     CHECK(queryInt(db, "SELECT value FROM meta WHERE key = 'schema_version'") ==
@@ -387,7 +398,7 @@ static void testCombatSchema() {
 static void testParser() {
     const TempDbFile worldPath("textworld_parser_tests.db");
 
-    Db db = openWorld(worldPath.string(), "tests/fixture.sql");
+    Db db = openWorld(worldPath.string(), "tests/fixture.sql").db;
 
     // Unparseable lines → nullopt.
     CHECK(!parse(db, "frobnicate"));       // unknown verb
@@ -438,7 +449,7 @@ static void testParser() {
 static void testMutations() {
     const TempDbFile worldPath("textworld_mutations_tests.db");
 
-    Db db = openWorld(worldPath.string(), "tests/fixture.sql");
+    Db db = openWorld(worldPath.string(), "tests/fixture.sql").db;
 
     // Seed baseline: lantern (4) in stone hall (1), no events yet.
     CHECK(queryInt(db, "SELECT container FROM location WHERE entity = 4") == 1);
@@ -513,7 +524,7 @@ static void tick(Db& db, const Action& a, int64_t player = 3) {
 static void testSystems() {
     const TempDbFile worldPath("textworld_systems_tests.db");
 
-    Db db = openWorld(worldPath.string(), "tests/fixture.sql");
+    Db db = openWorld(worldPath.string(), "tests/fixture.sql").db;
 
     // Seed baseline: player 3 in room 1, lantern 4 in room 1, key 5 in room 2.
     CHECK(queryInt(db, "SELECT value FROM meta WHERE key = 'turn'") == 0);
@@ -654,7 +665,7 @@ static void testSystems() {
 // turn / chip lane arrives in Step 4, so the player takes no damage here.
 static void testCombatAttack() {
     const TempDbFile worldPath("textworld_combat_attack_tests.db");
-    Db db = openWorld(worldPath.string(), "tests/combat_fixture.sql");
+    Db db = openWorld(worldPath.string(), "tests/combat_fixture.sql").db;
 
     // Player 3 in the cell (room 1); goblin 7 at 8/8 in the corridor (room 2).
     CHECK(queryInt(db, "SELECT current FROM health WHERE entity = 7") == 8);
@@ -697,7 +708,7 @@ static void testCombatAttack() {
 // takes the fixed-verb parser path — deterministic, no network.
 static void testCombatChipClock() {
     const TempDbFile worldPath("textworld_combat_chip_tests.db");
-    Db db = openWorld(worldPath.string(), "tests/combat_fixture.sql");
+    Db db = openWorld(worldPath.string(), "tests/combat_fixture.sql").db;
     const int64_t chip = queryInt(db, "SELECT chip FROM hostile WHERE entity = 7");
     CHECK(chip > 0);
 
@@ -752,7 +763,7 @@ static void testCombatChipClock() {
 // grimoire into the room.
 static void testCombatDefeat() {
     const TempDbFile worldPath("textworld_combat_defeat_tests.db");
-    Db db = openWorld(worldPath.string(), "tests/combat_fixture.sql");
+    Db db = openWorld(worldPath.string(), "tests/combat_fixture.sql").db;
 
     const int64_t portablesInCorridorBefore =
         queryInt(db,
@@ -798,7 +809,7 @@ static void testCombatDefeat() {
 // carried items where they fell; the enemy is restored and stays put.
 static void testCombatDowned() {
     const TempDbFile worldPath("textworld_combat_downed_tests.db");
-    Db db = openWorld(worldPath.string(), "tests/combat_fixture.sql");
+    Db db = openWorld(worldPath.string(), "tests/combat_fixture.sql").db;
     const int64_t maxHp = queryInt(db, "SELECT max FROM health WHERE entity = 3");
     const int64_t enemyMax = queryInt(db, "SELECT max FROM health WHERE entity = 7");
 
@@ -845,7 +856,7 @@ static bool contains(const std::string& haystack, const std::string& needle) {
 // (strike + chip) and clears the row. Deterministic, driven by telegraph_period.
 static void testCombatTelegraph() {
     const TempDbFile worldPath("textworld_combat_telegraph_tests.db");
-    Db db = openWorld(worldPath.string(), "tests/combat_fixture.sql");
+    Db db = openWorld(worldPath.string(), "tests/combat_fixture.sql").db;
     const int64_t chip = queryInt(db, "SELECT chip FROM hostile WHERE entity = 7");
 
     auto playerHp = [&] {
@@ -888,7 +899,7 @@ static void testCombatTelegraph() {
 // attack is never blocked. Deterministic, AI disabled.
 static void testCombatCastGate() {
     const TempDbFile worldPath("textworld_combat_castgate_tests.db");
-    Db db = openWorld(worldPath.string(), "tests/combat_fixture.sql");
+    Db db = openWorld(worldPath.string(), "tests/combat_fixture.sql").db;
 
     auto turn = [&] { return queryInt(db, "SELECT value FROM meta WHERE key = 'turn'"); };
     auto playerHp = [&] {
@@ -970,7 +981,7 @@ static void testCombatElements() {
     // --- Fire on the Fire-weak archetype applies the weakness multiplier (2x) ---
     {
         const TempDbFile p("textworld_combat_elem_fire.db");
-        Db db = openWorld(p.string(), "tests/combat_fixture.sql");
+        Db db = openWorld(p.string(), "tests/combat_fixture.sql").db;
         db.exec("INSERT INTO known_spells(entity, spell) VALUES (3, 'fire')");
         toStudy(db);
         CHECK(runTurn(db, "cast fire").outcome == TurnOutcome::Ticked);
@@ -980,7 +991,7 @@ static void testCombatElements() {
     // --- Frost (wrong element) applies the resist multiplier (1/2) + a slow ---
     {
         const TempDbFile p("textworld_combat_elem_frost.db");
-        Db db = openWorld(p.string(), "tests/combat_fixture.sql");
+        Db db = openWorld(p.string(), "tests/combat_fixture.sql").db;
         db.exec("INSERT INTO known_spells(entity, spell) VALUES (3, 'frost')");
         toStudy(db);
         CHECK(runTurn(db, "cast frost").outcome == TurnOutcome::Ticked);
@@ -994,7 +1005,7 @@ static void testCombatElements() {
     // floor, REQ-COMBAT-18), including the element-lock rime-touched ---
     {
         const TempDbFile p("textworld_combat_elem_floor.db");
-        Db db = openWorld(p.string(), "tests/combat_fixture.sql");
+        Db db = openWorld(p.string(), "tests/combat_fixture.sql").db;
         // Every seeded hostile archetype, none with an active barrier yet:
         // the goblin (corridor, room 2) and the rime-touched (study, room 6).
         for (const auto& [entity, room] :
@@ -1025,7 +1036,7 @@ static void testCombatLearn() {
 
     int64_t grimoireId = 0;
     {
-        Db db = openWorld(worldPath.string(), "tests/combat_fixture.sql");
+        Db db = openWorld(worldPath.string(), "tests/combat_fixture.sql").db;
         // The player does not know fire to begin with.
         CHECK(queryInt(db, "SELECT COUNT(*) FROM known_spells "
                            "WHERE entity = 3 AND spell = 'fire'") == 0);
@@ -1051,7 +1062,7 @@ static void testCombatLearn() {
 
     // Restart: reopen the persisted file. The learned spell survives (canon).
     {
-        Db db = openWorld(worldPath.string(), "tests/combat_fixture.sql");
+        Db db = openWorld(worldPath.string(), "tests/combat_fixture.sql").db;
         CHECK(queryInt(db, "SELECT COUNT(*) FROM known_spells "
                            "WHERE entity = 3 AND spell = 'fire'") == 1);
 
@@ -1083,7 +1094,7 @@ static void testBestiaryCatalog() {
 
     int64_t spawnedId = 0;
     {
-        Db db = openWorld(worldPath.string(), "tests/combat_fixture.sql");
+        Db db = openWorld(worldPath.string(), "tests/combat_fixture.sql").db;
 
         // The catalog is populated: one record per archetype, one drop each, and
         // every drop names a real catalog spell (no dangling key).
@@ -1144,7 +1155,7 @@ static void testBestiaryCatalog() {
 
     // Reopen: a defeat and a spawn both persist as canon (REQ-COMBAT-30).
     {
-        Db db = openWorld(worldPath.string(), "tests/combat_fixture.sql");
+        Db db = openWorld(worldPath.string(), "tests/combat_fixture.sql").db;
         // The defeated goblin stays gone (no hostile/location) but its entity id
         // survives — defeat is persistent absence, not deletion.
         CHECK(queryInt(db, "SELECT COUNT(*) FROM hostile WHERE entity = 7") == 0);
@@ -1165,7 +1176,7 @@ static bool menuHas(const std::vector<std::string>& menu, const char* archetype)
 
 static void testCombatGating() {
     const TempDbFile worldPath("textworld_combat_gating_tests.db");
-    Db db = openWorld(worldPath.string(), "tests/combat_fixture.sql");
+    Db db = openWorld(worldPath.string(), "tests/combat_fixture.sql").db;
 
     // The corridor (room 2, distance 1 from the seed) is contested. The player
     // (entity 3) starts knowing {ward, stun}; it lacks fire and dispel.
@@ -1231,7 +1242,7 @@ static void testCombatGating() {
 static void testCombatSetting() {
     const TempDbFile worldPath("textworld_combat_setting_tests.db");
     // Shipped world + the committed default settingPath (seed/setting.txt).
-    Db db = openWorld(worldPath.string(), "seed/base.sql");
+    Db db = openWorld(worldPath.string(), "seed/base.sql").db;
 
     std::string setting;
     {
@@ -1264,7 +1275,7 @@ static void testCombatSetting() {
 // canonical dump of the event stream. Db closes at scope exit → the file on disk
 // is the full committed state. Shared by the determinism replay.
 static std::string replayCombatDump(const std::filesystem::path& path) {
-    Db db = openWorld(path.string(), "tests/combat_fixture.sql");
+    Db db = openWorld(path.string(), "tests/combat_fixture.sql").db;
     const char* script[] = {
         "go north",            // into the corridor with the goblin
         "cast stun",           // CC the goblin (status + cooldown)
@@ -1307,7 +1318,7 @@ static void testCombatDeterminismReplay() {
 // render template for every combat verb. Deterministic, no network.
 static void testCombatFinalSweep() {
     const TempDbFile worldPath("textworld_final_sweep.db");
-    Db db = openWorld(worldPath.string(), "tests/combat_fixture.sql");
+    Db db = openWorld(worldPath.string(), "tests/combat_fixture.sql").db;
 
     // (1) REQ-COMBAT-22 anti-goal at the FINAL schema (after bestiary/drop_table/
     // tier landed): no XP/level/growable numeric column anywhere. tier is a fixed
@@ -1345,7 +1356,7 @@ static void testCombatFinalSweep() {
 // basic attack thins them one at a time (REQ-COMBAT-17, -19). Deterministic.
 static void testCombatMultiplicity() {
     const TempDbFile worldPath("textworld_combat_multi_tests.db");
-    Db db = openWorld(worldPath.string(), "tests/combat_fixture.sql");
+    Db db = openWorld(worldPath.string(), "tests/combat_fixture.sql").db;
     db.exec("INSERT INTO known_spells(entity, spell) VALUES (3, 'blast')");
 
     auto living = [&] {
@@ -1391,7 +1402,7 @@ static void testCombatMultiplicity() {
 // (REQ-COMBAT-18). Deterministic.
 static void testCombatDefenseLock() {
     const TempDbFile worldPath("textworld_combat_defense_tests.db");
-    Db db = openWorld(worldPath.string(), "tests/combat_fixture.sql");
+    Db db = openWorld(worldPath.string(), "tests/combat_fixture.sql").db;
     db.exec("INSERT INTO known_spells(entity, spell) VALUES (3, 'dispel'), (3, 'fire')");
 
     auto ironhideHp = [&] {
@@ -1436,7 +1447,7 @@ static void testCombatDefenseLock() {
 // observed in isolation. Deterministic.
 static void testCombatDoT() {
     const TempDbFile worldPath("textworld_combat_dot_tests.db");
-    Db db = openWorld(worldPath.string(), "tests/combat_fixture.sql");
+    Db db = openWorld(worldPath.string(), "tests/combat_fixture.sql").db;
     db.exec("INSERT INTO known_spells(entity, spell) VALUES (3, 'ember')");
 
     auto goblinHp = [&] {
@@ -1477,7 +1488,7 @@ static void testCombatDoT() {
 // paths append (byte-identical). Deterministic.
 static void testCombatStatusLine() {
     const TempDbFile worldPath("textworld_combat_statusline_tests.db");
-    Db db = openWorld(worldPath.string(), "tests/combat_fixture.sql");
+    Db db = openWorld(worldPath.string(), "tests/combat_fixture.sql").db;
     const int64_t wardCd =
         queryInt(db, "SELECT cooldown FROM spell_catalog WHERE spell = 'ward'");
 
@@ -1543,7 +1554,7 @@ static void testCombatCounter() {
     // --- Ward: the strike deals 0 (blocked); only chip lands ---
     {
         const TempDbFile p("textworld_combat_counter_ward.db");
-        Db db = openWorld(p.string(), "tests/combat_fixture.sql");
+        Db db = openWorld(p.string(), "tests/combat_fixture.sql").db;
         const int64_t chip = queryInt(db, "SELECT chip FROM hostile WHERE entity = 7");
         advanceToTelegraph(db);
         const int64_t hpBefore = hp(db);
@@ -1564,7 +1575,7 @@ static void testCombatCounter() {
     // --- No counter (Attack): the strike lands for its fixed damage ---
     {
         const TempDbFile p("textworld_combat_counter_attack.db");
-        Db db = openWorld(p.string(), "tests/combat_fixture.sql");
+        Db db = openWorld(p.string(), "tests/combat_fixture.sql").db;
         const int64_t chip = queryInt(db, "SELECT chip FROM hostile WHERE entity = 7");
         advanceToTelegraph(db);
         const int64_t hpBefore = hp(db);
@@ -1577,7 +1588,7 @@ static void testCombatCounter() {
     // duration, then it resumes ---
     {
         const TempDbFile p("textworld_combat_counter_stun.db");
-        Db db = openWorld(p.string(), "tests/combat_fixture.sql");
+        Db db = openWorld(p.string(), "tests/combat_fixture.sql").db;
         advanceToTelegraph(db);
         const std::string out = runTurn(db, "cast stun").output;
         CHECK(pending(db) == 0);                                     // cancelled
@@ -1604,7 +1615,7 @@ static void testCombatCounter() {
 // the templates; the full Brick-1 loop is playable end to end, deterministically.
 static void testCombatRender() {
     const TempDbFile worldPath("textworld_combat_render_tests.db");
-    Db db = openWorld(worldPath.string(), "tests/combat_fixture.sql");
+    Db db = openWorld(worldPath.string(), "tests/combat_fixture.sql").db;
 
     // Non-combat tick (in the cell, no hostile): HP is still shown. Inverted
     // for REQ-UI-15 — the band carries HP unconditionally now.
@@ -1640,7 +1651,7 @@ static void testCombatRender() {
     // tick renders the wake-in-cell line and the dormitory room block.
     {
         const TempDbFile downPath("textworld_combat_render_down_tests.db");
-        Db db2 = openWorld(downPath.string(), "tests/combat_fixture.sql");
+        Db db2 = openWorld(downPath.string(), "tests/combat_fixture.sql").db;
         CHECK(runTurn(db2, "go north").outcome == TurnOutcome::Ticked);
         std::string downText;
         for (int i = 0;
@@ -1657,7 +1668,7 @@ static void testCombatRender() {
 static void testRender() {
     const TempDbFile worldPath("textworld_render_tests.db");
 
-    Db db = openWorld(worldPath.string(), "tests/fixture.sql");
+    Db db = openWorld(worldPath.string(), "tests/fixture.sql").db;
     int64_t turn = 0;
 
     // --- turn with no events renders as the empty string ---
@@ -1749,7 +1760,7 @@ static void testLoop() {
     // --- ticked turn: go north → garden prose, meta.turn incremented ---
     {
         const TempDbFile worldPath("textworld_loop_tests.db");
-        Db db = openWorld(worldPath.string(), "tests/fixture.sql");
+        Db db = openWorld(worldPath.string(), "tests/fixture.sql").db;
         CHECK(queryInt(db, "SELECT value FROM meta WHERE key = 'turn'") == 0);
 
         const TurnResult r = runTurn(db, "go north");
@@ -1778,7 +1789,7 @@ static void testLoop() {
     // driven through runTurn on a fresh world (player in room 1, key in 2) ---
     {
         const TempDbFile worldPath("textworld_loop_tests.db");
-        Db db = openWorld(worldPath.string(), "tests/fixture.sql");
+        Db db = openWorld(worldPath.string(), "tests/fixture.sql").db;
 
         // Tier b: recognized noun, wrong room → Ticked, one 'failed' event,
         // key untouched.
@@ -1800,7 +1811,7 @@ static void testLoop() {
     // --- scripted sequence on a fresh world: each line Ticked, turn == 6 ---
     {
         const TempDbFile worldPath("textworld_loop_tests.db");
-        Db db = openWorld(worldPath.string(), "tests/fixture.sql");
+        Db db = openWorld(worldPath.string(), "tests/fixture.sql").db;
 
         const char* script[] = {"look",         "take lantern", "go north",
                                 "drop lantern", "inventory",    "wait"};
@@ -1820,7 +1831,7 @@ static void testLoop() {
     // of letting the exception — or a throw from rollback itself — escape. ---
     {
         const TempDbFile worldPath("textworld_loop_tests.db");
-        Db db = openWorld(worldPath.string(), "tests/fixture.sql");
+        Db db = openWorld(worldPath.string(), "tests/fixture.sql").db;
         db.exec("DELETE FROM player");  // playerId() will throw mid-tick
         const int64_t turnBefore = queryInt(db, "SELECT value FROM meta WHERE key = 'turn'");
         const int64_t eventsBefore = queryInt(db, "SELECT COUNT(*) FROM events");
@@ -1911,7 +1922,7 @@ static void testProseFacts() {
     using nlohmann::json;
 
     const TempDbFile worldPath("textworld_prose_tests.db");
-    Db db = openWorld(worldPath.string(), "tests/fixture.sql");
+    Db db = openWorld(worldPath.string(), "tests/fixture.sql").db;
 
     // Canon prose fetched independently, compared verbatim below.
     const std::string hallProse =
@@ -2069,7 +2080,7 @@ static void testNlResolveContext() {
     using nlohmann::json;
 
     const TempDbFile worldPath("textworld_nlresolve_tests.db");
-    Db db = openWorld(worldPath.string(), "tests/fixture.sql");
+    Db db = openWorld(worldPath.string(), "tests/fixture.sql").db;
 
     // Fresh seed: player in the stone hall (1), lantern (4) here, key (5) in
     // the garden (2), inventory empty. The raw line travels verbatim.
@@ -2170,7 +2181,7 @@ static void testNlResolvePrompt() {
 // access — the libcurl production transport is never invoked here. ---
 static void testProseTransport() {
     const TempDbFile worldPath("textworld_transport_tests.db");
-    Db db = openWorld(worldPath.string(), "tests/fixture.sql");
+    Db db = openWorld(worldPath.string(), "tests/fixture.sql").db;
 
     // One committed turn to render.
     CHECK(runTurn(db, "wait").outcome == TurnOutcome::Ticked);
@@ -2259,7 +2270,7 @@ struct ScopedEnvVar {
 // ScopedEnvVar, because it toggles ANTHROPIC_API_KEY under a guard.
 static void testExitDisplayInvariant() {
     const TempDbFile worldPath("textworld_exitdisplay_tests.db");
-    Db db = openWorld(worldPath.string(), "tests/fixture.sql");
+    Db db = openWorld(worldPath.string(), "tests/fixture.sql").db;
 
     // Plant a latent exit on room 1 (the player's room): up, dest NULL.
     db.exec("INSERT INTO exits(room, direction, dest) VALUES (1, 'up', NULL)");
@@ -2677,7 +2688,7 @@ static void testProfileTurnStages() {
     std::string onOutput;
     {
         const TempDbFile worldPath("textworld_profile_off_tests.db");
-        Db db = openWorld(worldPath.string(), "tests/fixture.sql");
+        Db db = openWorld(worldPath.string(), "tests/fixture.sql").db;
         unsetenv("TEXTWORLD_PROFILE");
         profileRefreshEnabled();
         offOutput = runTurn(db, "look").output;
@@ -2686,7 +2697,7 @@ static void testProfileTurnStages() {
 
     {
         const TempDbFile worldPath("textworld_profile_on_tests.db");
-        Db db = openWorld(worldPath.string(), "tests/fixture.sql");
+        Db db = openWorld(worldPath.string(), "tests/fixture.sql").db;
         setenv("TEXTWORLD_PROFILE", "1", 1);
         profileRefreshEnabled();
         onOutput = runTurn(db, "look").output;
@@ -2710,7 +2721,7 @@ static void testProfileTurnStages() {
     }
 
     const TempDbFile worldPath("textworld_profile_stages_tests.db");
-    Db db = openWorld(worldPath.string(), "tests/fixture.sql");
+    Db db = openWorld(worldPath.string(), "tests/fixture.sql").db;
 
     // (b) tier a — an unresolvable line never opens a transaction and never
     // narrates: tick and narrate are ABSENT, not zero-faked (REQ-LAT-2).
@@ -2756,12 +2767,17 @@ static void testAiRoleModel() {
     CHECK(std::string(roleName(AiRole::Resolve)) == "resolve");
     CHECK(std::string(roleName(AiRole::Narrate)) == "narrate");
     CHECK(std::string(roleName(AiRole::Generate)) == "generate");
+    // The fourth role (REQ-BARD-WAKE-5): a bard wake must be distinguishable
+    // from a pregen room job in a profile log, which is the whole reason it is
+    // not a reuse of Generate.
+    CHECK(std::string(roleName(AiRole::Bard)) == "bard");
 
     // Level 2 — per-role defaults: resolve is the cheap one, prose stays Opus.
     unsetenv("TEXTWORLD_MODEL");
     CHECK(modelForRole(AiRole::Resolve) == "claude-haiku-4-5");
     CHECK(modelForRole(AiRole::Narrate) == "claude-opus-4-8");
     CHECK(modelForRole(AiRole::Generate) == "claude-opus-4-8");
+    CHECK(modelForRole(AiRole::Bard) == "claude-opus-4-8");
 
     // Level 1 — the global override wins for EVERY role (REQ-LAT-13), so
     // anyone relying on TEXTWORLD_MODEL today is unaffected by the tiering.
@@ -2769,12 +2785,33 @@ static void testAiRoleModel() {
     CHECK(modelForRole(AiRole::Resolve) == "claude-sonnet-5");
     CHECK(modelForRole(AiRole::Narrate) == "claude-sonnet-5");
     CHECK(modelForRole(AiRole::Generate) == "claude-sonnet-5");
+    CHECK(modelForRole(AiRole::Bard) == "claude-sonnet-5");
 
     // Set-but-EMPTY is not an override — back to the per-role defaults.
     setenv("TEXTWORLD_MODEL", "", 1);
     CHECK(modelForRole(AiRole::Resolve) == "claude-haiku-4-5");
     CHECK(modelForRole(AiRole::Narrate) == "claude-opus-4-8");
     CHECK(modelForRole(AiRole::Generate) == "claude-opus-4-8");
+    CHECK(modelForRole(AiRole::Bard) == "claude-opus-4-8");
+}
+
+// --- the threading contract, as written down (REQ-BARD-WAKE-17) -------------
+// The header's contract block is the only place the "one handle per thread"
+// rule is stated, and it has just gone from one sanctioned worker handle to
+// two. A stale block is worse than none: the next person adding a thread reads
+// it and concludes a second worker is forbidden. Asserted by source text
+// because there is no runtime artifact of a comment.
+static void testAiHttpThreadingContract() {
+    const std::string header = readFileBytes("src/aihttp.hpp");
+    CHECK(!header.empty());
+
+    // The old singular claim is gone.
+    CHECK(header.find("ONE sanctioned second handle") == std::string::npos);
+
+    // And both worker guards are named, with their shared position rule.
+    CHECK(header.find("PregenGuard") != std::string::npos);
+    CHECK(header.find("BardGuard") != std::string::npos);
+    CHECK(header.find("BELOW AiHttpGuard") != std::string::npos);
 }
 
 // --- usage / model body parsers (REQ-LAT-4) ---------------------------------
@@ -3036,7 +3073,7 @@ static HttpResponse cannedNoToolUse() {
 // must never throw. ---
 static void testNlResolveGate() {
     const TempDbFile worldPath("textworld_nlgate_tests.db");
-    Db db = openWorld(worldPath.string(), "tests/fixture.sql");
+    Db db = openWorld(worldPath.string(), "tests/fixture.sql").db;
 
     // Clause e: argument-free verbs map with subject 0, direction empty.
     {
@@ -3134,7 +3171,7 @@ static void testNlResolveGate() {
 // testProseTransport's fake-transport discipline. ---
 static void testNlResolveAiResolve() {
     const TempDbFile worldPath("textworld_nlairesolve_tests.db");
-    Db db = openWorld(worldPath.string(), "tests/fixture.sql");
+    Db db = openWorld(worldPath.string(), "tests/fixture.sql").db;
 
     // Canned emit_action -> correct Action; transport invoked EXACTLY once.
     {
@@ -3208,7 +3245,7 @@ static void testNlResolveAiResolve() {
 // without a live call. ---
 static void testNlResolveDispatch() {
     const TempDbFile worldPath("textworld_nldispatch_tests.db");
-    Db db = openWorld(worldPath.string(), "tests/fixture.sql");
+    Db db = openWorld(worldPath.string(), "tests/fixture.sql").db;
 
     // Fake transport that always makes no tool call: aiResolve declines,
     // so resolveOrParse must fall through to the parser.
@@ -3245,7 +3282,7 @@ static void testNlResolveDispatch() {
 // applicability authority. Drives aiResolve + resolve directly (not runTurn). ---
 static void testNlResolveTierBPassthrough() {
     const TempDbFile worldPath("textworld_nltierb_tests.db");
-    Db db = openWorld(worldPath.string(), "tests/fixture.sql");
+    Db db = openWorld(worldPath.string(), "tests/fixture.sql").db;
 
     // key (5) exists world-wide but sits in the garden (2), NOT the player's
     // room (stone hall, 1). Clause c is recognition only, so aiResolve returns a
@@ -3476,7 +3513,7 @@ static void testProseNarrationEnabled() {
 // transports, plus the runTurn dispatch (template fallback). No network. ---
 static void testProseAiRender() {
     const TempDbFile worldPath("textworld_airender_tests.db");
-    Db db = openWorld(worldPath.string(), "tests/fixture.sql");
+    Db db = openWorld(worldPath.string(), "tests/fixture.sql").db;
 
     const std::string gardenProse =
         queryText(db, "SELECT prose FROM description WHERE entity = 2");
@@ -3660,7 +3697,7 @@ static void testProseLiveSmoke() {
                  "API (this makes a network call)...\n");
 
     const TempDbFile worldPath("textworld_live_smoke.db");
-    Db db = openWorld(worldPath.string(), "tests/fixture.sql");
+    Db db = openWorld(worldPath.string(), "tests/fixture.sql").db;
 
     // A moved turn (room-describing): canon rides verbatim inside the prose
     // and the deterministic tail carries the Exits line.
@@ -3710,7 +3747,7 @@ static void testNlResolveLiveSmoke() {
                  "Anthropic API (this makes network calls)...\n");
 
     const TempDbFile worldPath("textworld_resolve_live_smoke.db");
-    Db db = openWorld(worldPath.string(), "tests/fixture.sql");
+    Db db = openWorld(worldPath.string(), "tests/fixture.sql").db;
 
     // "take" synonyms the fixed-verb parser can't handle: if the model resolves
     // one, it must lower to Take lantern (id 4, mechanically assigned). A
@@ -3842,7 +3879,7 @@ static void testArchitectLiveSmoke() {
     // Default settingPath → the committed seed/setting.txt gives real shared
     // context. tick() drives the PRODUCTION transport (real generation + move).
     const TempDbFile worldPath("textworld_arch_live_smoke.db");
-    Db db = openWorld(worldPath.string(), "seed/base.sql");
+    Db db = openWorld(worldPath.string(), "seed/base.sql").db;
     const std::string setting =
         queryText(db, "SELECT value FROM meta WHERE key = 'setting'");
     CHECK(!setting.empty());
@@ -3989,7 +4026,7 @@ static void testCombatLiveSmoke() {
                  "Anthropic API (this makes a network call)...\n");
 
     const TempDbFile worldPath("textworld_combat_live_smoke.db");
-    Db db = openWorld(worldPath.string(), "seed/base.sql");
+    Db db = openWorld(worldPath.string(), "seed/base.sql").db;
 
     // Clear the seed goblin from the corridor so the latent frontier off it is no
     // longer flee-guarded (REQ-COMBAT-26) — these ticks make NO network call.
@@ -4050,7 +4087,7 @@ static void testPersistence() {
     // at scope exit releases the connection; DELETE journal mode means the
     // file on disk is the full committed state).
     {
-        Db db = openWorld(worldPath.string(), "tests/fixture.sql");
+        Db db = openWorld(worldPath.string(), "tests/fixture.sql").db;
         CHECK(runTurn(db, "take lantern").outcome == TurnOutcome::Ticked);
         CHECK(runTurn(db, "go north").outcome == TurnOutcome::Ticked);
         CHECK(runTurn(db, "drop lantern").outcome == TurnOutcome::Ticked);
@@ -4059,7 +4096,7 @@ static void testPersistence() {
 
     // Reopen the same file: everything preserved.
     {
-        Db db = openWorld(worldPath.string(), "tests/fixture.sql");
+        Db db = openWorld(worldPath.string(), "tests/fixture.sql").db;
 
         // Turn counter survived the close.
         CHECK(queryInt(db, "SELECT value FROM meta WHERE key = 'turn'") == 3);
@@ -4102,7 +4139,7 @@ static void testPortability() {
 
     // Play the original: lantern in hand, player in the garden. Close it.
     {
-        Db db = openWorld(origPath.string(), "tests/fixture.sql");
+        Db db = openWorld(origPath.string(), "tests/fixture.sql").db;
         CHECK(runTurn(db, "take lantern").outcome == TurnOutcome::Ticked);
         CHECK(runTurn(db, "go north").outcome == TurnOutcome::Ticked);
         CHECK(queryInt(db, "SELECT value FROM meta WHERE key = 'turn'") == 2);
@@ -4117,7 +4154,7 @@ static void testPortability() {
     // Play the COPY down a divergent path: drop the lantern in the garden,
     // walk back south. Close it.
     {
-        Db db = openWorld(copyPath.string(), "tests/fixture.sql");
+        Db db = openWorld(copyPath.string(), "tests/fixture.sql").db;
         CHECK(queryInt(db, "SELECT value FROM meta WHERE key = 'turn'") == 2);
         CHECK(runTurn(db, "drop lantern").outcome == TurnOutcome::Ticked);
         CHECK(runTurn(db, "go south").outcome == TurnOutcome::Ticked);
@@ -4130,12 +4167,12 @@ static void testPortability() {
     // Reopen the original: pre-copy state, still playable, and its state
     // provably differs from the copy's (divergence).
     {
-        Db orig = openWorld(origPath.string(), "tests/fixture.sql");
+        Db orig = openWorld(origPath.string(), "tests/fixture.sql").db;
         CHECK(queryInt(orig, "SELECT value FROM meta WHERE key = 'turn'") == 2);
         CHECK(queryInt(orig, "SELECT container FROM location WHERE entity = 3") == 2);
         CHECK(queryInt(orig, "SELECT container FROM location WHERE entity = 4") == 3);
 
-        Db copy = openWorld(copyPath.string(), "tests/fixture.sql");
+        Db copy = openWorld(copyPath.string(), "tests/fixture.sql").db;
         CHECK(queryInt(copy, "SELECT value FROM meta WHERE key = 'turn'") == 4);
         CHECK(queryInt(copy, "SELECT container FROM location WHERE entity = 3") == 1);
         CHECK(queryInt(copy, "SELECT container FROM location WHERE entity = 4") == 2);
@@ -4187,7 +4224,7 @@ static void testArchitectSettingLoad() {
         const TempSettingFile setting("textworld_setting_present.txt", settingText);
         const TempDbFile worldPath("textworld_setting_present.db");
 
-        Db db = openWorld(worldPath.string(), "tests/fixture.sql", setting.string());
+        Db db = openWorld(worldPath.string(), "tests/fixture.sql", setting.string()).db;
 
         CHECK(queryText(db, "SELECT value FROM meta WHERE key = 'setting'") ==
               settingText);
@@ -4206,7 +4243,7 @@ static void testArchitectSettingLoad() {
                 .string();
         std::filesystem::remove(missing);  // ensure it does not exist
 
-        Db db = openWorld(worldPath.string(), "tests/fixture.sql", missing);
+        Db db = openWorld(worldPath.string(), "tests/fixture.sql", missing).db;
 
         // Tolerant read: init succeeded, and meta.setting is present-but-empty.
         CHECK(queryText(db, "SELECT value FROM meta WHERE key = 'setting'").empty());
@@ -4243,7 +4280,7 @@ static void testArchitectContext() {
         "A quiet cloister of grey stone and green light.";
     const TempSettingFile setting("textworld_ctx_setting.txt", settingText);
     const TempDbFile worldPath("textworld_arch_context.db");
-    Db db = openWorld(worldPath.string(), "tests/fixture.sql", setting.string());
+    Db db = openWorld(worldPath.string(), "tests/fixture.sql", setting.string()).db;
 
     // Origin = the stone hall (room 1); walk an unmapped direction: 'east'.
     const nlohmann::json j =
@@ -4273,7 +4310,7 @@ static void testArchitectContext() {
             (std::filesystem::temp_directory_path() / "textworld_ctx_no_setting.txt")
                 .string();
         std::filesystem::remove(missing);
-        Db db2 = openWorld(w2.string(), "tests/fixture.sql", missing);
+        Db db2 = openWorld(w2.string(), "tests/fixture.sql", missing).db;
 
         const nlohmann::json j2 =
             nlohmann::json::parse(buildArchitectContext(db2, 1, "up"));
@@ -4545,7 +4582,7 @@ static void testArchitectGate() {
 // from the hall — base.sql maps only north/south) so no exit PK collides. ---
 static void testWriteGeneratedRoom() {
     const TempDbFile worldPath("textworld_write_gen_room.db");
-    Db db = openWorld(worldPath.string(), "tests/fixture.sql");
+    Db db = openWorld(worldPath.string(), "tests/fixture.sql").db;
 
     const int64_t originRoom = 1;  // stone hall
     const int64_t player = 3;
@@ -4641,7 +4678,7 @@ static void testArchitectGenerate() {
     // --- success: canned create_room → true; room + reciprocal exits + event ---
     {
         const TempDbFile worldPath("textworld_arch_gen_ok.db");
-        Db db = openWorld(worldPath.string(), "tests/fixture.sql");
+        Db db = openWorld(worldPath.string(), "tests/fixture.sql").db;
 
         int calls = 0;
         HttpTransport fake = [&](const std::string&) {
@@ -4669,7 +4706,7 @@ static void testArchitectGenerate() {
     // --- Phase-1 atomic fallback: each failure → false, NO orphan written ---
     {
         const TempDbFile worldPath("textworld_arch_gen_fail.db");
-        Db db = openWorld(worldPath.string(), "tests/fixture.sql");
+        Db db = openWorld(worldPath.string(), "tests/fixture.sql").db;
 
         const int64_t entities0 = queryInt(db, "SELECT COUNT(*) FROM entities");
         const int64_t exits0 = queryInt(db, "SELECT COUNT(*) FROM exits");
@@ -4917,8 +4954,14 @@ struct BlockingTransport {
     int inside = 0;
     std::string roomName = "crypt";
 
+    // When set, returned INSTEAD of a room proposal. The bard's worker consumes
+    // wake responses, not rooms, and it needs the identical blocking behavior —
+    // so the timing machinery is shared and only the payload differs.
+    std::optional<HttpResponse> canned;
+
     // Blocks until release() is called. Records the call and flags any
-    // overlapping entry — the serial-worker assertion (REQ-PREGEN-6).
+    // overlapping entry — the serial-worker assertion (REQ-PREGEN-6,
+    // REQ-BARD-WAKE-13).
     HttpResponse operator()(const std::string&) {
         {
             std::unique_lock<std::mutex> lock(mutex);
@@ -4927,6 +4970,7 @@ struct BlockingTransport {
             if (inside > 1) concurrentEntry = true;
             cv.wait(lock, [this] { return released; });
             --inside;
+            if (canned) return *canned;
         }
         return cannedCreateRoom(roomName, "A cold undercroft of grey stone.");
     }
@@ -5238,7 +5282,7 @@ static void testPregenWait() {
 // exits of a room the player is not standing in. ---
 static void testPlayerRoom() {
     const TempDbFile worldPath("textworld_player_room.db");
-    Db db = openWorld(worldPath.string(), "tests/fixture.sql");
+    Db db = openWorld(worldPath.string(), "tests/fixture.sql").db;
 
     // The fixture stands the player (3) in the stone hall (1).
     CHECK(playerRoom(db) == 1);
@@ -5282,7 +5326,7 @@ static void testArchitectQueuePregen() {
         pregenResetForTest();
         architectResetPregenOccupancyForTest();
         const TempDbFile worldPath("textworld_queue_basic.db");
-        Db db = openWorld(worldPath.string(), "tests/fixture.sql");
+        Db db = openWorld(worldPath.string(), "tests/fixture.sql").db;
         db.exec("INSERT INTO exits(room, direction, dest) VALUES (1, 'east', NULL)");
         db.exec("INSERT INTO exits(room, direction, dest) VALUES (1, 'up', NULL)");
 
@@ -5306,7 +5350,7 @@ static void testArchitectQueuePregen() {
         pregenResetForTest();
         architectResetPregenOccupancyForTest();
         const TempDbFile worldPath("textworld_queue_snapshot.db");
-        Db db = openWorld(worldPath.string(), "tests/fixture.sql");
+        Db db = openWorld(worldPath.string(), "tests/fixture.sql").db;
         db.exec("INSERT INTO exits(room, direction, dest) VALUES (1, 'east', NULL)");
         db.exec("UPDATE meta SET value = 4 WHERE key = 'turn'");
 
@@ -5354,7 +5398,7 @@ static void testArchitectQueuePregen() {
         pregenResetForTest();
         architectResetPregenOccupancyForTest();
         const TempDbFile worldPath("textworld_queue_enemy.db");
-        Db db = openWorld(worldPath.string(), "tests/combat_fixture.sql");
+        Db db = openWorld(worldPath.string(), "tests/combat_fixture.sql").db;
         db.exec("INSERT INTO exits(room, direction, dest) VALUES (1, 'east', NULL)");
         const std::vector<std::string> expected = eligibleEnemyBlurbs(db, 1);
         CHECK(!expected.empty());
@@ -5379,7 +5423,7 @@ static void testArchitectQueuePregen() {
         pregenResetForTest();
         architectResetPregenOccupancyForTest();
         const TempDbFile worldPath("textworld_queue_occupancy.db");
-        Db db = openWorld(worldPath.string(), "tests/fixture.sql");
+        Db db = openWorld(worldPath.string(), "tests/fixture.sql").db;
         db.exec("INSERT INTO exits(room, direction, dest) VALUES (1, 'east', NULL)");
         db.exec("INSERT INTO exits(room, direction, dest) VALUES (2, 'east', NULL)");
 
@@ -5415,7 +5459,7 @@ static void testArchitectQueuePregen() {
         pregenResetForTest();
         architectResetPregenOccupancyForTest();
         const TempDbFile worldPath("textworld_queue_gates.db");
-        Db db = openWorld(worldPath.string(), "tests/fixture.sql");
+        Db db = openWorld(worldPath.string(), "tests/fixture.sql").db;
         db.exec("INSERT INTO exits(room, direction, dest) VALUES (1, 'east', NULL)");
 
         setenv("TEXTWORLD_PREGEN", "0", 1);
@@ -5454,7 +5498,7 @@ static void testArchitectQueuePregen() {
 static void testArchitectCommitProposal() {
     const int64_t player = 3;
     const TempDbFile worldPath("textworld_arch_commit.db");
-    Db db = openWorld(worldPath.string(), "tests/fixture.sql");
+    Db db = openWorld(worldPath.string(), "tests/fixture.sql").db;
 
     // A proposal as the gate would have produced it, with one declared onward
     // exit so the latent-stub half of Phase 2 is exercised too.
@@ -5506,7 +5550,7 @@ static void testArchitectSpawn() {
     //     made AND a catalog-equal goblin instance is placed; the ledger ticks. ---
     {
         const TempDbFile worldPath("textworld_arch_spawn_ok.db");
-        Db db = openWorld(worldPath.string(), "tests/combat_fixture.sql");
+        Db db = openWorld(worldPath.string(), "tests/combat_fixture.sql").db;
         const std::string goblinBlurb = queryText(
             db, "SELECT blurb FROM bestiary WHERE archetype = 'goblin_grunt'");
 
@@ -5566,7 +5610,7 @@ static void testArchitectSpawn() {
     // --- (b) no enemy selected → room made, no hostile, ledger never created. ---
     {
         const TempDbFile worldPath("textworld_arch_spawn_none.db");
-        Db db = openWorld(worldPath.string(), "tests/combat_fixture.sql");
+        Db db = openWorld(worldPath.string(), "tests/combat_fixture.sql").db;
         HttpTransport fake = [&](const std::string&) {
             return cannedCreateRoom("empty study", "A quiet, empty study.");
         };
@@ -5583,7 +5627,7 @@ static void testArchitectSpawn() {
     // --- (c) ineligible / hallucinated blurb → no spawn, room still made. ---
     {
         const TempDbFile worldPath("textworld_arch_spawn_bad.db");
-        Db db = openWorld(worldPath.string(), "tests/combat_fixture.sql");
+        Db db = openWorld(worldPath.string(), "tests/combat_fixture.sql").db;
         HttpTransport fake = [&](const std::string&) {
             return cannedCreateRoom("study", "A study.", {},
                                     "a dragon of pure invention");
@@ -5603,7 +5647,7 @@ static void testArchitectSpawn() {
     // 4, beyond the front radius: an empty menu, so no `enemy` property exists.
     {
         const TempDbFile worldPath("textworld_arch_spawn_edge.db");
-        Db db = openWorld(worldPath.string(), "tests/combat_fixture.sql");
+        Db db = openWorld(worldPath.string(), "tests/combat_fixture.sql").db;
         std::string sentBody;
         HttpTransport fake = [&](const std::string& body) {
             sentBody = body;
@@ -5620,7 +5664,7 @@ static void testArchitectSpawn() {
     //     (REQ-COMBAT-35): the same silent-fallback boundary as room generation. ---
     {
         const TempDbFile worldPath("textworld_arch_spawn_fail.db");
-        Db db = openWorld(worldPath.string(), "tests/combat_fixture.sql");
+        Db db = openWorld(worldPath.string(), "tests/combat_fixture.sql").db;
         const int64_t hostiles0 = queryInt(db, "SELECT COUNT(*) FROM hostile");
         HttpTransport err = [&](const std::string&) {
             HttpResponse r;
@@ -5666,7 +5710,7 @@ static void testResolveGoGenerate() {
         setenv("ANTHROPIC_API_KEY", "test-key-never-used", 1);
         unsetenv("TEXTWORLD_AI");
         const TempDbFile worldPath("textworld_resolvego_realized.db");
-        Db db = openWorld(worldPath.string(), "tests/fixture.sql");
+        Db db = openWorld(worldPath.string(), "tests/fixture.sql").db;
         int calls = 0;
         HttpTransport fake = [&](const std::string&) {
             ++calls;
@@ -5683,7 +5727,7 @@ static void testResolveGoGenerate() {
         setenv("ANTHROPIC_API_KEY", "test-key-never-used", 1);
         unsetenv("TEXTWORLD_AI");
         const TempDbFile worldPath("textworld_resolvego_latent.db");
-        Db db = openWorld(worldPath.string(), "tests/fixture.sql");
+        Db db = openWorld(worldPath.string(), "tests/fixture.sql").db;
         // Seed a latent onward exit off the hall (fixture maps no 'east').
         db.exec("INSERT INTO exits(room, direction, dest) VALUES (1, 'east', NULL)");
         int calls = 0;
@@ -5716,7 +5760,7 @@ static void testResolveGoGenerate() {
         setenv("ANTHROPIC_API_KEY", "test-key-never-used", 1);
         unsetenv("TEXTWORLD_AI");
         const TempDbFile worldPath("textworld_resolvego_wall.db");
-        Db db = openWorld(worldPath.string(), "tests/fixture.sql");
+        Db db = openWorld(worldPath.string(), "tests/fixture.sql").db;
         int calls = 0;
         HttpTransport fake = [&](const std::string&) {
             ++calls;
@@ -5738,7 +5782,7 @@ static void testResolveGoGenerate() {
         unsetenv("ANTHROPIC_API_KEY");  // aiNarrationEnabled() false
         unsetenv("TEXTWORLD_AI");
         const TempDbFile worldPath("textworld_resolvego_off.db");
-        Db db = openWorld(worldPath.string(), "tests/fixture.sql");
+        Db db = openWorld(worldPath.string(), "tests/fixture.sql").db;
         db.exec("INSERT INTO exits(room, direction, dest) VALUES (1, 'east', NULL)");
         int calls = 0;
         HttpTransport fake = [&](const std::string&) {
@@ -5762,7 +5806,7 @@ static void testResolveGoGenerate() {
         setenv("ANTHROPIC_API_KEY", "test-key-never-used", 1);
         unsetenv("TEXTWORLD_AI");
         const TempDbFile worldPath("textworld_resolvego_retry.db");
-        Db db = openWorld(worldPath.string(), "tests/fixture.sql");
+        Db db = openWorld(worldPath.string(), "tests/fixture.sql").db;
         db.exec("INSERT INTO exits(room, direction, dest) VALUES (1, 'east', NULL)");
         int calls = 0;
         HttpTransport err = [&](const std::string&) {
@@ -5854,7 +5898,7 @@ static void testPregenCommit() {
     {
         pregenResetForTest();
         const TempDbFile worldPath("textworld_pregen_sync.db");
-        Db db = openWorld(worldPath.string(), "tests/fixture.sql");
+        Db db = openWorld(worldPath.string(), "tests/fixture.sql").db;
         db.exec("INSERT INTO exits(room, direction, dest) VALUES (1, 'east', NULL)");
         HttpTransport fake = [&](const std::string&) {
             return cannedCreateRoom(roomName, roomProse, roomExits);
@@ -5865,7 +5909,7 @@ static void testPregenCommit() {
     {
         pregenResetForTest();
         const TempDbFile worldPath("textworld_pregen_hit.db");
-        Db db = openWorld(worldPath.string(), "tests/fixture.sql");
+        Db db = openWorld(worldPath.string(), "tests/fixture.sql").db;
         db.exec("INSERT INTO exits(room, direction, dest) VALUES (1, 'east', NULL)");
         pregenInjectReadyForTest(1, "east", candidate, /*snapshotTurn=*/1);
 
@@ -5893,7 +5937,7 @@ static void testPregenCommit() {
     {
         pregenResetForTest();
         const TempDbFile worldPath("textworld_pregen_miss.db");
-        Db db = openWorld(worldPath.string(), "tests/fixture.sql");
+        Db db = openWorld(worldPath.string(), "tests/fixture.sql").db;
         db.exec("INSERT INTO exits(room, direction, dest) VALUES (1, 'east', NULL)");
         int calls = 0;
         HttpTransport err = [&](const std::string&) {
@@ -5917,7 +5961,7 @@ static void testPregenCommit() {
     {
         pregenResetForTest();
         const TempDbFile worldPath("textworld_pregen_ranqueued.db");
-        Db db = openWorld(worldPath.string(), "tests/fixture.sql");
+        Db db = openWorld(worldPath.string(), "tests/fixture.sql").db;
         db.exec("INSERT INTO exits(room, direction, dest) VALUES (1, 'east', NULL)");
         PregenJob job;
         job.room = 1;
@@ -5950,7 +5994,7 @@ static void testPregenCommit() {
         {
             pregenResetForTest();
             const TempDbFile worldPath("textworld_pregen_enemy_ok.db");
-            Db db = openWorld(worldPath.string(), "tests/combat_fixture.sql");
+            Db db = openWorld(worldPath.string(), "tests/combat_fixture.sql").db;
             db.exec("INSERT INTO exits(room, direction, dest) VALUES (1, 'east', NULL)");
             const std::string goblinBlurb = queryText(
                 db, "SELECT blurb FROM bestiary WHERE archetype = 'goblin_grunt'");
@@ -5979,7 +6023,7 @@ static void testPregenCommit() {
         {
             pregenResetForTest();
             const TempDbFile worldPath("textworld_pregen_enemy_stale.db");
-            Db db = openWorld(worldPath.string(), "tests/combat_fixture.sql");
+            Db db = openWorld(worldPath.string(), "tests/combat_fixture.sql").db;
             db.exec("INSERT INTO exits(room, direction, dest) VALUES (1, 'east', NULL)");
 
             RoomProposal stale = candidate;
@@ -6053,7 +6097,7 @@ static void testPregenOutcomeRecords() {
         pregenResetForTest();
         captured.clear();
         const TempDbFile worldPath("textworld_pregen_rec_hit.db");
-        Db db = openWorld(worldPath.string(), "tests/fixture.sql");
+        Db db = openWorld(worldPath.string(), "tests/fixture.sql").db;
         db.exec("INSERT INTO exits(room, direction, dest) VALUES (1, 'east', NULL)");
         // meta.turn is 0 in the fixture and tickT increments it to 1, so a
         // candidate snapshotted at turn 0 is one turn old at commit.
@@ -6083,7 +6127,7 @@ static void testPregenOutcomeRecords() {
         pregenResetForTest();
         captured.clear();
         const TempDbFile worldPath("textworld_pregen_rec_miss.db");
-        Db db = openWorld(worldPath.string(), "tests/fixture.sql");
+        Db db = openWorld(worldPath.string(), "tests/fixture.sql").db;
         db.exec("INSERT INTO exits(room, direction, dest) VALUES (1, 'east', NULL)");
 
         tickT(db, Action{Verb::Go, 0, "east"},
@@ -6110,7 +6154,7 @@ static void testPregenOutcomeRecords() {
         pregenResetForTest();
         captured.clear();
         const TempDbFile worldPath("textworld_pregen_rec_ranq.db");
-        Db db = openWorld(worldPath.string(), "tests/fixture.sql");
+        Db db = openWorld(worldPath.string(), "tests/fixture.sql").db;
         db.exec("INSERT INTO exits(room, direction, dest) VALUES (1, 'east', NULL)");
         PregenJob job;
         job.room = 1;
@@ -6143,7 +6187,7 @@ static void testPregenOutcomeRecords() {
         pregenResetForTest();
         captured.clear();
         const TempDbFile worldPath("textworld_pregen_rec_wait.db");
-        Db db = openWorld(worldPath.string(), "tests/fixture.sql");
+        Db db = openWorld(worldPath.string(), "tests/fixture.sql").db;
         db.exec("INSERT INTO exits(room, direction, dest) VALUES (1, 'east', NULL)");
 
         BlockingTransport blocking;
@@ -6221,7 +6265,7 @@ static void testProfileGenerateStage() {
     // tick, and no network happened (the transport is canned). ---
     {
         const TempDbFile worldPath("textworld_profile_generate.db");
-        Db db = openWorld(worldPath.string(), "tests/fixture.sql");
+        Db db = openWorld(worldPath.string(), "tests/fixture.sql").db;
         db.exec("INSERT INTO exits(room, direction, dest) VALUES (1, 'east', NULL)");
         HttpTransport fake = [&](const std::string&) {
             return cannedCreateRoom("crypt", "A cold undercroft of grey stone.");
@@ -6241,7 +6285,7 @@ static void testProfileGenerateStage() {
     {
         captured.clear();
         const TempDbFile worldPath("textworld_profile_nogenerate.db");
-        Db db = openWorld(worldPath.string(), "tests/fixture.sql");
+        Db db = openWorld(worldPath.string(), "tests/fixture.sql").db;
         HttpTransport fake = [&](const std::string&) {
             return cannedCreateRoom("crypt", "A cold undercroft of grey stone.");
         };
@@ -6255,7 +6299,7 @@ static void testProfileGenerateStage() {
     {
         captured.clear();
         const TempDbFile worldPath("textworld_profile_generate_fail.db");
-        Db db = openWorld(worldPath.string(), "tests/fixture.sql");
+        Db db = openWorld(worldPath.string(), "tests/fixture.sql").db;
         db.exec("INSERT INTO exits(room, direction, dest) VALUES (1, 'east', NULL)");
         HttpTransport err = [&](const std::string&) {
             HttpResponse r;
@@ -6293,7 +6337,7 @@ static void testCombatFlee() {
         unsetenv("TEXTWORLD_AI");  // AI enabled: the guard, not AI-off, must refuse
 
         const TempDbFile p("textworld_combat_flee_latent.db");
-        Db db = openWorld(p.string(), "tests/combat_fixture.sql");
+        Db db = openWorld(p.string(), "tests/combat_fixture.sql").db;
         int calls = 0;
         HttpTransport fake = [&](const std::string&) {
             ++calls;
@@ -6317,7 +6361,7 @@ static void testCombatFlee() {
     {
         // AI restored to hermetic-off by the guards above → runTurn uses templates.
         const TempDbFile p("textworld_combat_flee_realized.db");
-        Db db = openWorld(p.string(), "tests/combat_fixture.sql");
+        Db db = openWorld(p.string(), "tests/combat_fixture.sql").db;
         CHECK(runTurn(db, "go north").outcome == TurnOutcome::Ticked);  // into corridor
         const int64_t fleeTurn =
             queryInt(db, "SELECT value FROM meta WHERE key = 'turn'") + 1;
@@ -6349,7 +6393,7 @@ static void testGeneratedEventInvisible() {
     unsetenv("TEXTWORLD_AI");
 
     const TempDbFile worldPath("textworld_gen_invisible.db");
-    Db db = openWorld(worldPath.string(), "tests/fixture.sql");
+    Db db = openWorld(worldPath.string(), "tests/fixture.sql").db;
 
     // Generation now fires only on a pre-existing latent row; seed the latent
     // 'east' exit off the hall that this turn will walk (REQ-EXITS-2b).
@@ -6901,7 +6945,7 @@ static void testBandContent() {
     // --- steps 5: room name, exits, objects (fixture.sql) ---
     {
         const TempDbFile worldPath("textworld_band_content_tests.db");
-        Db db = openWorld(worldPath.string(), "tests/fixture.sql");
+        Db db = openWorld(worldPath.string(), "tests/fixture.sql").db;
 
         const std::string band = composeBand(db, 60, kBandPlain);
         CHECK(contains(band, "-- stone hall "));
@@ -6939,7 +6983,7 @@ static void testBandContent() {
     // --- check 18: latent exits follow the room block's visibility gate ---
     {
         const TempDbFile worldPath("textworld_band_latent_tests.db");
-        Db db = openWorld(worldPath.string(), "tests/fixture.sql");
+        Db db = openWorld(worldPath.string(), "tests/fixture.sql").db;
         db.exec("INSERT INTO exits(room, direction, dest) VALUES (1, 'up', NULL)");
 
         const ScopedEnvVar keyGuard("ANTHROPIC_API_KEY");
@@ -6967,7 +7011,7 @@ static void testBandContent() {
     // --- steps 6, 7, 8: hostiles, the player row, combat legibility ---
     {
         const TempDbFile worldPath("textworld_band_combat_tests.db");
-        Db db = openWorld(worldPath.string(), "tests/combat_fixture.sql");
+        Db db = openWorld(worldPath.string(), "tests/combat_fixture.sql").db;
 
         // Check 19 / REQ-UI-15, -16: out of combat (the cell) the player row is
         // COMPACT — HP is present, spell readiness is not.
@@ -7137,7 +7181,7 @@ static void testBandGoldens() {
     };
 
     const TempDbFile worldPath("textworld_band_golden_tests.db");
-    Db db = openWorld(worldPath.string(), "tests/combat_fixture.sql");
+    Db db = openWorld(worldPath.string(), "tests/combat_fixture.sql").db;
 
     // 1. An empty room: no exits, no objects, no hostiles — just the player.
     db.exec("INSERT INTO entities(id) VALUES (99)");
@@ -7212,7 +7256,7 @@ static void testBandGoldens() {
 // layout bug.
 static void testBandColor() {
     const TempDbFile worldPath("textworld_band_color_tests.db");
-    Db db = openWorld(worldPath.string(), "tests/combat_fixture.sql");
+    Db db = openWorld(worldPath.string(), "tests/combat_fixture.sql").db;
     db.exec("UPDATE location SET container = 2 WHERE entity = 3");
     db.exec("INSERT INTO pending_strike(entity, damage, element) VALUES (7, 5, NULL)");
     db.exec("INSERT INTO status_effects(entity, kind, magnitude, remaining) "
@@ -7354,7 +7398,7 @@ static void testBandWiring() {
     // --- check 1, dynamic: N compositions change nothing --------------------
     {
         const TempDbFile worldPath("textworld_band_wiring_tests.db");
-        Db db = openWorld(worldPath.string(), "tests/combat_fixture.sql");
+        Db db = openWorld(worldPath.string(), "tests/combat_fixture.sql").db;
         db.exec("UPDATE location SET container = 2 WHERE entity = 3");
         const int64_t turn0 = queryInt(db, "SELECT value FROM meta WHERE key = 'turn'");
         const int64_t events0 = queryInt(db, "SELECT COUNT(*) FROM events");
@@ -7384,7 +7428,7 @@ static void testBandWiring() {
     // --- check 21: no-tick turns still get a band --------------------------
     {
         const TempDbFile worldPath("textworld_band_notick_tests.db");
-        Db db = openWorld(worldPath.string(), "tests/combat_fixture.sql");
+        Db db = openWorld(worldPath.string(), "tests/combat_fixture.sql").db;
         const int64_t before = queryInt(db, "SELECT value FROM meta WHERE key = 'turn'");
 
         // An unparseable line.
@@ -7412,7 +7456,7 @@ static void testBandWiring() {
     // and outside the transaction.
     {
         const TempDbFile worldPath("textworld_band_engineerr_tests.db");
-        Db db = openWorld(worldPath.string(), "tests/combat_fixture.sql");
+        Db db = openWorld(worldPath.string(), "tests/combat_fixture.sql").db;
         const int64_t before = queryInt(db, "SELECT value FROM meta WHERE key = 'turn'");
         db.exec("CREATE TRIGGER boom BEFORE INSERT ON events "
                 "BEGIN SELECT RAISE(ABORT, 'boom'); END");
@@ -7429,7 +7473,7 @@ static void testBandWiring() {
     // directly rather than trusted.
     {
         const TempDbFile worldPath("textworld_band_degrade_tests.db");
-        Db db = openWorld(worldPath.string(), "tests/combat_fixture.sql");
+        Db db = openWorld(worldPath.string(), "tests/combat_fixture.sql").db;
         db.exec("DELETE FROM player");
         const TurnResult r = runTurn(db, "look");
         // The turn still returns its message; the exception does NOT propagate.
@@ -7441,7 +7485,7 @@ static void testBandWiring() {
     // --- REQ-UI-30: narration and template prose are wrapped ---------------
     {
         const TempDbFile worldPath("textworld_band_wrap_tests.db");
-        Db db = openWorld(worldPath.string(), "tests/fixture.sql");
+        Db db = openWorld(worldPath.string(), "tests/fixture.sql").db;
         termSetWidthOverride(40);
         const TurnResult r = runTurn(db, "look");
         for (const std::string& line : splitOnNewline(r.output)) {
@@ -7457,7 +7501,7 @@ static void testBandWiring() {
 // read-only room render and before the first prompt.
 static void testBandStartup() {
     const TempDbFile worldPath("textworld_band_startup_tests.db");
-    Db db = openWorld(worldPath.string(), "tests/fixture.sql");
+    Db db = openWorld(worldPath.string(), "tests/fixture.sql").db;
     const std::string out = renderStartup(db);
 
     // The band is there, and its header names the STARTING room.
@@ -7478,7 +7522,7 @@ static void testBandStartup() {
 // (REQ-UI-37, -38, -39, -39a, -39b).
 static void testSpellsVerb() {
     const TempDbFile worldPath("textworld_spells_verb_tests.db");
-    Db db = openWorld(worldPath.string(), "tests/combat_fixture.sql");
+    Db db = openWorld(worldPath.string(), "tests/combat_fixture.sql").db;
 
     // Parsed by the fixed-verb parser as an argument-free verb.
     {
@@ -7539,7 +7583,7 @@ static void testSpellsVerb() {
     // not have acted.
     {
         const TempDbFile p2("textworld_spells_notick_tests.db");
-        Db db2 = openWorld(p2.string(), "tests/combat_fixture.sql");
+        Db db2 = openWorld(p2.string(), "tests/combat_fixture.sql").db;
         db2.exec("UPDATE location SET container = 2 WHERE entity = 3");
 
         const int64_t turn0 = queryInt(db2, "SELECT value FROM meta WHERE key = 'turn'");
@@ -7562,7 +7606,7 @@ static void testSpellsVerb() {
     // precedent REQ-UI-39a itself cites, not violations.)
     {
         const TempDbFile p3("textworld_spells_bounded_tests.db");
-        Db db3 = openWorld(p3.string(), "tests/combat_fixture.sql");
+        Db db3 = openWorld(p3.string(), "tests/combat_fixture.sql").db;
         for (const char* line : {"look", "wait", "inventory", "take wand"}) {
             const int64_t before = queryInt(db3, "SELECT COUNT(*) FROM events");
             const TurnResult r = runTurn(db3, line);
@@ -7578,7 +7622,7 @@ static void testSpellsVerb() {
     // Verb::Spells must never reach the tick — resolve() throws if it does.
     {
         const TempDbFile p4("textworld_spells_routing_tests.db");
-        Db db4 = openWorld(p4.string(), "tests/combat_fixture.sql");
+        Db db4 = openWorld(p4.string(), "tests/combat_fixture.sql").db;
         bool threw = false;
         try {
             resolve(db4, Action{Verb::Spells}, 3);
@@ -7639,7 +7683,7 @@ static void testBandResistance() {
         // here.) The verbatim table list below carries the real guarantee: any
         // shape group G added would show up in it.
         const TempDbFile p("textworld_resist_schema_tests.db");
-        Db db = openWorld(p.string(), "tests/combat_fixture.sql");
+        Db db = openWorld(p.string(), "tests/combat_fixture.sql").db;
         std::vector<std::string> tables;
         {
             Stmt s = db.prepare(
@@ -7665,7 +7709,7 @@ static void testBandResistance() {
 
     const TempDbFile worldPath("textworld_resist_tests.db");
     {
-        Db db = openWorld(worldPath.string(), "tests/combat_fixture.sql");
+        Db db = openWorld(worldPath.string(), "tests/combat_fixture.sql").db;
         db.exec("INSERT INTO known_spells(entity, spell) VALUES (3,'fire'),(3,'frost')");
         db.exec("UPDATE location SET container = 2 WHERE entity = 3");
 
@@ -7766,7 +7810,7 @@ static void testBandResistance() {
     // Check 30: discovery PERSISTS ACROSS RESTARTS — free, because events is on
     // disk and nothing is cached in the process.
     {
-        Db db = openWorld(worldPath.string(), "tests/combat_fixture.sql");
+        Db db = openWorld(worldPath.string(), "tests/combat_fixture.sql").db;
         const std::vector<std::string> facts =
             discoveredResistances(db, "goblin_grunt");
         CHECK(facts.size() == 1);
@@ -7787,7 +7831,7 @@ static void testBandResistance() {
     // possible: defeat already destroyed the entity→archetype link.
     {
         const TempDbFile legacyPath("textworld_resist_legacy_tests.db");
-        Db db = openWorld(legacyPath.string(), "tests/combat_fixture.sql");
+        Db db = openWorld(legacyPath.string(), "tests/combat_fixture.sql").db;
         db.exec("INSERT INTO events(turn, actor, verb, subject, object, detail) "
                 "VALUES (1, 3, 'burned', 7, 4, NULL), "
                 "       (1, 3, 'froze',  7, 4, NULL), "
@@ -7819,7 +7863,7 @@ static void testBandProseUnstyled() {
     CHECK(currentStyle().color);  // color really is on for this test
 
     const TempDbFile worldPath("textworld_prose_unstyled_tests.db");
-    Db db = openWorld(worldPath.string(), "tests/fixture.sql");
+    Db db = openWorld(worldPath.string(), "tests/fixture.sql").db;
     const TurnResult r = runTurn(db, "look");
 
     // The band begins at the header rule; everything above it is prose.
@@ -7872,7 +7916,7 @@ static void testBandNonGoals() {
 // the SCHEMA_VERSION gate. Modeled on testCombatSchema.
 static void testBardStoreSchema() {
     const TempDbFile worldPath("textworld_bard_schema_tests.db");
-    Db db = openWorld(worldPath.string(), "tests/combat_fixture.sql");
+    Db db = openWorld(worldPath.string(), "tests/combat_fixture.sql").db;
 
     // REQ-BARD-STORE-2: catalog, exactly eleven columns, exactly these names.
     CHECK(queryInt(db, "SELECT COUNT(*) FROM sqlite_master "
@@ -7916,7 +7960,7 @@ static void testBardStoreSchema() {
 // would let every test above pass against a world the game never builds).
 static void testBardStoreShippedSeedMotives() {
     const TempDbFile worldPath("textworld_bard_seed_tests.db");
-    Db db = openWorld(worldPath.string());  // default seed/base.sql
+    Db db = openWorld(worldPath.string()).db;  // default seed/base.sql
     CHECK(queryInt(db, "SELECT COUNT(*) FROM motive_catalog") == 8);
     CHECK(queryInt(db, "SELECT COUNT(*) FROM motive_catalog WHERE motive IN "
                        "('curiosity','secrecy','rivalry','obligation','grief',"
@@ -7931,7 +7975,7 @@ static void testBardStoreShippedSeedMotives() {
 static void testBardStoreVersionGate() {
     const TempDbFile worldPath("textworld_bard_version_tests.db");
     {
-        Db db = openWorld(worldPath.string(), "tests/combat_fixture.sql");
+        Db db = openWorld(worldPath.string(), "tests/combat_fixture.sql").db;
         CHECK(queryInt(db, "SELECT value FROM meta WHERE key='schema_version'") == 6);
     }
     {
@@ -7943,7 +7987,7 @@ static void testBardStoreVersionGate() {
 
     bool refused = false;
     try {
-        Db db = openWorld(worldPath.string(), "tests/combat_fixture.sql");
+        Db db = openWorld(worldPath.string(), "tests/combat_fixture.sql").db;
     } catch (const SchemaMismatch&) {
         refused = true;
     }
@@ -7967,7 +8011,7 @@ static bool threwRuntimeError(Fn fn) {
 // gate, and markCatalogSeeded (spec tests 6, 7, 8, 12).
 static void testBardStoreWrite() {
     const TempDbFile worldPath("textworld_bard_write_tests.db");
-    Db db = openWorld(worldPath.string(), "tests/combat_fixture.sql");
+    Db db = openWorld(worldPath.string(), "tests/combat_fixture.sql").db;
 
     const auto catalogCount = [&db] {
         return queryInt(db, "SELECT COUNT(*) FROM catalog");
@@ -8096,7 +8140,7 @@ static void testBardStoreWrite() {
 // narrator shield on the handle (spec tests 9, 10 + micro-decision 2).
 static void testBardStoreMaterialize() {
     const TempDbFile worldPath("textworld_bard_materialize_tests.db");
-    Db db = openWorld(worldPath.string(), "tests/combat_fixture.sql");
+    Db db = openWorld(worldPath.string(), "tests/combat_fixture.sql").db;
 
     const int64_t entry = writeCatalogEntry(db, "character", "wandering_proctor",
                                             "wandering proctor",
@@ -8226,7 +8270,7 @@ static void testTermTruncate() {
 // Step 8b: the two free-rewrite meta lanes (spec tests 13, 13a).
 static void testBardStoreMeta() {
     const TempDbFile worldPath("textworld_bard_meta_tests.db");
-    Db db = openWorld(worldPath.string(), "tests/combat_fixture.sql");
+    Db db = openWorld(worldPath.string(), "tests/combat_fixture.sql").db;
 
     const auto focus = [&db] {
         return queryText(db, "SELECT value FROM meta WHERE key = 'bard_focus'");
@@ -8296,6 +8340,43 @@ static void testBardStoreMeta() {
     // …nor normalized: the journal is never read by the architect.
     writeBardJournal(db, "line one\nline two");
     CHECK(journal() == "line one\nline two");
+
+    // --- the wake stamp (REQ-BARD-WAKE-11, REQ-BARD-STORE-18) --------------
+    // The third free-rewrite meta lane, and the one the trigger's ceiling and
+    // event window are both measured against.
+    const auto wakeTurn = [&db] {
+        return queryInt(db,
+                        "SELECT value FROM meta WHERE key = 'bard_last_wake_turn'");
+    };
+
+    // A fresh world starts at 0 — world.cpp seeds the row, so no reader ever
+    // has to branch on its absence.
+    CHECK(wakeTurn() == 0);
+
+    writeBardWakeTurn(db, 7);
+    CHECK(wakeTurn() == 7);
+
+    // Free rewrite, not append, and not monotone-by-construction: the value is
+    // simply whatever was stamped last.
+    writeBardWakeTurn(db, 12);
+    CHECK(wakeTurn() == 12);
+    CHECK(queryInt(db,
+                   "SELECT COUNT(*) FROM meta WHERE key = 'bard_last_wake_turn'") == 1);
+
+    // Stored as an INTEGER, not as the text of one: every reader treats this
+    // as a number, and world.cpp seeds it as one.
+    CHECK(queryText(db,
+                    "SELECT typeof(value) FROM meta WHERE key = 'bard_last_wake_turn'") ==
+          "integer");
+
+    // The helper never begins or commits — it writes inside the CALLER's
+    // transaction, so a rollback takes the stamp with it (spec test 14's
+    // shape). This is what makes "stamp, then submit" safe: a stamp that could
+    // not be rolled back would strand the trigger window on any later fault.
+    db.begin();
+    writeBardWakeTurn(db, 99);
+    db.rollback();
+    CHECK(wakeTurn() == 12);
 }
 
 // Step 10: the append-only guarantee (REQ-BARD-STORE-17, -18), encoded as
@@ -8366,7 +8447,7 @@ static void testBardStoreAppendOnly() {
 
     // --- spec test 14: every helper honors the caller's transaction --------
     const TempDbFile worldPath("textworld_bard_txn_tests.db");
-    Db db = openWorld(worldPath.string(), "tests/combat_fixture.sql");
+    Db db = openWorld(worldPath.string(), "tests/combat_fixture.sql").db;
 
     db.begin();
     const int64_t entry = writeCatalogEntry(db, "character", "rolled_back",
@@ -8408,7 +8489,7 @@ static void testBardStoreAppendOnly() {
 // makes the export real — it only links if both are public.
 static void testBardSelExports() {
     const TempDbFile worldPath("textworld_bard_exports_tests.db");
-    Db db = openWorld(worldPath.string(), "tests/combat_fixture.sql");
+    Db db = openWorld(worldPath.string(), "tests/combat_fixture.sql").db;
 
     // The seed room is distance 0; the corridor one hop north of it is 1; the
     // outer hall (1 → 2 → 6 → 15) is 3.
@@ -8457,7 +8538,7 @@ static void testBardSelEligible() {
     // Fixture distances from the seed (room 1): corridor 2 → 1, frost study
     // 6 → 2, armory 9 → 2, library 11 → 1, outer hall 15 → 3.
     {
-        Db db = openWorld(worldPath.string(), "tests/combat_fixture.sql");
+        Db db = openWorld(worldPath.string(), "tests/combat_fixture.sql").db;
 
         // An empty catalog is a normal answer, not an error — asserted BEFORE
         // anything is seeded, so the empty path is exercised for real.
@@ -8533,7 +8614,7 @@ static void testBardSelEligible() {
 
     // --- determinism across a close and reopen of the world -----------------
     {
-        Db db = openWorld(worldPath.string(), "tests/combat_fixture.sql");
+        Db db = openWorld(worldPath.string(), "tests/combat_fixture.sql").db;
         CHECK(handlesOf(eligibleCatalog(db, 6, "character")) ==
               (std::vector<std::string>{"t0_scribe", "t2_pilgrim"}));
         CHECK(handlesOf(eligibleCatalog(db, 15, "beat")) ==
@@ -8560,7 +8641,7 @@ static const std::vector<std::pair<std::string, std::string>>& fixtureMotives() 
 // vocabulary reaching the wire as key AND blurb (spec test 11a).
 static void testBardSelContext() {
     const TempDbFile worldPath("textworld_bard_context_tests.db");
-    Db db = openWorld(worldPath.string(), "tests/combat_fixture.sql");
+    Db db = openWorld(worldPath.string(), "tests/combat_fixture.sql").db;
     db.exec("UPDATE meta SET value = 'a drowned abbey above a breached vault' "
             "WHERE key = 'setting'");
 
@@ -8602,7 +8683,7 @@ static void testBardSelRequestBody() {
     unsetenv("TEXTWORLD_MODEL");
 
     const TempDbFile worldPath("textworld_bard_body_tests.db");
-    Db db = openWorld(worldPath.string(), "tests/combat_fixture.sql");
+    Db db = openWorld(worldPath.string(), "tests/combat_fixture.sql").db;
     const std::string payload = buildOvertureContext(db);
 
     {
@@ -8704,7 +8785,7 @@ static void testBardSelWakeRequestBody() {
     unsetenv("TEXTWORLD_MODEL");
 
     const TempDbFile worldPath("textworld_bard_wake_body_tests.db");
-    Db db = openWorld(worldPath.string(), "tests/combat_fixture.sql");
+    Db db = openWorld(worldPath.string(), "tests/combat_fixture.sql").db;
     writeBardJournal(db, "the scribe is the one to watch");
     writeCatalogEntry(db, "character", "t0_scribe", "cloistered scribe",
                       "a scribe who has not left the annex in years",
@@ -9166,7 +9247,7 @@ static void testBardSelAdmit() {
     // --- a false fact drops its WHOLE entry, siblings admitted (test 14) ----
     {
         const TempDbFile worldPath("textworld_bard_admit_tests.db");
-        Db db = openWorld(worldPath.string(), "tests/combat_fixture.sql");
+        Db db = openWorld(worldPath.string(), "tests/combat_fixture.sql").db;
 
         OvertureProposal proposal;
         proposal.entries.push_back(bardProposal("first"));
@@ -9210,7 +9291,7 @@ static void testBardSelAdmit() {
     // indistinguishable from a disk fault.
     {
         const TempDbFile worldPath("textworld_bard_admit_dup_tests.db");
-        Db db = openWorld(worldPath.string(), "tests/combat_fixture.sql");
+        Db db = openWorld(worldPath.string(), "tests/combat_fixture.sql").db;
 
         OvertureProposal proposal;
         proposal.entries.push_back(bardProposal("twin"));
@@ -9229,7 +9310,7 @@ static void testBardSelAdmit() {
     // without this test going red.
     {
         const TempDbFile worldPath("textworld_bard_equiv_tests.db");
-        Db db = openWorld(worldPath.string(), "tests/combat_fixture.sql");
+        Db db = openWorld(worldPath.string(), "tests/combat_fixture.sql").db;
 
         const auto agree = [&db](const CatalogEntryProposal& e) {
             const bool refused = !catalogEntryRefusal(db, e, {}).empty();
@@ -9298,7 +9379,7 @@ static void testBardSelAdmit() {
     // --- the wake path (REQ-BARD-SEL-20, -24) -------------------------------
     {
         const TempDbFile worldPath("textworld_bard_wake_apply_tests.db");
-        Db db = openWorld(worldPath.string(), "tests/combat_fixture.sql");
+        Db db = openWorld(worldPath.string(), "tests/combat_fixture.sql").db;
 
         // An entry ineligible EVERYWHERE: tier 9 is above any reachable room's
         // distance, so catalogForHandle would refuse it in every room.
@@ -9334,7 +9415,7 @@ static void testBardSelAdmit() {
     // everything it wrote.
     {
         const TempDbFile worldPath("textworld_bard_admit_txn_tests.db");
-        Db db = openWorld(worldPath.string(), "tests/combat_fixture.sql");
+        Db db = openWorld(worldPath.string(), "tests/combat_fixture.sql").db;
 
         OvertureProposal proposal;
         proposal.entries.push_back(bardProposal("rolled_back"));
@@ -9370,10 +9451,25 @@ static void testBardSelContract() {
     CHECK(contains(bard, "writeBardFocus"));
     CHECK(contains(bard, "markCatalogSeeded"));
 
-    // Plan micro-decision 6a: admission catches NOTHING. A catch here could not
-    // tell a validation refusal from a disk fault (db.hpp raises the same type
-    // for both), and would swallow the fault Brick 3 must roll back on.
-    CHECK(!contains(bard, "catch"));
+    // Plan micro-decision 6a: ADMISSION catches NOTHING. A catch there could
+    // not tell a validation refusal from a disk fault (db.hpp raises the same
+    // type for both), and would swallow the fault Brick 3 rolls back on.
+    //
+    // This was a whole-file "no catch" check while bard.cpp was inert. Brick 3
+    // put two TOTAL entry points in this file (bardOverture, bardAfterTurn),
+    // each of which must catch everything — REQ-BARD-WAKE-6 and micro-decision
+    // 15 — so the check is now scoped to the functions it was always about.
+    // Widening it back would forbid the degradation guarantee.
+    for (const char* fn : {"int admitOvertureProposal(", "int applyWakeProposal("}) {
+        const size_t start = bard.find(fn);
+        CHECK(start != std::string::npos);
+        if (start == std::string::npos) continue;
+        // To the start of the next top-level definition: every function in this
+        // file closes on a column-zero brace, so that is the body's end.
+        const size_t end = bard.find("\n}\n", start);
+        CHECK(end != std::string::npos);
+        CHECK(!contains(bard.substr(start, end - start), "catch"));
+    }
 
     // REQ-BARD-SEL-15: there is no place_catalog tool, anywhere under src/.
     // The bard cannot express a room; placement is the architect's.
@@ -9458,7 +9554,7 @@ static void testBardSelPrompt() {
 static void testBardSelWakeContext() {
     {
         const TempDbFile worldPath("textworld_bard_wake_ctx_tests.db");
-        Db db = openWorld(worldPath.string(), "tests/combat_fixture.sql");
+        Db db = openWorld(worldPath.string(), "tests/combat_fixture.sql").db;
         db.exec("UPDATE meta SET value = 'a drowned abbey' WHERE key = 'setting'");
         writeBardJournal(db, "the scribe is the one to watch");
 
@@ -9554,7 +9650,7 @@ static void testBardSelWakeContext() {
     // --- the event cap: the most recent kBardWakeEventLimit, oldest-first ---
     {
         const TempDbFile worldPath("textworld_bard_wake_cap_tests.db");
-        Db db = openWorld(worldPath.string(), "tests/combat_fixture.sql");
+        Db db = openWorld(worldPath.string(), "tests/combat_fixture.sql").db;
         db.exec("DELETE FROM events");
         for (int i = 1; i <= 200; ++i) {
             Stmt s = db.prepare(
@@ -9588,7 +9684,7 @@ static void testBardSelWakeContext() {
 // the gated one.
 static void testBardSelHandle() {
     const TempDbFile worldPath("textworld_bard_handle_tests.db");
-    Db db = openWorld(worldPath.string(), "tests/combat_fixture.sql");
+    Db db = openWorld(worldPath.string(), "tests/combat_fixture.sql").db;
 
     const int64_t scribe =
         writeCatalogEntry(db, "character", "t0_scribe", "cloistered scribe",
@@ -9629,7 +9725,7 @@ static void testBardSelHandle() {
 // kinds in one call.
 static void testBardSelEligibleNewRoom() {
     const TempDbFile worldPath("textworld_bard_newroom_tests.db");
-    Db db = openWorld(worldPath.string(), "tests/combat_fixture.sql");
+    Db db = openWorld(worldPath.string(), "tests/combat_fixture.sql").db;
 
     writeCatalogEntry(db, "character", "t0_scribe", "cloistered scribe",
                       "a scribe who has not left the annex in years",
@@ -9681,7 +9777,7 @@ static void testBardSelEligibleNewRoom() {
 // divergence.
 static void testBardSelEligibleFact() {
     const TempDbFile worldPath("textworld_bard_fact_tests.db");
-    Db db = openWorld(worldPath.string(), "tests/combat_fixture.sql");
+    Db db = openWorld(worldPath.string(), "tests/combat_fixture.sql").db;
 
     // Take combat out of bootstrap and teach the player fire, so rime_touched
     // (weak to fire) enters the eligible menu of every CONTESTED room — the
@@ -9739,6 +9835,1516 @@ static void testBardSelEligibleFact() {
     db.exec("DELETE FROM known_spells WHERE entity = 3 AND spell = 'fire'");
     CHECK(handlesOf(eligibleCatalog(db, 6, "beat")) ==
           std::vector<std::string>{"plain_beat"});
+}
+
+// --- Brick 3: the overture and wake scheduling ------------------------------
+
+// Step 4, REQ-BARD-WAKE-16/-19/-20: the worker's LIFECYCLE, and nothing else.
+// It parks and stops; it processes nothing yet. Modeled on testPregenWorker's
+// (a) block, and for the same reason the spec insists on it by name — "no bard
+// records in the log" would pass every row of the matrix below and prove
+// nothing, because a thread that was never created and a thread sitting idle
+// produce identical logs.
+static void testBardWorkerLifecycle() {
+    const ScopedEnvVar keyGuard("ANTHROPIC_API_KEY");
+    const ScopedEnvVar aiGuard("TEXTWORLD_AI");
+    const ScopedEnvVar bardGuardEnv("TEXTWORLD_BARD");
+
+    // A transport that must never be called at this step — the skeleton makes
+    // no request. Installing one anyway is what makes "no thread" and "a thread
+    // that did nothing" distinguishable from the transport's side too.
+    std::atomic<int> calls{0};
+    const auto counting = [&calls](const std::string&) {
+        ++calls;
+        HttpResponse r;
+        r.status = 200;
+        return r;
+    };
+
+    // --- (a) the thread-existence matrix (REQ-BARD-WAKE-20) ----------------
+    {
+        // bard on (unset), AI on -> a thread exists.
+        setenv("ANTHROPIC_API_KEY", "test-key-never-used", 1);
+        unsetenv("TEXTWORLD_AI");
+        unsetenv("TEXTWORLD_BARD");
+        bardRefreshEnabledForTest();
+        CHECK(bardEnabled());
+        CHECK(aiNarrationEnabled());
+        bardResetForTest();
+        bardSetWorkerTransportForTest(counting);
+        bardStart();
+        CHECK(bardWorkerRunning());
+        bardResetForTest();
+        CHECK(!bardWorkerRunning());
+
+        // TEXTWORLD_BARD=0 -> NO thread, asserted through the hook rather than
+        // through an absent log line.
+        setenv("TEXTWORLD_BARD", "0", 1);
+        bardRefreshEnabledForTest();
+        CHECK(!bardEnabled());
+        bardSetWorkerTransportForTest(counting);
+        bardStart();
+        CHECK(!bardWorkerRunning());
+        bardResetForTest();
+
+        // The convention, not a truthiness test: "00" is not the kill switch,
+        // exactly as TEXTWORLD_AI and TEXTWORLD_PREGEN read it.
+        setenv("TEXTWORLD_BARD", "00", 1);
+        bardRefreshEnabledForTest();
+        CHECK(bardEnabled());
+        setenv("TEXTWORLD_BARD", "1", 1);
+        bardRefreshEnabledForTest();
+        CHECK(bardEnabled());
+
+        // AI off (no key) -> NO thread, even with the bard on.
+        unsetenv("TEXTWORLD_BARD");
+        bardRefreshEnabledForTest();
+        unsetenv("ANTHROPIC_API_KEY");
+        CHECK(!aiNarrationEnabled());
+        bardSetWorkerTransportForTest(counting);
+        bardStart();
+        CHECK(!bardWorkerRunning());
+        bardResetForTest();
+    }
+
+    // Both gates on for the rest.
+    setenv("ANTHROPIC_API_KEY", "test-key-never-used", 1);
+    unsetenv("TEXTWORLD_AI");
+    unsetenv("TEXTWORLD_BARD");
+    bardRefreshEnabledForTest();
+
+    // --- (b) idempotence, in both directions --------------------------------
+    {
+        bardResetForTest();
+        bardSetWorkerTransportForTest(counting);
+
+        bardStart();
+        CHECK(bardWorkerRunning());
+        bardStart();  // a second start creates no second thread
+        CHECK(bardWorkerRunning());
+
+        bardStop();
+        CHECK(!bardWorkerRunning());
+        bardStop();  // and a second stop completes rather than hanging on a
+                     // thread that is already joined
+        CHECK(!bardWorkerRunning());
+    }
+
+    // bardStop() with no thread EVER started: the shutdown path main() takes
+    // when the bard is off, and the one a missing guard would deadlock on.
+    {
+        bardResetForTest();
+        bardStop();
+        CHECK(!bardWorkerRunning());
+    }
+
+    // --- (c) the guard: a scope starts and joins ----------------------------
+    // This is the shape main() relies on, so it is asserted as a shape rather
+    // than as a sequence of calls.
+    {
+        bardResetForTest();
+        bardSetWorkerTransportForTest(counting);
+        {
+            const BardGuard guard;
+            CHECK(bardWorkerRunning());
+        }
+        CHECK(!bardWorkerRunning());
+    }
+
+    // No wake was ever submitted above, so no request was ever made — the
+    // lifecycle is asserted entirely through bardWorkerRunning(), never through
+    // the transport's silence.
+    CHECK(calls.load() == 0);
+
+    bardResetForTest();
+}
+
+// The eight motive keys the shipped seed carries, as the wake gate wants them.
+static const std::vector<std::string>& bardTestMotives() {
+    static const std::vector<std::string> motives = {
+        "curiosity", "secrecy", "rivalry",  "obligation",
+        "grief",     "appetite", "pride",   "homesickness"};
+    return motives;
+}
+
+// A wake response that writes a focus and a journal — enough to tell "the
+// proposal arrived intact" from "something arrived".
+static HttpResponse cannedWake(const std::string& focus) {
+    return bardCanned(nlohmann::json::array(
+        {bardToolUse("write_focus", {{"text", focus}}),
+         bardToolUse("write_journal", {{"text", "a note the bard kept"}})}));
+}
+
+static BardJob bardTestJob(int64_t snapshotTurn) {
+    BardJob job;
+    job.requestBody = R"({"model":"test","messages":[]})";
+    job.motives = bardTestMotives();
+    job.snapshotTurn = snapshotTurn;
+    return job;
+}
+
+// Step 5, REQ-BARD-WAKE-13/-14/-16/-19/-25: the job, the state machine, and the
+// worker body — against fake transports and hand-built jobs, with no database
+// and no engine wiring anywhere. Modeled on testPregenWorker, and every wait
+// below is on a condition this test itself satisfies: no sleeps, so a hang here
+// is a design bug to be read out of the code rather than a timing knob.
+static void testBardWorkerJobs() {
+    const ScopedEnvVar keyGuard("ANTHROPIC_API_KEY");
+    const ScopedEnvVar aiGuard("TEXTWORLD_AI");
+    const ScopedEnvVar bardGuardEnv("TEXTWORLD_BARD");
+
+    setenv("ANTHROPIC_API_KEY", "test-key-never-used", 1);
+    unsetenv("TEXTWORLD_AI");
+    unsetenv("TEXTWORLD_BARD");
+    bardRefreshEnabledForTest();
+
+    // --- (a) one wake, end to end -------------------------------------------
+    {
+        bardResetForTest();
+        bardSetWorkerTransportForTest(
+            [](const std::string&) { return cannedWake("the annex is watching"); });
+        bardStart();
+        CHECK(bardStateNow() == BardState::Idle);
+
+        CHECK(bardSubmit(bardTestJob(11)));
+        spinUntil([] { return bardStateNow() == BardState::Ready; });
+
+        // Taken ONCE: the proposal is handed over, not copied out.
+        const std::optional<WakeProposal> first = bardTakeReady();
+        CHECK(first.has_value());
+        CHECK(first->hasFocus);
+        CHECK(first->focus == "the annex is watching");
+        CHECK(first->hasJournal);
+        CHECK(bardStateNow() == BardState::Idle);
+
+        // …and only once. A second take finds nothing rather than the same
+        // wake again, which is what stops one wake committing twice.
+        CHECK(!bardTakeReady().has_value());
+        CHECK(bardStateNow() == BardState::Idle);
+    }
+
+    // --- (b) singleness, and (c) the dirty flag -----------------------------
+    // REQ-BARD-WAKE-13: at most ONE call in flight, process-wide. Held mid-call
+    // so the claim is tested against a wake that is genuinely running, not
+    // against one that happened to finish first.
+    {
+        bardResetForTest();
+        BlockingTransport blocking;
+        blocking.canned = cannedWake("held");
+        bardSetWorkerTransportForTest(
+            [&blocking](const std::string& body) { return blocking(body); });
+        bardStart();
+
+        CHECK(bardSubmit(bardTestJob(20)));
+        spinUntil([&blocking] { return blocking.callCount() == 1; });
+        CHECK(bardStateNow() == BardState::Running);
+
+        // The flag starts clear, so the three refusals below are what set it.
+        CHECK(!bardTakeDirty());
+
+        CHECK(!bardSubmit(bardTestJob(21)));
+        CHECK(!bardSubmit(bardTestJob(22)));
+        CHECK(!bardSubmit(bardTestJob(23)));
+
+        // (c) REQ-BARD-WAKE-14: three refusals, ONE flag. It is a flag and not
+        // a counter on purpose — the bard owes the world one further look,
+        // however many triggers it missed.
+        CHECK(bardTakeDirty());
+        CHECK(!bardTakeDirty());  // consumed
+
+        // (d) The drain hook: release only once a waiter is PROVABLY inside the
+        // wait. Releasing before that would let the wake finish first and turn
+        // this into a test of scheduling luck.
+        std::thread drain([] { bardWaitForIdleForTest(); });
+        spinUntil([] { return bardWaitingCountForTest() == 1; });
+        CHECK(bardWaitingCountForTest() == 1);
+        CHECK(bardStateNow() == BardState::Running);  // still held
+
+        blocking.release();
+        drain.join();
+        CHECK(bardWaitingCountForTest() == 0);
+
+        spinUntil([] { return bardStateNow() == BardState::Ready; });
+        // Exactly one call, and never two at once: the three refused submits
+        // cost nothing, and the worker is serial.
+        CHECK(blocking.callCount() == 1);
+        CHECK(!blocking.concurrentEntry);
+        CHECK(bardTakeReady().has_value());
+    }
+
+    // --- (e) a failing wake poisons nothing ---------------------------------
+    // Both failure modes leave the slot Idle, the thread alive, and the next
+    // wake acceptable (REQ-BARD-WAKE-23). A wake that fails must cost the
+    // session nothing but the call.
+    {
+        // A transport that THROWS. There is no caller on that thread to catch
+        // it, so an escape here would kill the process.
+        bardResetForTest();
+        bardSetWorkerTransportForTest([](const std::string&) -> HttpResponse {
+            throw std::runtime_error("transport exploded");
+        });
+        bardStart();
+        CHECK(bardSubmit(bardTestJob(30)));
+        spinUntil([] { return bardStateNow() == BardState::Idle; });
+        CHECK(bardWorkerRunning());
+        CHECK(!bardTakeReady().has_value());
+        CHECK(bardSubmit(bardTestJob(31)));  // accepted again
+        bardResetForTest();
+    }
+    {
+        // A NON-200. The gate rejects it, which is a rejection and not a fault.
+        bardResetForTest();
+        bardSetWorkerTransportForTest([](const std::string&) {
+            HttpResponse r;
+            r.status = 503;
+            r.body = "upstream unavailable";
+            return r;
+        });
+        bardStart();
+        CHECK(bardSubmit(bardTestJob(40)));
+        spinUntil([] { return bardStateNow() == BardState::Idle; });
+        CHECK(bardWorkerRunning());
+        CHECK(!bardTakeReady().has_value());
+        CHECK(bardSubmit(bardTestJob(41)));
+        bardResetForTest();
+    }
+
+    // A response calling NO tool is a SUCCESSFUL, EMPTY wake — the bard
+    // declining to act. It reaches Ready like any other, and committing it is a
+    // no-op. Treating this as a failure is the single most likely misreading.
+    {
+        bardResetForTest();
+        bardSetWorkerTransportForTest([](const std::string&) {
+            return bardCanned(nlohmann::json::array());
+        });
+        bardStart();
+        CHECK(bardSubmit(bardTestJob(45)));
+        spinUntil([] { return bardStateNow() == BardState::Ready; });
+        const std::optional<WakeProposal> empty = bardTakeReady();
+        CHECK(empty.has_value());
+        CHECK(!empty->hasFocus);
+        CHECK(!empty->hasJournal);
+        CHECK(empty->appended.empty());
+        CHECK(empty->seededHandles.empty());
+        bardResetForTest();
+    }
+
+    // --- (f) stopping with a wake in flight ---------------------------------
+    // In production g_stopping is the worker client's ABORT flag, so libcurl
+    // abandons the transfer at its next progress callback rather than waiting
+    // out the timeout (REQ-BARD-WAKE-20). A hermetic suite has no libcurl to
+    // abort, so what is asserted here is the half that is ours: bardStop()
+    // COMPLETES rather than deadlocking against a worker that needs the mutex
+    // to finish its iteration. stopWorker takes no lock around the join for
+    // exactly this reason, and this is the test that fails if that changes.
+    {
+        bardResetForTest();
+        BlockingTransport blocking;
+        blocking.canned = cannedWake("in flight at shutdown");
+        bardSetWorkerTransportForTest(
+            [&blocking](const std::string& body) { return blocking(body); });
+        bardStart();
+        CHECK(bardSubmit(bardTestJob(50)));
+        spinUntil([&blocking] { return blocking.callCount() == 1; });
+
+        std::thread stopper([] { bardStop(); });
+        blocking.release();  // stands in for libcurl abandoning the transfer
+        stopper.join();      // returns => the stop completed
+        CHECK(!bardWorkerRunning());
+    }
+
+    // --- (g) a Ready result is DISCARDED at stop (REQ-BARD-WAKE-25) ----------
+    // Nothing is persisted across a session boundary. The next session's first
+    // irreversible event queues a fresh wake against a world that has meanwhile
+    // moved on, which is a better wake than this stale one.
+    {
+        bardResetForTest();
+        bardSetWorkerTransportForTest(
+            [](const std::string&) { return cannedWake("never committed"); });
+        bardStart();
+        CHECK(bardSubmit(bardTestJob(60)));
+        spinUntil([] { return bardStateNow() == BardState::Ready; });
+
+        bardStop();
+        CHECK(bardStateNow() == BardState::Idle);
+        CHECK(!bardTakeReady().has_value());
+    }
+
+    // With the bard OFF, a submit is refused outright — no slot movement, no
+    // thread, nothing to take (REQ-BARD-WAKE-20).
+    {
+        bardResetForTest();
+        setenv("TEXTWORLD_BARD", "0", 1);
+        bardRefreshEnabledForTest();
+        CHECK(!bardSubmit(bardTestJob(70)));
+        CHECK(bardStateNow() == BardState::Idle);
+        unsetenv("TEXTWORLD_BARD");
+        bardRefreshEnabledForTest();
+    }
+
+    bardResetForTest();
+}
+
+// A well-formed overture response: two entries and a journal.
+static HttpResponse cannedOverture(const std::vector<std::string>& handles) {
+    nlohmann::json input;
+    input["entries"] = nlohmann::json::array();
+    for (const std::string& h : handles) input["entries"].push_back(bardEntry(h));
+    input["journal"] = "the school, as I first imagined it";
+    return bardCanned(
+        nlohmann::json::array({bardToolUse("write_catalog", input)}));
+}
+
+// Step 6, REQ-BARD-WAKE-2..-7: the overture. One blocking call on the main
+// thread, run once per world file, that can fail in any way at all without
+// costing the session anything but an empty catalog.
+static void testBardOverture() {
+    const ScopedEnvVar keyGuard("ANTHROPIC_API_KEY");
+    const ScopedEnvVar aiGuard("TEXTWORLD_AI");
+    const ScopedEnvVar bardGuardEnv("TEXTWORLD_BARD");
+
+    setenv("ANTHROPIC_API_KEY", "test-key-never-used", 1);
+    unsetenv("TEXTWORLD_AI");
+    unsetenv("TEXTWORLD_BARD");
+    bardRefreshEnabledForTest();
+
+    const auto catalogCount = [](Db& db) {
+        return queryInt(db, "SELECT COUNT(*) FROM catalog");
+    };
+    const auto journalOf = [](Db& db) {
+        return queryText(db, "SELECT value FROM meta WHERE key = 'bard_journal'");
+    };
+
+    // --- spec test 6: ONCE per world file ----------------------------------
+    {
+        const TempDbFile worldPath("textworld_bard_overture_tests.db");
+
+        int calls = 0;
+        const HttpTransport counting = [&calls](const std::string&) {
+            ++calls;
+            return cannedOverture({"t0_scribe", "t0_bellringer"});
+        };
+
+        {
+            OpenedWorld world = openWorld(worldPath.string(), "tests/combat_fixture.sql");
+            CHECK(world.created);
+            bardOverture(world.db, &counting);
+            CHECK(calls == 1);
+            CHECK(catalogCount(world.db) == 2);
+            CHECK(journalOf(world.db) == "the school, as I first imagined it");
+            CHECK(queryInt(world.db,
+                           "SELECT COUNT(*) FROM catalog WHERE handle = 't0_scribe'") == 1);
+        }
+
+        // Reopening the SAME path: not created, so main() never calls the
+        // overture, and the transport is invoked ZERO further times. The
+        // condition is driven off OpenedWorld::created exactly as main() does.
+        {
+            OpenedWorld world = openWorld(worldPath.string(), "tests/combat_fixture.sql");
+            CHECK(!world.created);
+            if (world.created) bardOverture(world.db, &counting);
+            CHECK(calls == 1);              // still one, for the file's lifetime
+            CHECK(catalogCount(world.db) == 2);  // and the cast survived
+        }
+    }
+
+    // --- spec test 7: every failure mode leaves an empty catalog ------------
+    // Four ways for the call to fail, and none of them may throw or write.
+    {
+        struct Arm {
+            const char* name;
+            HttpTransport transport;
+        };
+        std::vector<Arm> arms;
+        arms.push_back({"non-200", [](const std::string&) {
+                            HttpResponse r;
+                            r.status = 503;
+                            r.body = "upstream unavailable";
+                            return r;
+                        }});
+        arms.push_back({"throws", [](const std::string&) -> HttpResponse {
+                            throw std::runtime_error("transport exploded");
+                        }});
+        arms.push_back({"unparseable", [](const std::string&) {
+                            HttpResponse r;
+                            r.status = 200;
+                            r.body = "not json at all {{{";
+                            return r;
+                        }});
+        arms.push_back({"no tool call", [](const std::string&) {
+                            return bardCanned(nlohmann::json::array());
+                        }});
+
+        for (const Arm& arm : arms) {
+            const TempDbFile worldPath("textworld_bard_overture_fail.db");
+            OpenedWorld world = openWorld(worldPath.string(), "tests/combat_fixture.sql");
+            Db& db = world.db;
+
+            bardOverture(db, &arm.transport);  // must not throw
+
+            CHECK(catalogCount(db) == 0);
+            CHECK(journalOf(db).empty());
+
+            // And the game still plays. Driven with tickT + a fake transport,
+            // which is what makes this a statement about the SESSION rather
+            // than about bardOverture's return.
+            const int64_t turnBefore = queryInt(
+                db, "SELECT value FROM meta WHERE key = 'turn'");
+            const HttpTransport fake = [](const std::string&) {
+                return cannedCreateRoom("unused", "unused");
+            };
+            tickT(db, Action{Verb::Look, 0, ""}, fake);
+            CHECK(queryInt(db, "SELECT value FROM meta WHERE key = 'turn'") ==
+                  turnBefore + 1);
+            CHECK(!render(db, turnBefore + 1).empty());
+        }
+    }
+
+    // --- spec test 8: ONE transaction, all or nothing (REQ-BARD-WAKE-7) -----
+    // Admission is made to throw MID-WAY by a trigger that aborts on the second
+    // entry's handle — a genuine engine fault, which is the only thing that can
+    // reach past catalogEntryRefusal's pre-flight. All three entries must be
+    // absent afterwards, not merely the one that failed.
+    {
+        const TempDbFile worldPath("textworld_bard_overture_txn.db");
+        OpenedWorld world = openWorld(worldPath.string(), "tests/combat_fixture.sql");
+        Db& db = world.db;
+        db.exec(
+            "CREATE TRIGGER bard_overture_boom BEFORE INSERT ON catalog "
+            "WHEN NEW.handle = 'boom' BEGIN SELECT RAISE(ABORT, 'boom'); END");
+
+        const HttpTransport t = [](const std::string&) {
+            return cannedOverture({"first_ok", "boom", "third_ok"});
+        };
+        bardOverture(db, &t);
+
+        CHECK(catalogCount(db) == 0);  // not one, not two — zero
+        CHECK(journalOf(db).empty());
+
+        // bardOverture RETURNED rather than merely not crashing: asserted by
+        // executing a statement after the call, on the same handle.
+        CHECK(queryInt(db, "SELECT COUNT(*) FROM meta") > 0);
+    }
+
+    // --- micro-decision 15: the BUILDERS are inside the guard ----------------
+    // Not merely the transport call. With motive_catalog gone, motiveKeys and
+    // buildOvertureContext are ordinary db.hpp callers that throw — and an
+    // escape from here would reach main()'s catch and end the session on world
+    // creation, which is the exact inverse of the degradation claim.
+    {
+        const TempDbFile worldPath("textworld_bard_overture_builder.db");
+        OpenedWorld world = openWorld(worldPath.string(), "tests/combat_fixture.sql");
+        Db& db = world.db;
+        db.exec("DROP TABLE motive_catalog");
+
+        int calls = 0;
+        const HttpTransport counting = [&calls](const std::string&) {
+            ++calls;
+            return cannedOverture({"never_built"});
+        };
+        bardOverture(db, &counting);  // must not throw
+
+        CHECK(catalogCount(db) == 0);
+        CHECK(journalOf(db).empty());
+        CHECK(queryInt(db, "SELECT COUNT(*) FROM meta") > 0);  // returned
+    }
+
+    // --- spec test 12b: disabled means NO CALL AT ALL -----------------------
+    // Not "a call whose result is discarded" — the transport is never even
+    // constructed, and the counting transport below proves it was never run.
+    {
+        const TempDbFile worldPath("textworld_bard_overture_off.db");
+        OpenedWorld world = openWorld(worldPath.string(), "tests/combat_fixture.sql");
+        Db& db = world.db;
+
+        int calls = 0;
+        const HttpTransport counting = [&calls](const std::string&) {
+            ++calls;
+            return cannedOverture({"never_asked"});
+        };
+
+        // AI off (no key), bard on.
+        unsetenv("ANTHROPIC_API_KEY");
+        bardRefreshEnabledForTest();
+        CHECK(!aiNarrationEnabled());
+        bardOverture(db, &counting);
+        CHECK(calls == 0);
+        CHECK(catalogCount(db) == 0);
+
+        // AI on, bard off.
+        setenv("ANTHROPIC_API_KEY", "test-key-never-used", 1);
+        setenv("TEXTWORLD_BARD", "0", 1);
+        bardRefreshEnabledForTest();
+        CHECK(!bardEnabled());
+        bardOverture(db, &counting);
+        CHECK(calls == 0);
+        CHECK(catalogCount(db) == 0);
+
+        unsetenv("TEXTWORLD_BARD");
+        bardRefreshEnabledForTest();
+    }
+}
+
+// Advance `n` turns with no qualifying event, so the rate ceiling stops
+// masking whatever the caller is actually testing. tickT + a fake transport,
+// never runTurn: the bard requires aiNarrationEnabled(), and runTurn with
+// narration on reaches the PRODUCTION resolver and prose transports, which the
+// suite forbids.
+static void bardAdvanceTurns(Db& db, int n) {
+    const HttpTransport fake = [](const std::string&) {
+        return cannedCreateRoom("unused", "unused");
+    };
+    for (int i = 0; i < n; ++i) tickT(db, Action{Verb::Look, 0, ""}, fake);
+}
+
+// Step 7, REQ-BARD-WAKE-8..-12: trigger evaluation — the ceiling, the query,
+// the snapshot, the stamp, and the submit, in that order, because the order IS
+// the requirement.
+static void testBardTrigger() {
+    const ScopedEnvVar keyGuard("ANTHROPIC_API_KEY");
+    const ScopedEnvVar aiGuard("TEXTWORLD_AI");
+    const ScopedEnvVar bardGuardEnv("TEXTWORLD_BARD");
+
+    setenv("ANTHROPIC_API_KEY", "test-key-never-used", 1);
+    unsetenv("TEXTWORLD_AI");
+    unsetenv("TEXTWORLD_BARD");
+    bardRefreshEnabledForTest();
+
+    const auto wakeStamp = [](Db& db) {
+        return queryInt(db, "SELECT value FROM meta WHERE key = 'bard_last_wake_turn'");
+    };
+    const auto turnOf = [](Db& db) {
+        return queryInt(db, "SELECT value FROM meta WHERE key = 'turn'");
+    };
+
+    // --- spec test 9: the non-qualifying verbs queue NOTHING ---------------
+    // The whole reversible half of the vocabulary. If any of these ever wakes
+    // the bard, the ceiling is the only thing standing between the player and a
+    // wake on every turn.
+    {
+        const TempDbFile worldPath("textworld_bard_trigger_quiet.db");
+        Db db = openWorld(worldPath.string(), "tests/combat_fixture.sql").db;
+
+        bardResetForTest();
+        std::atomic<int> calls{0};
+        bardSetWorkerTransportForTest([&calls](const std::string&) {
+            ++calls;
+            return cannedWake("should never happen");
+        });
+        bardStart();
+
+        bardAdvanceTurns(db, 10);  // well past the ceiling
+        for (const char* verb : {"moved", "took", "looked", "waited", "failed"}) {
+            appendEvent(db, 3, verb, 0, 0, nullptr);
+            bardAfterTurn(db);
+        }
+        CHECK(bardStateNow() == BardState::Idle);
+        CHECK(calls.load() == 0);
+        CHECK(wakeStamp(db) == 0);  // never stamped, because never queued
+        bardResetForTest();
+    }
+
+    // --- spec test 10: one sub-case PER qualifying verb ---------------------
+    // Four separate worlds, so no verb can pass on another's leftovers.
+    for (const char* verb : {"generated", "defeated", "learned", "materialized"}) {
+        const TempDbFile worldPath("textworld_bard_trigger_verb.db");
+        Db db = openWorld(worldPath.string(), "tests/combat_fixture.sql").db;
+
+        bardResetForTest();
+        std::atomic<int> calls{0};
+        bardSetWorkerTransportForTest([&calls](const std::string&) {
+            ++calls;
+            return cannedWake("woken");
+        });
+        bardStart();
+
+        bardAdvanceTurns(db, 10);
+        appendEvent(db, 3, verb, 0, 0, nullptr);
+        const int64_t at = turnOf(db);
+        bardAfterTurn(db);
+
+        // Exactly one wake, and the stamp landed on the QUEUEING turn.
+        bardWaitForIdleForTest();
+        CHECK(calls.load() == 1);
+        CHECK(wakeStamp(db) == at);
+        bardResetForTest();
+    }
+
+    // --- spec test 11: the ceiling, checked FIRST (REQ-BARD-WAKE-9) ---------
+    {
+        const TempDbFile worldPath("textworld_bard_trigger_ceiling.db");
+        Db db = openWorld(worldPath.string(), "tests/combat_fixture.sql").db;
+
+        bardResetForTest();
+        std::atomic<int> calls{0};
+        bardSetWorkerTransportForTest([&calls](const std::string&) {
+            ++calls;
+            return cannedWake("woken");
+        });
+        bardStart();
+
+        // Inside the gap: turn - bard_last_wake_turn < kBardMinTurnGap, and a
+        // fully qualifying event queues NOTHING.
+        bardAdvanceTurns(db, static_cast<int>(kBardMinTurnGap) - 1);
+        CHECK(turnOf(db) - wakeStamp(db) < kBardMinTurnGap);
+        appendEvent(db, 3, "defeated", 0, 0, nullptr);
+        bardAfterTurn(db);
+        CHECK(calls.load() == 0);
+        CHECK(bardStateNow() == BardState::Idle);
+
+        // Past the gap, the SAME event queues — it was deferred, not dropped,
+        // because the stamp is still 0 and the query's window still contains it.
+        bardAdvanceTurns(db, 2);
+        CHECK(turnOf(db) - wakeStamp(db) >= kBardMinTurnGap);
+        bardAfterTurn(db);
+        bardWaitForIdleForTest();
+        CHECK(calls.load() == 1);
+        bardResetForTest();
+    }
+
+    // --- spec test 12: stamped at QUEUE time, not at completion -------------
+    // Asserted while the transport is still INSIDE the call, which is what
+    // makes "stamped at queue time" a fact rather than a comment. If the stamp
+    // moved to completion, an in-flight wake could re-trigger itself.
+    {
+        const TempDbFile worldPath("textworld_bard_trigger_stamp.db");
+        Db db = openWorld(worldPath.string(), "tests/combat_fixture.sql").db;
+
+        bardResetForTest();
+        BlockingTransport blocking;
+        blocking.canned = cannedWake("held mid-call");
+        bardSetWorkerTransportForTest(
+            [&blocking](const std::string& body) { return blocking(body); });
+        bardStart();
+
+        bardAdvanceTurns(db, 10);
+        appendEvent(db, 3, "generated", 0, 0, nullptr);
+        const int64_t at = turnOf(db);
+        bardAfterTurn(db);
+
+        spinUntil([&blocking] { return blocking.callCount() == 1; });
+        CHECK(bardStateNow() == BardState::Running);
+        CHECK(wakeStamp(db) == at);  // ALREADY stamped, with the call in flight
+
+        // And the in-flight wake cannot re-trigger itself off its own window:
+        // a further evaluation while Running queues nothing.
+        bardAfterTurn(db);
+        CHECK(blocking.callCount() == 1);
+
+        blocking.release();
+        bardWaitForIdleForTest();
+        bardResetForTest();
+    }
+
+    // --- spec test 12a: the player's text is COMPLETE before the bard runs --
+    // The bard's cost is paid after the turn, never inside it. Captured as the
+    // rendered bytes at the moment bardAfterTurn is entered, compared against a
+    // world where the bard never existed.
+    {
+        std::string bardOffBytes;
+        {
+            const TempDbFile offPath("textworld_bard_trigger_12a_off.db");
+            Db db = openWorld(offPath.string(), "tests/combat_fixture.sql").db;
+            bardAdvanceTurns(db, 10);
+            appendEvent(db, 3, "defeated", 0, 0, nullptr);
+            bardOffBytes = render(db, queryInt(
+                db, "SELECT value FROM meta WHERE key = 'turn'"));
+        }
+
+        const TempDbFile worldPath("textworld_bard_trigger_12a.db");
+        Db db = openWorld(worldPath.string(), "tests/combat_fixture.sql").db;
+
+        bardResetForTest();
+        BlockingTransport blocking;
+        blocking.canned = cannedWake("held");
+        bardSetWorkerTransportForTest(
+            [&blocking](const std::string& body) { return blocking(body); });
+        bardStart();
+
+        bardAdvanceTurns(db, 10);
+        appendEvent(db, 3, "defeated", 0, 0, nullptr);
+
+        // The bytes the player has, at the instant the hook is entered…
+        const std::string shown = render(db, turnOf(db));
+        CHECK(shown == bardOffBytes);
+        CHECK(blocking.callCount() == 0);  // …and nothing has been called yet
+
+        bardAfterTurn(db);
+        spinUntil([&blocking] { return blocking.callCount() == 1; });
+        // The text did not change because the bard ran.
+        CHECK(render(db, turnOf(db)) == shown);
+
+        blocking.release();
+        bardWaitForIdleForTest();
+        bardResetForTest();
+    }
+
+    // --- micro-decision 15: a broken evaluation cannot cost a turn ----------
+    // With the stamp row deleted the evaluation path still reads it as 0 rather
+    // than throwing, so the throw is induced where it can actually happen: the
+    // events table itself. Whatever breaks, the turn the player already paid
+    // for must survive it.
+    {
+        const TempDbFile worldPath("textworld_bard_trigger_broken.db");
+        Db db = openWorld(worldPath.string(), "tests/combat_fixture.sql").db;
+
+        bardResetForTest();
+        std::atomic<int> calls{0};
+        bardSetWorkerTransportForTest([&calls](const std::string&) {
+            ++calls;
+            return cannedWake("never");
+        });
+        bardStart();
+
+        bardAdvanceTurns(db, 10);
+        const int64_t turnBefore = turnOf(db);
+        db.exec("DROP TABLE events");  // the trigger query now throws
+
+        bardAfterTurn(db);  // must not throw
+
+        // The session continues: statements still execute on the same handle,
+        // the turn is exactly where the tick left it, and nothing was queued.
+        // (render is not called here — it reads `events` too, so it would be
+        // asserting the fixture's damage rather than the bard's behavior.)
+        CHECK(queryInt(db, "SELECT COUNT(*) FROM meta") > 0);
+        CHECK(turnOf(db) == turnBefore);
+        CHECK(calls.load() == 0);
+        CHECK(bardStateNow() == BardState::Idle);
+        bardResetForTest();
+    }
+}
+
+// A wake calling all four tools, so a partial application is visible as a
+// partial application rather than as nothing.
+static HttpResponse cannedFullWake(const std::string& focus,
+                                   const std::string& appendHandle,
+                                   const std::string& seedHandle) {
+    nlohmann::json entryInput;
+    entryInput["entry"] = bardEntry(appendHandle);
+    return bardCanned(nlohmann::json::array(
+        {bardToolUse("write_focus", {{"text", focus}}),
+         bardToolUse("write_journal", {{"text", "what I made of it"}}),
+         bardToolUse("append_catalog", entryInput),
+         bardToolUse("mark_seeded", {{"handle", seedHandle}})}));
+}
+
+// Run one wake all the way to Ready and leave it there, uncommitted.
+static void bardRunOneWakeToReady(Db& db, const HttpResponse& response) {
+    bardResetForTest();
+    bardSetWorkerTransportForTest(
+        [response](const std::string&) { return response; });
+    bardStart();
+    bardAdvanceTurns(db, 10);
+    appendEvent(db, 3, "defeated", 0, 0, nullptr);
+    bardAfterTurn(db);  // queues
+    spinUntil([] { return bardStateNow() == BardState::Ready; });
+}
+
+// Step 8, REQ-BARD-WAKE-21..-24: committing a ready result. Its own
+// transaction, run before the evaluation, and re-checked against the world as
+// it is NOW rather than as it was when the wake was snapshotted.
+static void testBardCommit() {
+    const ScopedEnvVar keyGuard("ANTHROPIC_API_KEY");
+    const ScopedEnvVar aiGuard("TEXTWORLD_AI");
+    const ScopedEnvVar bardGuardEnv("TEXTWORLD_BARD");
+
+    setenv("ANTHROPIC_API_KEY", "test-key-never-used", 1);
+    unsetenv("TEXTWORLD_AI");
+    unsetenv("TEXTWORLD_BARD");
+    bardRefreshEnabledForTest();
+
+    const auto turnOf = [](Db& db) {
+        return queryInt(db, "SELECT value FROM meta WHERE key = 'turn'");
+    };
+    const auto stampOf = [](Db& db) {
+        return queryInt(db, "SELECT value FROM meta WHERE key = 'bard_last_wake_turn'");
+    };
+    const auto focusOf = [](Db& db) {
+        return queryText(db, "SELECT value FROM meta WHERE key = 'bard_focus'");
+    };
+    const auto journalOf = [](Db& db) {
+        return queryText(db, "SELECT value FROM meta WHERE key = 'bard_journal'");
+    };
+    // A canonical snapshot of everything a wake may write, compared as ONE
+    // string so a failure prints as a diff rather than as a mystery.
+    const auto storySnapshot = [&](Db& db) {
+        std::string out;
+        Stmt s = db.prepare(
+            "SELECT id, kind, handle, name, blurb, motive, tier, seeded "
+            "FROM catalog ORDER BY id");
+        while (s.step()) {
+            for (int c = 0; c < 8; ++c) out += s.colText(c) + "\x1f";
+            out += "\x1e";
+        }
+        return out + "focus=" + focusOf(db) + "\x1e" + "journal=" + journalOf(db);
+    };
+
+    // --- spec test 16: a wake is NOT a turn (REQ-BARD-WAKE-21, -22) ---------
+    {
+        const TempDbFile worldPath("textworld_bard_commit_ok.db");
+        Db db = openWorld(worldPath.string(), "tests/combat_fixture.sql").db;
+        // Something for mark_seeded to resolve to.
+        const int64_t existing = writeCatalogEntry(db, "character", "t0_seed_me",
+                                                   "seed me", "an entry to latch",
+                                                   "curiosity", 0);
+        CHECK(existing > 0);
+
+        bardRunOneWakeToReady(db, cannedFullWake("the annex is watching",
+                                                 "t0_appended", "t0_seed_me"));
+
+        const int64_t turnBefore = turnOf(db);
+        const int64_t stampBefore = stampOf(db);
+        bardAfterTurn(db);  // commits the ready result
+
+        // meta.turn is BYTE-IDENTICAL: committing a wake does not advance the
+        // world's clock, because a wake is not a turn.
+        CHECK(turnOf(db) == turnBefore);
+        // The stamp stays at its QUEUE-time value; commit never moves it.
+        CHECK(stampOf(db) == stampBefore);
+
+        // …and the wake's writes are all present.
+        CHECK(focusOf(db) == "the annex is watching");
+        CHECK(journalOf(db) == "what I made of it");
+        CHECK(queryInt(db,
+                       "SELECT COUNT(*) FROM catalog WHERE handle = 't0_appended'") == 1);
+        CHECK(queryInt(db, "SELECT seeded FROM catalog WHERE handle = 't0_seed_me'") == 1);
+
+        // Taken, not left: a committed wake cannot be committed twice.
+        CHECK(bardStateNow() != BardState::Ready);
+        bardResetForTest();
+    }
+
+    // --- spec test 17: a throw at commit rolls back EVERYTHING --------------
+    // A genuine engine fault mid-application — the only kind that reaches past
+    // catalogEntryRefusal's pre-flight — must leave the story side exactly as
+    // it was, not partly written (REQ-BARD-WAKE-23).
+    {
+        const TempDbFile worldPath("textworld_bard_commit_throw.db");
+        Db db = openWorld(worldPath.string(), "tests/combat_fixture.sql").db;
+        writeCatalogEntry(db, "character", "t0_present", "present",
+                          "an entry that was already here", "pride", 0);
+        writeBardFocus(db, "the focus before the wake");
+        writeBardJournal(db, "the journal before the wake");
+
+        db.exec(
+            "CREATE TRIGGER bard_commit_boom BEFORE INSERT ON catalog "
+            "WHEN NEW.handle = 'boom' BEGIN SELECT RAISE(ABORT, 'boom'); END");
+
+        bardRunOneWakeToReady(db, cannedFullWake("a focus that never lands",
+                                                 "boom", "t0_present"));
+
+        const std::string before = storySnapshot(db);
+        const int64_t stampBefore = stampOf(db);
+        const int64_t turnBefore = turnOf(db);
+
+        bardAfterTurn(db);  // must not throw
+
+        // Byte-identical: the focus and journal that applyWakeProposal writes
+        // BEFORE the failing entry are rolled back along with it.
+        CHECK(storySnapshot(db) == before);
+        CHECK(stampOf(db) == stampBefore);  // not advanced on failure
+        CHECK(turnOf(db) == turnBefore);
+
+        // And a failed commit poisons nothing: the state is back to Idle and
+        // the stamp is unmoved, so the next qualifying event past the ceiling
+        // queues a FRESH wake. (The worker keeps the transport it was started
+        // with — workerMain copies it at thread start — so what changes here is
+        // the WORLD: the fault is removed, and the same wake now lands.)
+        CHECK(bardStateNow() == BardState::Idle);
+        db.exec("DROP TRIGGER bard_commit_boom");
+        bardAdvanceTurns(db, static_cast<int>(kBardMinTurnGap) + 1);
+        appendEvent(db, 3, "learned", 0, 0, nullptr);
+        bardAfterTurn(db);
+        spinUntil([] { return bardStateNow() == BardState::Ready; });
+        bardAfterTurn(db);
+        CHECK(focusOf(db) == "a focus that never lands");
+        CHECK(queryInt(db, "SELECT COUNT(*) FROM catalog WHERE handle = 'boom'") == 1);
+        bardResetForTest();
+    }
+
+    // --- spec test 18: the snapshot's AGE does not matter -------------------
+    // The re-check REQ-BARD-WAKE-24 asks for happens at commit, live: an
+    // appended handle taken in the meantime is refused, a mark_seeded handle
+    // that no longer resolves is ignored, and the REST of the wake still lands.
+    {
+        const TempDbFile worldPath("textworld_bard_commit_stale.db");
+        Db db = openWorld(worldPath.string(), "tests/combat_fixture.sql").db;
+
+        // The wake proposes 'contested' and marks 'vanished' as seeded.
+        nlohmann::json entryInput;
+        entryInput["entry"] = bardEntry("contested");
+        const HttpResponse stale = bardCanned(nlohmann::json::array(
+            {bardToolUse("write_focus", {{"text", "the focus still lands"}}),
+             bardToolUse("write_journal", {{"text", "the journal still lands"}}),
+             bardToolUse("append_catalog", entryInput),
+             bardToolUse("mark_seeded", {{"handle", "vanished"}})}));
+
+        bardRunOneWakeToReady(db, stale);
+
+        // …and only NOW, with the wake already snapshotted and waiting, does
+        // the world move underneath it: another entry takes the handle, and
+        // 'vanished' never existed to begin with.
+        writeCatalogEntry(db, "character", "contested", "the other one",
+                          "an entry that got there first", "rivalry", 0);
+        bardAdvanceTurns(db, 20);  // many turns older than the snapshot
+
+        bardAfterTurn(db);
+
+        // The two impossible parts are dropped…
+        CHECK(queryInt(db,
+                       "SELECT COUNT(*) FROM catalog WHERE handle = 'contested'") == 1);
+        CHECK(queryText(db,
+                        "SELECT blurb FROM catalog WHERE handle = 'contested'") ==
+              "an entry that got there first");
+        CHECK(queryInt(db, "SELECT COUNT(*) FROM catalog WHERE handle = 'vanished'") == 0);
+
+        // …and everything else in the same wake still applies. A stale part
+        // costs its own part and nothing more.
+        CHECK(focusOf(db) == "the focus still lands");
+        CHECK(journalOf(db) == "the journal still lands");
+        bardResetForTest();
+    }
+
+    // An EMPTY wake — the bard declining to act — commits cleanly and changes
+    // nothing. It is a success, and the commit path must treat it as one.
+    {
+        const TempDbFile worldPath("textworld_bard_commit_empty.db");
+        Db db = openWorld(worldPath.string(), "tests/combat_fixture.sql").db;
+
+        bardResetForTest();
+        bardSetWorkerTransportForTest([](const std::string&) {
+            return bardCanned(nlohmann::json::array());
+        });
+        bardStart();
+        bardAdvanceTurns(db, 10);
+        appendEvent(db, 3, "defeated", 0, 0, nullptr);
+        bardAfterTurn(db);
+        spinUntil([] { return bardStateNow() == BardState::Ready; });
+
+        const std::string before = storySnapshot(db);
+        const int64_t turnBefore = turnOf(db);
+        bardAfterTurn(db);
+        CHECK(storySnapshot(db) == before);
+        CHECK(turnOf(db) == turnBefore);
+        CHECK(bardStateNow() == BardState::Idle);
+        bardResetForTest();
+    }
+}
+
+// Step 9, REQ-BARD-WAKE-13/-14/-15: coalescing, composed through the ENGINE
+// rather than through the worker alone. Steps 5, 7 and 8 built every piece;
+// what is new here is the claim that the trigger path, the state machine and
+// the commit path together produce ONE call for a burst of events. A defect
+// found here belongs in step 5's or step 7's code, never in a special case.
+static void testBardCoalesce() {
+    const ScopedEnvVar keyGuard("ANTHROPIC_API_KEY");
+    const ScopedEnvVar aiGuard("TEXTWORLD_AI");
+    const ScopedEnvVar bardGuardEnv("TEXTWORLD_BARD");
+
+    setenv("ANTHROPIC_API_KEY", "test-key-never-used", 1);
+    unsetenv("TEXTWORLD_AI");
+    unsetenv("TEXTWORLD_BARD");
+    bardRefreshEnabledForTest();
+
+    const auto turnOf = [](Db& db) {
+        return queryInt(db, "SELECT value FROM meta WHERE key = 'turn'");
+    };
+    const auto stampOf = [](Db& db) {
+        return queryInt(db, "SELECT value FROM meta WHERE key = 'bard_last_wake_turn'");
+    };
+
+    // --- spec tests 13 + 15: three events, three ticks, ONE call ------------
+    {
+        const TempDbFile worldPath("textworld_bard_coalesce_one.db");
+        Db db = openWorld(worldPath.string(), "tests/combat_fixture.sql").db;
+
+        bardResetForTest();
+        BlockingTransport blocking;
+        blocking.canned = cannedWake("one call for three kills");
+        bardSetWorkerTransportForTest(
+            [&blocking](const std::string& body) { return blocking(body); });
+        bardStart();
+
+        bardAdvanceTurns(db, 10);
+
+        // Three defeats across three CONSECUTIVE ticks, each followed by the
+        // post-turn hook exactly as main() does it.
+        for (int i = 0; i < 3; ++i) {
+            bardAdvanceTurns(db, 1);
+            appendEvent(db, 3, "defeated", 0, 0, nullptr);
+            bardAfterTurn(db);
+        }
+
+        // The release happens only once a drain is PROVABLY inside the wait, so
+        // this cannot pass by accident of timing.
+        std::thread drain([] { bardWaitForIdleForTest(); });
+        spinUntil([] { return bardWaitingCountForTest() == 1; });
+        CHECK(blocking.callCount() == 1);
+        CHECK(!blocking.concurrentEntry);
+
+        blocking.release();
+        drain.join();
+        spinUntil([] { return bardStateNow() == BardState::Ready; });
+        CHECK(blocking.callCount() == 1);   // still one, after it finished
+        CHECK(!blocking.concurrentEntry);
+        bardResetForTest();
+    }
+
+    // --- spec test 14: exactly ONE further wake — not zero, not two ---------
+    // The ceiling is deliberately taken out of the picture first, so what is
+    // being measured is the dirty flag and nothing else.
+    {
+        const TempDbFile worldPath("textworld_bard_coalesce_further.db");
+        Db db = openWorld(worldPath.string(), "tests/combat_fixture.sql").db;
+
+        bardResetForTest();
+        BlockingTransport blocking;
+        blocking.canned = cannedWake("the first wake");
+        bardSetWorkerTransportForTest(
+            [&blocking](const std::string& body) { return blocking(body); });
+        bardStart();
+
+        bardAdvanceTurns(db, 10);
+        appendEvent(db, 3, "defeated", 0, 0, nullptr);
+        bardAfterTurn(db);  // wake one, now held mid-call
+        spinUntil([&blocking] { return blocking.callCount() == 1; });
+        const int64_t queuedAt = stampOf(db);
+
+        // A trigger arrives DURING the running wake. Advance well past the
+        // ceiling first, so that the ceiling cannot be what suppresses the
+        // second wake and the flag is doing the work.
+        bardAdvanceTurns(db, static_cast<int>(kBardMinTurnGap) + 2);
+        appendEvent(db, 3, "learned", 0, 0, nullptr);
+        bardAfterTurn(db);            // busy: recorded as the flag, not queued
+        CHECK(blocking.callCount() == 1);
+        CHECK(stampOf(db) == queuedAt);  // nothing was queued, nothing stamped
+
+        // …and two more, to prove the flag is a FLAG and not a counter.
+        appendEvent(db, 3, "materialized", 0, 0, nullptr);
+        bardAfterTurn(db);
+        appendEvent(db, 3, "generated", 0, 0, nullptr);
+        bardAfterTurn(db);
+        CHECK(blocking.callCount() == 1);
+
+        blocking.release();
+        spinUntil([] { return bardStateNow() == BardState::Ready; });
+
+        // The turn after that wake commits: commitReady runs first, then the
+        // evaluation — which is exactly why the further wake lands on THIS turn
+        // rather than the next one.
+        bardAfterTurn(db);
+        spinUntil([&blocking] { return blocking.callCount() == 2; });
+        CHECK(blocking.callCount() == 2);
+
+        blocking.release();  // already released; the second call passes through
+        spinUntil([] { return bardStateNow() == BardState::Ready; });
+        bardAfterTurn(db);   // commit wake two; the ceiling now blocks a third
+
+        // EXACTLY two: not one (the triggers were not lost) and not four (one
+        // per trigger). The bard owes the world one further look, however many
+        // triggers it missed.
+        CHECK(blocking.callCount() == 2);
+        CHECK(bardStateNow() == BardState::Idle);
+        CHECK(!bardTakeDirty());  // and the flag settled clear
+        bardResetForTest();
+    }
+
+    // --- (c) the REALISTIC window: the ceiling MASKING the flag -------------
+    // With the default 5-turn gap against a call that can run for seconds, a
+    // trigger arriving 1–3 turns after the queue returns at the CEILING (step
+    // 7's ordering, which REQ-BARD-WAKE-9 mandates) and never reaches the dirty
+    // branch at all. Without this case, micro-decision 9's "the flag is belt to
+    // the query's braces" claim is untested — and this is the common path, the
+    // one no other sub-case exercises.
+    {
+        const TempDbFile worldPath("textworld_bard_coalesce_masked.db");
+        Db db = openWorld(worldPath.string(), "tests/combat_fixture.sql").db;
+
+        bardResetForTest();
+        BlockingTransport blocking;
+        blocking.canned = cannedWake("the only wake so far");
+        bardSetWorkerTransportForTest(
+            [&blocking](const std::string& body) { return blocking(body); });
+        bardStart();
+
+        bardAdvanceTurns(db, 10);
+        appendEvent(db, 3, "defeated", 0, 0, nullptr);
+        bardAfterTurn(db);
+        spinUntil([&blocking] { return blocking.callCount() == 1; });
+        const int64_t queuedAt = stampOf(db);
+        CHECK(queuedAt == turnOf(db));
+
+        // Triggers at +1, +2, +3 — all INSIDE the gap, so the ceiling returns
+        // before the flag is ever consulted. The flag stays clear.
+        for (int i = 0; i < 3; ++i) {
+            bardAdvanceTurns(db, 1);
+            appendEvent(db, 3, "defeated", 0, 0, nullptr);
+            CHECK(turnOf(db) - stampOf(db) < kBardMinTurnGap);
+            bardAfterTurn(db);
+        }
+        CHECK(blocking.callCount() == 1);
+
+        blocking.release();
+        spinUntil([] { return bardStateNow() == BardState::Ready; });
+        bardAfterTurn(db);  // commit; the ceiling still blocks an evaluation
+
+        // THE POINT: those three events were not lost. Because the stamp was
+        // taken at QUEUE time, they are still inside the trigger query's
+        // window, so the first evaluation past the ceiling finds them — with no
+        // help from the dirty flag, which the ceiling never let anyone read.
+        bardAdvanceTurns(db, static_cast<int>(kBardMinTurnGap) + 1);
+        CHECK(turnOf(db) - stampOf(db) >= kBardMinTurnGap);
+        bardAfterTurn(db);
+        spinUntil([&blocking] { return blocking.callCount() == 2; });
+        CHECK(blocking.callCount() == 2);  // exactly one further wake
+        CHECK(stampOf(db) > queuedAt);
+
+        spinUntil([] { return bardStateNow() == BardState::Ready; });
+        bardResetForTest();
+    }
+}
+
+// --- Step 10: the degradation claim -----------------------------------------
+//
+// "The bard failing never makes the game worse than not having a bard" is the
+// reason this brick has the shape it has, and spec test 21 is where that stops
+// being a sentence in a design. ONE scripted session is run against seven fresh
+// worlds from the same fixture, and every failing arm's concatenated
+// player-facing bytes are compared against the arm where the bard never
+// existed.
+
+struct BardArm {
+    const char* name = "";
+    bool bardOn = true;
+    bool aiOn = true;
+    bool startWorker = true;
+    HttpTransport overtureTransport;  // never null: the suite reaches no
+                                      // production transport, ever
+    HttpTransport wakeTransport;
+    bool boomTrigger = false;  // admission throws at commit
+    bool dropMotives = false;  // the snapshot builders throw at evaluation
+};
+
+// What one arm produced. The bytes are the claim; the other two are the
+// corroborating evidence that the arms really ran the same session.
+struct BardArmResult {
+    std::string bytes;   // every turn's player-facing output, concatenated
+    int64_t turn = 0;    // meta.turn at the end
+    std::string events;  // the whole events log, canonically rendered
+};
+
+// One session, scripted identically for every arm. Returns the concatenation of
+// every turn's player-facing bytes.
+//
+// Turns are driven with tickT + render rather than runTurn (plan micro-decision
+// 16): the bard requires aiNarrationEnabled(), and runTurn with narration on
+// reaches the PRODUCTION resolver and prose transports, which the suite forbids.
+// bardAfterTurn is called after each turn's text is captured, mirroring main().
+static BardArmResult bardDegradationRun(const BardArm& arm) {
+    const ScopedEnvVar keyGuard("ANTHROPIC_API_KEY");
+    const ScopedEnvVar aiGuard("TEXTWORLD_AI");
+    const ScopedEnvVar bardGuardEnv("TEXTWORLD_BARD");
+
+    unsetenv("TEXTWORLD_AI");
+    if (arm.aiOn) {
+        setenv("ANTHROPIC_API_KEY", "test-key-never-used", 1);
+    } else {
+        unsetenv("ANTHROPIC_API_KEY");
+    }
+    if (arm.bardOn) {
+        unsetenv("TEXTWORLD_BARD");
+    } else {
+        setenv("TEXTWORLD_BARD", "0", 1);
+    }
+    bardRefreshEnabledForTest();
+
+    const TempDbFile worldPath("textworld_bard_degrade.db");
+    OpenedWorld world = openWorld(worldPath.string(), "tests/combat_fixture.sql");
+    Db& db = world.db;
+
+    if (arm.dropMotives) db.exec("DROP TABLE motive_catalog");
+    if (arm.boomTrigger) {
+        db.exec(
+            "CREATE TRIGGER bard_degrade_boom BEFORE INSERT ON catalog "
+            "WHEN NEW.handle = 'boom' BEGIN SELECT RAISE(ABORT, 'boom'); END");
+    }
+
+    bardResetForTest();
+    if (arm.wakeTransport) bardSetWorkerTransportForTest(arm.wakeTransport);
+
+    // main()'s shape: the overture at creation, then the workers.
+    if (world.created) bardOverture(db, &arm.overtureTransport);
+    if (arm.startWorker) bardStart();
+
+    // The scripted session: movement, a take, and three irreversible events
+    // spaced so the ceiling is crossed between them and every arm gets real
+    // chances to wake, fail, and commit.
+    const HttpTransport fake = [](const std::string&) {
+        return cannedCreateRoom("unused", "unused");
+    };
+    const char* const injectAt[] = {"defeated", "learned", "materialized"};
+
+    BardArmResult result;
+    for (int turn = 1; turn <= 24; ++turn) {
+        Action a{Verb::Look, 0, ""};
+        if (turn % 8 == 3) a = Action{Verb::Go, 0, "north"};
+        if (turn % 8 == 5) a = Action{Verb::Wait, 0, ""};
+
+        tickT(db, a, fake);
+        const int64_t now = queryInt(db, "SELECT value FROM meta WHERE key = 'turn'");
+
+        // One irreversible event every eighth turn — spaced past
+        // kBardMinTurnGap, so the ceiling is not what is being tested here.
+        if (turn % 8 == 0) appendEvent(db, 3, injectAt[(turn / 8) - 1], 0, 0, nullptr);
+
+        // The player's bytes, captured BEFORE the bard is given the turn —
+        // exactly the order main() uses (flush, then hook).
+        result.bytes += render(db, now);
+        result.bytes += "\x1e";
+
+        bardAfterTurn(db);
+    }
+
+    // Drain whatever is in flight, so an arm cannot "pass" by having its
+    // failure still pending when the comparison happens.
+    if (arm.startWorker) bardWaitForIdleForTest();
+
+    // The corroborating evidence, read while the world file is still open.
+    result.turn = queryInt(db, "SELECT value FROM meta WHERE key = 'turn'");
+    {
+        Stmt s = db.prepare(
+            "SELECT turn, actor, verb, subject, object, IFNULL(detail,'') "
+            "FROM events ORDER BY id");
+        while (s.step()) {
+            for (int c = 0; c < 6; ++c) result.events += s.colText(c) + "\x1f";
+            result.events += "\x1e";
+        }
+    }
+
+    bardResetForTest();
+    return result;
+}
+
+// Spec test 21. Seven arms, one comparison each: a failure prints as a diff of
+// the whole session rather than as a mystery.
+static void testBardDegradation() {
+    // Shared canned responses. Every transport here is counted, so the suite's
+    // "zero network calls" rule is not merely assumed.
+    std::atomic<int> overtureCalls{0};
+    std::atomic<int> wakeCalls{0};
+
+    const HttpTransport goodOverture = [&overtureCalls](const std::string&) {
+        ++overtureCalls;
+        return cannedOverture({"t0_scribe", "t0_bellringer"});
+    };
+    const HttpTransport failedOverture = [&overtureCalls](const std::string&) {
+        ++overtureCalls;
+        HttpResponse r;
+        r.status = 500;
+        r.body = "upstream on fire";
+        return r;
+    };
+    const HttpTransport throwingWake =
+        [&wakeCalls](const std::string&) -> HttpResponse {
+        ++wakeCalls;
+        throw std::runtime_error("wake transport exploded");
+    };
+    const HttpTransport unparseableWake = [&wakeCalls](const std::string&) {
+        ++wakeCalls;
+        HttpResponse r;
+        r.status = 200;
+        r.body = "}{ not json";
+        return r;
+    };
+    const HttpTransport boomWake = [&wakeCalls](const std::string&) {
+        ++wakeCalls;
+        return cannedFullWake("a focus that never lands", "boom", "t0_scribe");
+    };
+
+    // Arm 1, the baseline: the bard never existed. Every other arm is compared
+    // against this.
+    BardArm baseline;
+    baseline.name = "baseline (TEXTWORLD_BARD=0)";
+    baseline.bardOn = false;
+    baseline.startWorker = false;
+    baseline.overtureTransport = goodOverture;
+    const BardArmResult expected = bardDegradationRun(baseline);
+    CHECK(!expected.bytes.empty());
+    CHECK(!expected.events.empty());
+    CHECK(expected.turn == 24);
+
+    std::vector<BardArm> arms;
+    {
+        BardArm a;
+        a.name = "overture failed";
+        a.overtureTransport = failedOverture;
+        a.wakeTransport = unparseableWake;
+        arms.push_back(a);
+    }
+    {
+        BardArm a;
+        a.name = "worker never started";
+        a.startWorker = false;  // AI on, bard on, but no thread
+        a.overtureTransport = goodOverture;
+        a.wakeTransport = unparseableWake;
+        arms.push_back(a);
+    }
+    {
+        BardArm a;
+        a.name = "worker threw";
+        a.overtureTransport = goodOverture;
+        a.wakeTransport = throwingWake;
+        arms.push_back(a);
+    }
+    {
+        BardArm a;
+        a.name = "commit threw";
+        a.overtureTransport = goodOverture;
+        a.wakeTransport = boomWake;
+        a.boomTrigger = true;
+        arms.push_back(a);
+    }
+    {
+        BardArm a;
+        a.name = "every wake failed";
+        a.overtureTransport = goodOverture;
+        a.wakeTransport = unparseableWake;
+        arms.push_back(a);
+    }
+    {
+        // Not in the spec's list: micro-decision 15's failure mode, and the one
+        // that would otherwise reach main()'s catch and END THE RUN rather than
+        // degrade. With motive_catalog gone the snapshot builders throw on
+        // every evaluation.
+        BardArm a;
+        a.name = "evaluation threw";
+        a.overtureTransport = goodOverture;
+        a.wakeTransport = unparseableWake;
+        a.dropMotives = true;
+        arms.push_back(a);
+    }
+
+    for (const BardArm& arm : arms) {
+        const BardArmResult got = bardDegradationRun(arm);
+
+        // ONE string comparison per arm: byte-identical to a session in which
+        // the bard was never built. A failure prints as a diff of the whole
+        // session rather than as a mystery.
+        CHECK(got.bytes == expected.bytes);
+
+        // The world's clock did not move differently…
+        CHECK(got.turn == expected.turn);
+
+        // …and the events log is identical too. The bard is allowed to add
+        // rows in principle; in every arm here it adds NONE, because no arm
+        // commits a wake successfully. An arm that quietly logged something
+        // would pass the bytes comparison and fail this one.
+        CHECK(got.events == expected.events);
+
+        if (got.bytes != expected.bytes || got.turn != expected.turn ||
+            got.events != expected.events) {
+            std::printf("  degradation arm '%s' diverged\n", arm.name);
+        }
+    }
+
+    // THE ANTI-VACUITY CHECK, and the most important assertion in this test
+    // after the comparisons themselves. Seven byte-identical sessions is also
+    // exactly what a bard that never ran would produce, so the arms have to be
+    // shown to have really tried:
+    //
+    //   * FIVE of the seven arms reach the overture's transport. The baseline
+    //     never does — its gate returns before one is touched — and neither
+    //     does "evaluation threw", because dropping motive_catalog makes the
+    //     builders throw BEFORE the call, which is itself the requirement:
+    //     REQ-BARD-WAKE-6 says a builder fault costs the call, not the session.
+    //   * every arm with a worker fires wakes off the injected events, so the
+    //     wake count is positive — and it is these calls, each failing in its
+    //     own way, that the identical bytes are a statement ABOUT.
+    //
+    // Both counters also account for every invocation made here, which is how
+    // the suite's hermetic rule stays true: no production transport is ever
+    // constructed on any path above.
+    CHECK(overtureCalls.load() == 5);
+    CHECK(wakeCalls.load() > 0);
+}
+
+// Step 7, REQ-BARD-WAKE-8/-12: the two claims that are about ABSENCE, which no
+// behavioral test can make.
+static void testBardTriggerContract() {
+    // REQ-BARD-WAKE-8: main() flushes the player's text BEFORE calling the
+    // bard. tickT cannot exercise main()'s own ordering, so it is pinned as
+    // source text — the precedent brick 1 set for append-only.
+    const std::string main_ = readFileBytes("src/main.cpp");
+    const size_t flush = main_.find("std::fflush(stdout);\n\n            // Queue point two");
+    const size_t hook = main_.find("bardAfterTurn(db);");
+    CHECK(flush != std::string::npos);
+    CHECK(hook != std::string::npos);
+    CHECK(flush < hook);
+
+    // …and after architectQueuePregen, so the two post-turn schedulers keep a
+    // stated order rather than an accidental one.
+    const size_t pregen = main_.rfind("architectQueuePregen(db, playerRoom(db));");
+    CHECK(pregen != std::string::npos);
+    CHECK(pregen < hook);
+
+    // REQ-BARD-WAKE-12: the trigger is DERIVED from the events log, every time.
+    // Asserted by absence — there is no new table, no cache, and no state
+    // member holding "triggers seen since the last wake".
+    const std::string world = readFileBytes("src/world.cpp");
+    CHECK(!contains(world, "bard_trigger"));
+    CHECK(!contains(world, "pending_wake"));
+    const std::string bard = readFileBytes("src/bard.cpp");
+    CHECK(contains(bard, "SELECT 1 FROM events"));  // the query is really there
+    // The four verbs, and only those four.
+    for (const char* verb : {"generated", "defeated", "learned", "materialized"}) {
+        CHECK(contains(bard, verb));
+    }
+    CHECK(!contains(bard, "'downed'"));  // the closest call, deliberately out
+}
+
+// Step 6, REQ-BARD-WAKE-3/-5/-18: the two things that are ordering or wording
+// rather than behavior, and would otherwise be pinned by review alone.
+static void testBardOvertureContract() {
+    // Mechanical check 5: the 60 s exception carries its justification, in the
+    // header, on the constant. A future reader normalizing it back to the
+    // uniform budget has to delete a comment that says not to.
+    CHECK(kBardOvertureTimeoutSeconds == 60);
+    const std::string header = readFileBytes("src/bard.hpp");
+    const size_t at = header.find("kBardOvertureTimeoutSeconds");
+    CHECK(at != std::string::npos);
+    CHECK(header.find("DELIBERATE EXCEPTION") < at);  // the comment precedes it
+    CHECK(contains(header, "Do NOT normalize this back to kAiHttpTimeoutSeconds"));
+
+    // REQ-BARD-WAKE-3 and -18: main()'s declaration order. Getting this wrong
+    // is UNDEFINED BEHAVIOR (a live curl handle outliving curl_global_cleanup),
+    // and it is invisible at runtime until it is not — so it is pinned as a
+    // regression guard rather than left to review. Strictly increasing offsets:
+    //
+    //   AiHttpGuard < openWorld < bardOverture < PregenGuard < BardGuard
+    //
+    // The overture must precede both workers because it runs before any worker
+    // thread exists; both guards must follow AiHttpGuard so reverse destruction
+    // joins them before curl_global_cleanup.
+    const std::string main_ = readFileBytes("src/main.cpp");
+    CHECK(!main_.empty());
+    const size_t http = main_.find("const AiHttpGuard httpGuard;");
+    const size_t open = main_.find("openWorld(\"world.db\")");
+    const size_t overture = main_.find("bardOverture(db, nullptr)");
+    const size_t pregen = main_.find("const PregenGuard pregenGuard;");
+    const size_t bard = main_.find("const BardGuard bardGuard;");
+    CHECK(http != std::string::npos);
+    CHECK(open != std::string::npos);
+    CHECK(overture != std::string::npos);
+    CHECK(pregen != std::string::npos);
+    CHECK(bard != std::string::npos);
+    CHECK(http < open);
+    CHECK(open < overture);
+    CHECK(overture < pregen);
+    CHECK(pregen < bard);
+
+    // The overture is guarded by `created` — once per world file, not once per
+    // launch — and that condition lives in main(), the only place that knows it.
+    CHECK(contains(main_, "if (world.created) bardOverture(db, nullptr);"));
 }
 
 int main() {
@@ -9844,6 +11450,7 @@ int main() {
     testAiHttpWorkerClient();
     testProfileTurnStages();
     testAiRoleModel();
+    testAiHttpThreadingContract();
     testAiUsageParse();
     testProseRequestBody();
     testNlResolveRequestBody();
@@ -9901,6 +11508,15 @@ int main() {
     testBardSelExports();
     testBardSelEligible();
     testBardSelEligibleFact();
+    testBardWorkerLifecycle();
+    testBardWorkerJobs();
+    testBardOverture();
+    testBardOvertureContract();
+    testBardTrigger();
+    testBardTriggerContract();
+    testBardCommit();
+    testBardCoalesce();
+    testBardDegradation();
     testBardSelEligibleNewRoom();
     testBardSelHandle();
     testBardSelContext();

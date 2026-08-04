@@ -739,3 +739,15 @@ void writeBardFocus(Db& db, const std::string& text) {
     upsertMeta(db, "bard_focus",
                utf8Truncate(collapseLineBreaks(text), kBardFocusMaxChars));
 }
+
+void writeBardWakeTurn(Db& db, int64_t turn) {
+    // Bound as an INTEGER, not through upsertMeta's string path: world.cpp
+    // seeds this row as 0 and every reader treats it as a number, so storing
+    // "7" here would leave the column's type dependent on who wrote it last.
+    // Free rewrite — this is a position marker, not a log (REQ-BARD-WAKE-11).
+    Stmt s = db.prepare(
+        "INSERT INTO meta(key, value) VALUES ('bard_last_wake_turn', ?) "
+        "ON CONFLICT(key) DO UPDATE SET value = excluded.value");
+    s.bind(1, turn);
+    s.step();
+}

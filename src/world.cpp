@@ -4,6 +4,7 @@
 #include <fstream>
 #include <sstream>
 #include <string>
+#include <utility>
 
 namespace {
 
@@ -162,14 +163,14 @@ void initialize(Db& db, const std::string& seedPath,
 
 }  // namespace
 
-Db openWorld(const std::string& path, const std::string& seedPath,
-             const std::string& settingPath) {
+OpenedWorld openWorld(const std::string& path, const std::string& seedPath,
+                      const std::string& settingPath) {
     Db db(path);
 
     if (!hasMetaTable(db)) {
         // Absent, zero-byte, or otherwise uninitialized: build the world.
         initialize(db, seedPath, settingPath);
-        return db;
+        return {std::move(db), true};  // created THIS call (REQ-BARD-WAKE-1)
     }
 
     const int64_t found = readSchemaVersion(db);
@@ -182,5 +183,5 @@ Db openWorld(const std::string& path, const std::string& seedPath,
                      static_cast<long long>(SCHEMA_VERSION));
         throw SchemaMismatch("schema_version mismatch in " + path);
     }
-    return db;
+    return {std::move(db), false};  // resumed, not created
 }

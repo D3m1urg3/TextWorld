@@ -18,7 +18,8 @@
 #include <string>
 #include <vector>
 
-#include "aihttp.hpp"     // modelForRole — the role→model rule lives THERE, not here
+#include "aihttp.hpp"     // modelForRole / makeAnthropicTransport — the role→model rule lives THERE, not here
+#include "bardworker.hpp"  // bardEnabled — the feature gate, owned by the worker unit
 #include "combat.hpp"     // eligibleArchetypes / distanceFromSeed — the shared gates
 #include "json.hpp"
 #include "mutations.hpp"  // the fact-store helpers: the SOLE sanctioned write path
@@ -577,7 +578,7 @@ std::string buildOvertureRequestBody(const std::string& contextPayload,
     writeCatalog["input_schema"] = std::move(inputSchema);
 
     json body;
-    body["model"] = modelForRole(AiRole::Generate);
+    body["model"] = modelForRole(AiRole::Bard);
     // The one deliberate difference from the architect's 1024: an overture
     // writes a whole cast in a single call, not one room's prose.
     body["max_tokens"] = 4096;
@@ -653,7 +654,7 @@ std::string buildWakeRequestBody(const std::string& contextPayload,
         {"required", json::array({"handle"})}};
 
     json body;
-    body["model"] = modelForRole(AiRole::Generate);
+    body["model"] = modelForRole(AiRole::Bard);
     // Back to the architect's budget: a wake writes a line and a paragraph,
     // not a cast.
     body["max_tokens"] = 1024;
@@ -954,4 +955,189 @@ std::vector<CatalogChoice> eligibleCatalogForNewRoom(Db& db, int64_t originRoom)
         }
         return live;
     });
+}
+
+// --- Brick 3: the overture ---------------------------------------------------
+
+void bardOverture(Db& db, const HttpTransport* transport) {
+    // The gate is the ONLY thing outside the exception boundary, and it is the
+    // first thing here rather than in main() so that REQ-BARD-WAKE-2's "a
+    // disabled run constructs no transport and makes no call" is a property of
+    // this function that a test can assert directly.
+    if (!bardEnabled() || !aiNarrationEnabled()) return;
+
+    // REQ-BARD-WAKE-4: the player is about to wait, so say so. The flush is
+    // load-bearing, not tidiness — without it a piped stdout would hold this
+    // line in the buffer for the whole 60 s, which is exactly the "looks hung"
+    // failure the line exists to prevent.
+    std::fputs("The school is being written…\n", stdout);
+    std::fflush(stdout);
+
+    // EVERYTHING below is inside the guard, not merely the transport call. The
+    // builders and the admission path are ordinary db.hpp callers, and an
+    // escape from here reaches main()'s catch and ends the session on world
+    // creation (REQ-BARD-WAKE-6).
+    try {
+        const HttpTransport t =
+            transport != nullptr
+                ? *transport
+                : makeAnthropicTransport(AiRole::Bard, kBardOvertureTimeoutSeconds);
+
+        const std::vector<std::string> motives = motiveKeys(db);
+        const std::string body =
+            buildOvertureRequestBody(buildOvertureContext(db), motives);
+
+        const std::optional<OvertureProposal> proposal =
+            validateOvertureResponse(t(body), motives);
+        if (!proposal) return;  // an empty catalog: supported everywhere
+
+        // ONE transaction, all-or-nothing (REQ-BARD-WAKE-7). The nested catch
+        // exists ONLY to roll back before rethrowing, so a helper throwing
+        // mid-admission leaves ZERO catalog rows rather than a partial cast —
+        // and the rethrow still gets its one diagnostic from the outer handler
+        // below. There is exactly one diagnostic per failure, never two.
+        db.begin();
+        try {
+            admitOvertureProposal(db, *proposal);
+            db.commit();
+        } catch (...) {
+            db.rollback();
+            throw;
+        }
+    } catch (const std::exception& e) {
+        std::fprintf(stderr, "bard: overture failed: %s\n", e.what());
+    } catch (...) {
+        std::fprintf(stderr, "bard: overture failed (non-std)\n");
+    }
+}
+
+// --- Brick 3: the post-turn hook --------------------------------------------
+
+namespace {
+
+// One meta integer, or 0 when the row is absent. Throws only on a genuine
+// SQLite fault, which is what the caller's guard is for.
+int64_t bardMetaInt(Db& db, const char* key) {
+    Stmt s = db.prepare("SELECT value FROM meta WHERE key = ?");
+    s.bind(1, std::string(key));
+    if (!s.step()) return 0;
+    return s.colInt(0);
+}
+
+// REQ-BARD-WAKE-10, the spec's query verbatim. The four verbs are exactly the
+// irreversible ones: a room was generated, an enemy was defeated, a spell was
+// learned, a catalog entry was materialized. Movement, taking, looking, waiting
+// and failing are all reversible or inconsequential and wake nothing.
+//
+// REQ-BARD-WAKE-12: this is DERIVED from the events log on every evaluation.
+// There is no cache, no flag column, and no "pending triggers" table — the log
+// is the state, and the window is everything after the last QUEUED wake.
+bool hasTriggeringEvent(Db& db, int64_t sinceTurn) {
+    Stmt s = db.prepare(
+        "SELECT 1 FROM events "
+        " WHERE turn > ? "
+        "   AND verb IN ('generated','defeated','learned','materialized') "
+        " LIMIT 1");
+    s.bind(1, sinceTurn);
+    return s.step();
+}
+
+// Commit a ready wake, if there is one (REQ-BARD-WAKE-21..-24). Its OWN
+// transaction, separate from the tick's, which has already committed.
+//
+// Caller: bardAfterTurn, inside its try. A throw here propagates to that guard
+// after this function has rolled back — deliberately, so the diagnostic is
+// emitted once, by the caller, rather than twice.
+void commitReady(Db& db) {
+    std::optional<WakeProposal> ready = bardTakeReady();
+    if (!ready) return;  // the common case: nothing finished this turn
+
+    // meta.turn is NEVER touched here (REQ-BARD-WAKE-22): a wake is not a turn.
+    // Nor is bard_last_wake_turn advanced — it was stamped at QUEUE time, and
+    // leaving it where it is means a failed commit lets the next qualifying
+    // event trigger a fresh wake (REQ-BARD-WAKE-23).
+    db.begin();
+    try {
+        // REQ-BARD-WAKE-24's live re-check is already INSIDE applyWakeProposal:
+        // appended entries pass catalogEntryRefusal against the CURRENT
+        // database, and mark_seeded resolves through catalogIdForHandle at this
+        // moment. The snapshot's age therefore does not matter, which is the
+        // whole point — a wake may have been snapshotted many turns ago.
+        applyWakeProposal(db, *ready);
+        db.commit();
+    } catch (...) {
+        db.rollback();
+        throw;
+    }
+}
+
+// The evaluation half. Order is spelled out as code because the ORDER IS THE
+// REQUIREMENT, and prose left two readings open.
+//
+// Caller: bardAfterTurn, inside its try.
+void evaluateTrigger(Db& db) {
+    if (!bardEnabled() || !aiNarrationEnabled()) return;
+
+    const int64_t turn = bardMetaInt(db, "turn");
+    const int64_t lastWake = bardMetaInt(db, "bard_last_wake_turn");
+
+    // (1) THE CEILING, FIRST (REQ-BARD-WAKE-9) — cheapest, and it must hold
+    // however many triggers fired. A trigger arriving inside the gap is NOT
+    // lost: bard_last_wake_turn is stamped at queue time, so the query below
+    // re-finds those events on the first evaluation past the gap.
+    if (turn - lastWake < kBardMinTurnGap) return;
+
+    // (2) The flag is CONSUMED here, unconditionally, and may be re-set at (3)
+    // below. Consume-then-maybe-reset, deliberately: reading it after the busy
+    // check would leave it set across an evaluation that already ran, and
+    // REQ-BARD-WAKE-14 says ONE further evaluation, not one per turn.
+    const bool dirty = bardTakeDirty();
+    if (!dirty && !hasTriggeringEvent(db, lastWake)) return;
+
+    // (3) Busy: record the trigger, build nothing, queue nothing. One wake in
+    // flight process-wide (REQ-BARD-WAKE-13).
+    if (bardStateNow() != BardState::Idle) {
+        bardSetDirty();
+        return;
+    }
+
+    // (4) The snapshot, on the MAIN thread (REQ-BARD-WAKE-19). What crosses the
+    // thread boundary is text and nothing else.
+    BardJob job;
+    job.motives = motiveKeys(db);
+    job.requestBody = buildWakeRequestBody(buildWakeContext(db), job.motives);
+    job.snapshotTurn = turn;
+
+    // (5) Stamp BEFORE submit: if the stamp throws, nothing was queued; if it
+    // lands, no in-flight wake can re-trigger itself (REQ-BARD-WAKE-11). Only
+    // the main thread submits and only the worker leaves Running, so the Idle
+    // observed at (3) cannot have been invalidated underneath us.
+    db.begin();
+    try {
+        writeBardWakeTurn(db, turn);
+        db.commit();
+    } catch (...) {
+        db.rollback();
+        throw;
+    }
+
+    bardSubmit(std::move(job));
+}
+
+}  // namespace
+
+void bardAfterTurn(Db& db) {
+    // TOTAL, like bardOverture: the entire body, not just a transport call.
+    // Everything below reaches db.hpp, which raises std::runtime_error for any
+    // SQLite fault — and an escape from here would reach main()'s catch and end
+    // a session on a turn the player has already been shown.
+    try {
+        commitReady(db);      // first, so a wake landing this turn can be
+                              // followed by its one further evaluation below
+        evaluateTrigger(db);
+    } catch (const std::exception& e) {
+        std::fprintf(stderr, "bard: after-turn failed: %s\n", e.what());
+    } catch (...) {
+        std::fprintf(stderr, "bard: after-turn failed (non-std)\n");
+    }
 }

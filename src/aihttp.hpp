@@ -15,11 +15,18 @@
 
 #include "prose.hpp"  // HttpResponse / HttpTransport — the seam, UNCHANGED
 
-// The three AI call sites. The names are exactly the strings the profile
-// records carry in their `role=` field.
-enum class AiRole { Resolve, Narrate, Generate };
+// The four AI call sites. The names are exactly the strings the profile
+// records carry in their `role=` field. Bard is its own role rather than a
+// reuse of Generate precisely so a profile log can tell a bard wake from a
+// pregen room job — the two workloads with the most different shapes.
+enum class AiRole { Resolve, Narrate, Generate, Bard };
 
 const char* roleName(AiRole role);
+
+// The uniform per-call transport budget, in seconds. Named so that the ONE
+// deliberate exception to it — kBardOvertureTimeoutSeconds, in bard.hpp — has
+// something to be an exception TO. Every other call site takes this default.
+inline constexpr long kAiHttpTimeoutSeconds = 8;
 
 // The model id for one role. THE single place the precedence rule lives —
 // exactly two levels (REQ-LAT-13):
@@ -29,6 +36,7 @@ const char* roleName(AiRole role);
 //        Resolve  -> claude-haiku-4-5   (fast/cheap; the gate still governs)
 //        Narrate  -> claude-opus-4-8    (prose quality)
 //        Generate -> claude-opus-4-8    (prose quality)
+//        Bard     -> claude-opus-4-8    (authoring quality)
 //
 // Per-role environment overrides (TEXTWORLD_MODEL_RESOLVE and friends) are
 // OUT OF SCOPE by decision, not by oversight: their absence is deliberate. If
@@ -56,20 +64,33 @@ std::string modelFromRequestBody(const std::string& requestBody);
 
 // --- the shared persistent-handle HTTP client -------------------------------
 //
-// THREADING CONTRACT (REQ-LAT-11), written down for the background
-// pre-generation work and now CASHED by it (REQ-PREGEN-8):
+// THREADING CONTRACT (REQ-LAT-11, REQ-PREGEN-8, REQ-BARD-WAKE-17), written
+// down for the background pre-generation work and now CASHED by two workers:
 //   * The shared handle behind anthropicPost() is MAIN-THREAD ONLY.
 //   * One easy handle per thread. NEVER share a handle between threads, and
 //     never share a connection cache across threads (that is what a curl share
-//     handle would be for — deliberately not used). AiHttpWorkerClient below
-//     is the ONE sanctioned second handle: it owns its own, and it never names
-//     the shared one.
+//     handle would be for — deliberately not used).
+//   * AiHttpWorkerClient below is THE TYPE EVERY SANCTIONED WORKER HANDLE
+//     USES. There are now TWO live instances of it in the binary, not one:
+//
+//        the pre-generation worker's, owned by pregen.cpp's thread
+//        the bard's wake worker's,   owned by bardworker.cpp's thread
+//
+//     Each is constructed on, used by, and destroyed on ITS OWN thread, and
+//     neither ever names the shared main-thread handle. Adding a third worker
+//     means adding a third instance of this type and a third guard — never a
+//     second thread sharing an existing handle.
 //   * aiHttpInit() must run BEFORE any thread that touches libcurl is created;
 //     curl_global_init is not thread-safe and must not race lazy init.
 //     Symmetrically, every AiHttpWorkerClient must be DESTROYED — and the
-//     thread owning it joined — BEFORE aiHttpShutdown() (REQ-PREGEN-19). A
-//     live easy handle outliving curl_global_cleanup() is undefined behavior.
-//   * CURLOPT_NOSIGNAL is already set on every call, so the worker thread
+//     thread owning it joined — BEFORE aiHttpShutdown() (REQ-PREGEN-19,
+//     REQ-BARD-WAKE-18). In main() that ordering is structural, not
+//     remembered: PregenGuard (pregen.hpp) and BardGuard (bardworker.hpp) are
+//     both declared BELOW AiHttpGuard, so reverse destruction joins both
+//     threads before curl_global_cleanup on every exit path. "Below
+//     AiHttpGuard" is the load-bearing invariant; their order relative to each
+//     other is not, since the two workers are independent.
+//   * CURLOPT_NOSIGNAL is already set on every call, so a worker thread
 //     cannot be killed by libcurl's alarm-based DNS timeout.
 
 // curl_global_init(CURL_GLOBAL_DEFAULT), once. Idempotent (REQ-LAT-7).
@@ -84,9 +105,13 @@ void aiHttpShutdown();
 
 // The ONE production transport, behavior-identical to the three per-unit
 // curlTransports it replaces (REQ-LAT-10): same URL, same three headers with
-// ANTHROPIC_API_KEY read at CALL time into x-api-key only, same 8-second total
-// timeout, transportError on any curl failure, response code read only on
-// CURLE_OK, and NO retries.
+// ANTHROPIC_API_KEY read at CALL time into x-api-key only, the same total
+// timeout by default, transportError on any curl failure, response code read
+// only on CURLE_OK, and NO retries.
+//
+// `timeoutSeconds` is a PARAMETER rather than a constant only so the bard's
+// overture can name its one sanctioned exception (REQ-BARD-WAKE-5). Every
+// existing caller takes the default and is unchanged.
 //
 // What differs: the easy handle PERSISTS across calls (REQ-LAT-8), so the
 // connection, TLS session, and DNS cache survive between calls and between
@@ -104,14 +129,17 @@ void aiHttpShutdown();
 // the fallback itself is already announced on the same stderr stream by each
 // unit's one-line clause diagnostic. Do not "fix" this by plumbing gate
 // results back through the seam.
-HttpResponse anthropicPost(const std::string& requestBody, AiRole role);
+HttpResponse anthropicPost(const std::string& requestBody, AiRole role,
+                           long timeoutSeconds = kAiHttpTimeoutSeconds);
 
-// Bind a role into the existing seam. HttpTransport's signature is unchanged,
-// so every fake-transport test keeps working exactly as before.
-HttpTransport makeAnthropicTransport(AiRole role);
+// Bind a role (and, optionally, a non-default budget) into the existing seam.
+// HttpTransport's signature is unchanged, so every fake-transport test keeps
+// working exactly as before.
+HttpTransport makeAnthropicTransport(AiRole role,
+                                     long timeoutSeconds = kAiHttpTimeoutSeconds);
 
 // ONE easy handle, owned by the thread that constructs it (REQ-PREGEN-8) — the
-// sanctioned second handle the threading contract above names.
+// type every sanctioned worker handle uses, per the threading contract above.
 //
 // NEVER touches the shared main-thread handle; no curl share handle exists, so
 // the connection cache is deliberately NOT shared across the two threads. That

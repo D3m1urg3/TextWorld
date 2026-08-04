@@ -260,3 +260,14 @@ void writeBardJournal(Db& db, const std::string& text);
 // length cap alone would admit a multi-line focus that reads as prose in the
 // architect's context. Event-free. Never begins/commits.
 void writeBardFocus(Db& db, const std::string& text);
+
+// Upsert meta.bard_last_wake_turn. Stamped when a wake is QUEUED, never when
+// it completes (REQ-BARD-WAKE-11), so an in-flight wake cannot re-trigger
+// itself: the trigger query reads events strictly after this value, and a wake
+// that took several turns to answer therefore re-finds only what arrived
+// after it was sent. Free rewrite, like the journal — the stamp is a position,
+// not a log. Event-free. Never begins, commits, or rolls back — the caller
+// owns the transaction, exactly like every other helper in this file.
+//
+// REQ-BARD-STORE-18: this file is the ONLY unit that may write this row.
+void writeBardWakeTurn(Db& db, int64_t turn);
