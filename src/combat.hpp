@@ -94,6 +94,15 @@ void resolveCast(Db& db, int64_t player, const std::string& spell);
 // cooldown readiness joins in Step 12. Read-only.
 std::string combatStatusLine(Db& db, int64_t player);
 
+// BFS hop-distance from the seed room (kDormitoryCell) to `room` over REALIZED
+// exits (dest non-NULL), or INT64_MAX if unreachable — the deterministic
+// front-intensity metric (REQ-COMBAT-34). Latent (ungenerated) exits are not
+// edges: an unrealized frontier does not shorten the front. Exposed because the
+// bard's story-catalog tier gate reads the SAME metric (REQ-BARD-SEL-2b) — one
+// distance function, so combat and story eligibility cannot drift apart.
+// Read-only.
+int64_t distanceFromSeed(Db& db, int64_t room);
+
 // The engine-computed eligible archetype menu for `room` (REQ-COMBAT-32, -33,
 // -34), wholly deterministic — no RNG, no LLM. Returns the archetype names the
 // architect may select from when generating this room (Step 22), ordered by name
@@ -111,6 +120,14 @@ std::string combatStatusLine(Db& db, int64_t player);
 //     Basic-soluble archetypes require no keys, so they are always offered.
 // Read-only.
 std::vector<std::string> eligibleArchetypes(Db& db, int64_t room);
+
+// The eligible menu for the room the architect is ABOUT to create beyond
+// `originRoom`. The prospective room's only initial link is back to the origin,
+// so its front distance is one hop past the origin's (REQ-COMBAT-34). Exposed
+// alongside distanceFromSeed for the same reason: the bard needs the
+// prospective room's neighborhood to gate knowledge beats (REQ-BARD-SEL-5),
+// and must call this rather than recompute it. Read-only.
+std::vector<std::string> eligibleArchetypesForNewRoom(Db& db, int64_t originRoom);
 
 // The eligible enemy choices for the room the architect is about to create beyond
 // `originRoom` (REQ-COMBAT-31), each rendered as its BLURB — the only archetype

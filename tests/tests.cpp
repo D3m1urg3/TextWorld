@@ -15,11 +15,14 @@
 #include <thread>
 #include <vector>
 
+#include <unistd.h>
+
 #include <curl/curl.h>  // architect live smoke's single bounded judge call (gated)
 
 #include "action.hpp"
 #include "aihttp.hpp"
 #include "architect.hpp"
+#include "bard.hpp"
 #include "band.hpp"
 #include "combat.hpp"
 #include "db.hpp"
@@ -8397,6 +8400,1347 @@ static void testBardStoreAppendOnly() {
     CHECK(queryText(db, "SELECT value FROM meta WHERE key = 'bard_focus'").empty());
 }
 
+// --- Brick 2: catalog selection (specs/bard-catalog-selection.md) -----------
+
+// The two combat readers the bard shares (plan micro-decision 2). They moved
+// out of combat.cpp's anonymous namespace so story eligibility can CALL the
+// combat metric rather than reimplement it (REQ-BARD-SEL-3); this test is what
+// makes the export real — it only links if both are public.
+static void testBardSelExports() {
+    const TempDbFile worldPath("textworld_bard_exports_tests.db");
+    Db db = openWorld(worldPath.string(), "tests/combat_fixture.sql");
+
+    // The seed room is distance 0; the corridor one hop north of it is 1; the
+    // outer hall (1 → 2 → 6 → 15) is 3.
+    CHECK(distanceFromSeed(db, kDormitoryCell) == 0);
+    CHECK(distanceFromSeed(db, 2) == 1);
+    CHECK(distanceFromSeed(db, 15) == 3);
+
+    // A room with NO realized path from the seed is maximally far, not near
+    // (the sentinel every tier gate must guard before comparing).
+    db.exec("INSERT INTO entities(id) VALUES (20)");
+    db.exec("INSERT INTO room(entity) VALUES (20)");
+    db.exec("INSERT INTO name(entity, value) VALUES (20, 'sealed vault')");
+    CHECK(distanceFromSeed(db, 20) == INT64_MAX);
+
+    // eligibleArchetypesForNewRoom is the archetype layer under the blurb menu
+    // the architect already sees: the two must agree entry for entry.
+    for (const int64_t origin : {kDormitoryCell, int64_t{2}, int64_t{15}}) {
+        const std::vector<std::string> archetypes =
+            eligibleArchetypesForNewRoom(db, origin);
+        const std::vector<std::string> blurbs = eligibleEnemyBlurbs(db, origin);
+        CHECK(archetypes.size() == blurbs.size());
+        for (size_t i = 0; i < archetypes.size(); ++i) {
+            Stmt s = db.prepare("SELECT blurb FROM bestiary WHERE archetype = ?");
+            s.bind(1, archetypes[i]);
+            CHECK(s.step());
+            CHECK(s.colText(0) == blurbs[i]);
+        }
+    }
+}
+
+// Handles of a choice list, in the order offered — the shape most eligibility
+// assertions below compare against.
+static std::vector<std::string> handlesOf(const std::vector<CatalogChoice>& choices) {
+    std::vector<std::string> out;
+    for (const CatalogChoice& c : choices) out.push_back(c.handle);
+    return out;
+}
+
+// The four composing gates of REQ-BARD-SEL-2, plus ordering and the
+// empty-is-normal contract (REQ-BARD-SEL-4). Every catalog row is seeded
+// through writeCatalogEntry, never raw SQL, so the menu can never drift from
+// the admission path Brick 1 shipped.
+static void testBardSelEligible() {
+    const TempDbFile worldPath("textworld_bard_eligible_tests.db");
+
+    // Fixture distances from the seed (room 1): corridor 2 → 1, frost study
+    // 6 → 2, armory 9 → 2, library 11 → 1, outer hall 15 → 3.
+    {
+        Db db = openWorld(worldPath.string(), "tests/combat_fixture.sql");
+
+        // An empty catalog is a normal answer, not an error — asserted BEFORE
+        // anything is seeded, so the empty path is exercised for real.
+        CHECK(eligibleCatalog(db, 1, "character").empty());
+
+        writeCatalogEntry(db, "character", "t0_scribe", "cloistered scribe",
+                          "a scribe who has not left the annex in years",
+                          "curiosity", 0);
+        writeCatalogEntry(db, "beat", "t0_ink", "spilled ink",
+                          "a dark stain, still wet", "secrecy", 0);
+        writeCatalogEntry(db, "character", "t1_warden", "under-warden",
+                          "a warden who counts the doors twice a night",
+                          "obligation", 1);
+        writeCatalogEntry(db, "character", "t2_pilgrim", "late pilgrim",
+                          "a pilgrim arrived long after the gate closed",
+                          "homesickness", 2);
+        writeCatalogEntry(db, "beat", "t3_rumor", "carried rumor",
+                          "a rumor that outran the road it came by", "rivalry", 3);
+
+        // --- gate (b): tier <= distance, and deeper rooms offer strictly more
+        CHECK(handlesOf(eligibleCatalog(db, 1, "character")) ==
+              std::vector<std::string>{"t0_scribe"});
+        CHECK(handlesOf(eligibleCatalog(db, 2, "character")) ==
+              (std::vector<std::string>{"t0_scribe", "t1_warden"}));
+        CHECK(handlesOf(eligibleCatalog(db, 6, "character")) ==
+              (std::vector<std::string>{"t0_scribe", "t1_warden", "t2_pilgrim"}));
+
+        // --- gate (c): a kind filter excludes the other kind entirely
+        CHECK(handlesOf(eligibleCatalog(db, 15, "beat")) ==
+              (std::vector<std::string>{"t0_ink", "t3_rumor"}));
+        for (const CatalogChoice& c : eligibleCatalog(db, 15, "beat")) {
+            CHECK(c.handle != "t0_scribe" && c.handle != "t1_warden");
+        }
+
+        // --- the model-facing shape: handle + blurb + motive BLURB, never the
+        // motive key, the name, the tier, or an id (REQ-BARD-SEL-1, -8).
+        {
+            const std::vector<CatalogChoice> menu = eligibleCatalog(db, 1, "character");
+            CHECK(menu.size() == 1);
+            CHECK(menu[0].handle == "t0_scribe");
+            CHECK(menu[0].blurb == "a scribe who has not left the annex in years");
+            CHECK(menu[0].motiveBlurb ==
+                  "wants to know something they have not been told");
+            CHECK(menu[0].motiveBlurb != "curiosity");  // the blurb, never the key
+            // No field carries the in-world name or the tier value.
+            for (const CatalogChoice& c : menu) {
+                CHECK(!contains(c.handle + c.blurb + c.motiveBlurb,
+                                "cloistered scribe"));
+            }
+        }
+
+        // --- gate (a): a materialized entry leaves the menu ------------------
+        {
+            const int64_t id = queryInt(
+                db, "SELECT id FROM catalog WHERE handle = 't1_warden'");
+            db.exec("INSERT INTO entities(id) VALUES (30)");
+            CHECK(materializeCatalogEntry(db, id, 30, 3));
+            CHECK(handlesOf(eligibleCatalog(db, 2, "character")) ==
+                  std::vector<std::string>{"t0_scribe"});
+        }
+
+        // --- determinism within one process (REQ-BARD-SEL-4) ----------------
+        CHECK(handlesOf(eligibleCatalog(db, 6, "character")) ==
+              handlesOf(eligibleCatalog(db, 6, "character")));
+
+        // --- a room with no realized path from the seed offers nothing, and
+        // does NOT throw: the INT64_MAX sentinel must not read as "very deep".
+        db.exec("INSERT INTO entities(id) VALUES (20)");
+        db.exec("INSERT INTO room(entity) VALUES (20)");
+        CHECK(eligibleCatalog(db, 20, "character").empty());
+        CHECK(eligibleCatalog(db, 20, "beat").empty());
+    }
+
+    // --- determinism across a close and reopen of the world -----------------
+    {
+        Db db = openWorld(worldPath.string(), "tests/combat_fixture.sql");
+        CHECK(handlesOf(eligibleCatalog(db, 6, "character")) ==
+              (std::vector<std::string>{"t0_scribe", "t2_pilgrim"}));
+        CHECK(handlesOf(eligibleCatalog(db, 15, "beat")) ==
+              (std::vector<std::string>{"t0_ink", "t3_rumor"}));
+    }
+}
+
+// The eight seeded motive keys, and the blurb each must carry to the wire.
+static const std::vector<std::pair<std::string, std::string>>& fixtureMotives() {
+    static const std::vector<std::pair<std::string, std::string>> motives = {
+        {"curiosity", "wants to know something they have not been told"},
+        {"secrecy", "has something to keep hidden, and is arranging for it to stay that way"},
+        {"rivalry", "wants to be first, or to be seen to be first"},
+        {"obligation", "is bound by a duty they did not choose"},
+        {"grief", "is holding on to someone or something already gone"},
+        {"appetite", "wants to take and carry off"},
+        {"pride", "would rather be wrong than corrected"},
+        {"homesickness", "does not belong here yet, and feels it"},
+    };
+    return motives;
+}
+
+// The overture context (REQ-BARD-SEL-9): exactly two keys, and the motive
+// vocabulary reaching the wire as key AND blurb (spec test 11a).
+static void testBardSelContext() {
+    const TempDbFile worldPath("textworld_bard_context_tests.db");
+    Db db = openWorld(worldPath.string(), "tests/combat_fixture.sql");
+    db.exec("UPDATE meta SET value = 'a drowned abbey above a breached vault' "
+            "WHERE key = 'setting'");
+
+    {
+        const std::string payload = buildOvertureContext(db);
+        const nlohmann::json j = nlohmann::json::parse(payload);
+        CHECK(j.is_object());
+        CHECK(j.size() == 2);
+        CHECK(j.contains("setting"));
+        CHECK(j.contains("motives"));
+        CHECK(j["setting"] == "a drowned abbey above a breached vault");
+
+        // All eight keys AND all eight blurbs, or the model is choosing between
+        // opaque tokens.
+        CHECK(j["motives"].is_array());
+        CHECK(j["motives"].size() == 8);
+        for (const auto& [key, blurb] : fixtureMotives()) {
+            CHECK(contains(payload, key));
+            CHECK(contains(payload, blurb));
+        }
+    }
+
+    // An empty setting still yields a well-formed object with both keys.
+    {
+        db.exec("UPDATE meta SET value = '' WHERE key = 'setting'");
+        const nlohmann::json j = nlohmann::json::parse(buildOvertureContext(db));
+        CHECK(j.is_object());
+        CHECK(j.size() == 2);
+        CHECK(j["setting"] == "");
+        CHECK(j["motives"].size() == 8);
+    }
+}
+
+// The overture request body and the write_catalog schema (REQ-BARD-SEL-11,
+// -12, -14), modeled on testArchitectRequestBody. The artifact under test is
+// the EMITTED BODY, never the builders in isolation.
+static void testBardSelRequestBody() {
+    const ScopedModelEnv guard;
+    unsetenv("TEXTWORLD_MODEL");
+
+    const TempDbFile worldPath("textworld_bard_body_tests.db");
+    Db db = openWorld(worldPath.string(), "tests/combat_fixture.sql");
+    const std::string payload = buildOvertureContext(db);
+
+    {
+        const nlohmann::json j = nlohmann::json::parse(
+            buildOvertureRequestBody(payload, motiveKeys(db)));
+
+        // Story authoring is quality work: the GENERATE role's model, and a
+        // budget large enough for a whole cast rather than one room.
+        CHECK(j["model"] == "claude-opus-4-8");
+        CHECK(j["max_tokens"] == 4096);
+
+        // Exact top-level set — no thinking, no stream, no cache-control key.
+        CHECK(j.size() == 6);
+        CHECK(!j.contains("thinking"));
+        CHECK(!j.contains("stream"));
+        CHECK(j["system"] == std::string(kBardOverturePrompt));
+        CHECK(j["messages"].size() == 1);
+        CHECK(j["messages"][0]["role"] == "user");
+        CHECK(j["messages"][0]["content"] == payload);
+
+        // AUTO, not required: a response with no tool call is a valid outcome.
+        CHECK(j["tool_choice"]["type"] == "auto");
+        CHECK(!j["tool_choice"].contains("name"));
+
+        // Exactly one tool, and it is write_catalog.
+        CHECK(j["tools"].size() == 1);
+        const nlohmann::json& tool = j["tools"][0];
+        CHECK(tool["name"] == "write_catalog");
+
+        const nlohmann::json& schema = tool["input_schema"];
+        CHECK(schema["type"] == "object");
+        CHECK(schema["required"] ==
+              nlohmann::json::array({"entries", "journal"}));
+        CHECK(schema["properties"].size() == 2);
+        CHECK(schema["properties"]["entries"]["type"] == "array");
+        CHECK(schema["properties"]["journal"]["type"] == "string");
+        // No maxLength on the journal: it is stored verbatim and uncapped, and
+        // adding the constraint later is one line here (plan micro-decision 9).
+        CHECK(!schema["properties"]["journal"].contains("maxLength"));
+
+        // The entry schema: the six required fields, and `fact` optional but
+        // both-or-neither when present.
+        const nlohmann::json& entry = schema["properties"]["entries"]["items"];
+        CHECK(entry["required"] ==
+              nlohmann::json::array({"kind", "handle", "name", "blurb",
+                                     "motive", "tier"}));
+        CHECK(entry["properties"]["kind"]["enum"] ==
+              nlohmann::json::array({"character", "beat"}));
+        CHECK(entry["properties"]["tier"]["type"] == "integer");
+        CHECK(entry["properties"]["fact"]["required"] ==
+              nlohmann::json::array({"archetype", "element"}));
+        CHECK(entry["properties"]["motive"]["enum"].size() == 8);
+    }
+
+    // --- spec test 11: the motive enum is DATA-DRIVEN ----------------------
+    // A ninth motive_catalog row changes the enum in the emitted body, with no
+    // code change — which is what proves it is not hardcoded in the builder.
+    {
+        db.exec("INSERT INTO motive_catalog(motive, blurb) VALUES "
+                "('vengeance', 'is owed something, and means to collect')");
+        const std::vector<std::string> keys = motiveKeys(db);
+        CHECK(keys.size() == 9);
+        const nlohmann::json j =
+            nlohmann::json::parse(buildOvertureRequestBody(payload, keys));
+        const nlohmann::json& motiveEnum =
+            j["tools"][0]["input_schema"]["properties"]["entries"]["items"]
+             ["properties"]["motive"]["enum"];
+        CHECK(motiveEnum.size() == 9);
+        bool sawNew = false;
+        for (const nlohmann::json& m : motiveEnum) {
+            if (m == "vengeance") sawNew = true;
+        }
+        CHECK(sawNew);
+        db.exec("DELETE FROM motive_catalog WHERE motive = 'vengeance'");
+    }
+
+    // --- spec test 10: no ids on the wire ----------------------------------
+    {
+        writeCatalogEntry(db, "character", "t9_stranger", "far stranger",
+                          "someone who has not arrived yet", "rivalry", 9);
+        db.exec("INSERT INTO entities(id) VALUES (5000)");
+        const std::string body =
+            buildOvertureRequestBody(buildOvertureContext(db), motiveKeys(db));
+        CHECK(!contains(body, "5000"));
+        CHECK(!contains(body, "t9_stranger"));  // no catalog at overture time
+        CHECK(!contains(body, "\"id\""));
+        CHECK(!contains(body, "\"seeded\""));
+        // Positively: the setting and the vocabulary DO reach the wire.
+        CHECK(contains(body, "curiosity"));
+        CHECK(contains(body, "wants to know something they have not been told"));
+    }
+}
+
+// The wake request body (REQ-BARD-SEL-13, -14, -15): four small tools, and an
+// `entry` schema that is byte-equal to the overture's — the assertion that
+// catches the two drifting apart.
+static void testBardSelWakeRequestBody() {
+    const ScopedModelEnv guard;
+    unsetenv("TEXTWORLD_MODEL");
+
+    const TempDbFile worldPath("textworld_bard_wake_body_tests.db");
+    Db db = openWorld(worldPath.string(), "tests/combat_fixture.sql");
+    writeBardJournal(db, "the scribe is the one to watch");
+    writeCatalogEntry(db, "character", "t0_scribe", "cloistered scribe",
+                      "a scribe who has not left the annex in years",
+                      "curiosity", 0);
+    // Ids well clear of the single-digit trap, for the sweep below.
+    db.exec("INSERT INTO entities(id) VALUES (5000)");
+    db.exec("UPDATE meta SET value = 6 WHERE key = 'turn'");
+    CHECK(materializeCatalogEntry(
+        db, queryInt(db, "SELECT id FROM catalog WHERE handle = 't0_scribe'"),
+        5000, 3));
+
+    const std::string wakePayload = buildWakeContext(db);
+    const std::string body = buildWakeRequestBody(wakePayload, motiveKeys(db));
+    const nlohmann::json j = nlohmann::json::parse(body);
+
+    CHECK(j.size() == 6);
+    CHECK(j["model"] == "claude-opus-4-8");
+    CHECK(j["max_tokens"] == 1024);  // a line and a paragraph, not a cast
+    CHECK(j["system"] == std::string(kBardWakePrompt));
+    CHECK(j["messages"][0]["content"] == wakePayload);
+    CHECK(j["tool_choice"]["type"] == "auto");
+
+    // Exactly four tools, with exactly those names.
+    CHECK(j["tools"].size() == 4);
+    std::vector<std::string> names;
+    for (const nlohmann::json& tool : j["tools"]) {
+        names.push_back(tool["name"].get<std::string>());
+    }
+    CHECK(names == (std::vector<std::string>{"write_focus", "write_journal",
+                                             "append_catalog", "mark_seeded"}));
+
+    // append_catalog takes ONE entry — no entries array, no journal.
+    const nlohmann::json* append = nullptr;
+    for (const nlohmann::json& tool : j["tools"]) {
+        if (tool["name"] == "append_catalog") append = &tool;
+    }
+    CHECK(append != nullptr);
+    const nlohmann::json& appendSchema = (*append)["input_schema"];
+    CHECK(appendSchema["required"] == nlohmann::json::array({"entry"}));
+    CHECK(appendSchema["properties"].size() == 1);
+    CHECK(!appendSchema["properties"].contains("entries"));
+    CHECK(!appendSchema["properties"].contains("journal"));
+
+    // The anti-drift assertion: append_catalog's `entry` and write_catalog's
+    // `entries` items serialize IDENTICALLY, because one builder makes both.
+    {
+        const nlohmann::json overture = nlohmann::json::parse(
+            buildOvertureRequestBody(buildOvertureContext(db), motiveKeys(db)));
+        const nlohmann::json& overtureEntry =
+            overture["tools"][0]["input_schema"]["properties"]["entries"]["items"];
+        CHECK(appendSchema["properties"]["entry"].dump() == overtureEntry.dump());
+    }
+
+    // The other two tools take one string each.
+    for (const nlohmann::json& tool : j["tools"]) {
+        if (tool["name"] == "write_focus" || tool["name"] == "write_journal") {
+            CHECK(tool["input_schema"]["required"] ==
+                  nlohmann::json::array({"text"}));
+            CHECK(tool["input_schema"]["properties"]["text"]["type"] == "string");
+        }
+        if (tool["name"] == "mark_seeded") {
+            CHECK(tool["input_schema"]["required"] ==
+                  nlohmann::json::array({"handle"}));
+        }
+    }
+
+    // --- spec test 10 on the fuller body: no ids, positively the handles ----
+    CHECK(!contains(body, "5000"));
+    CHECK(!contains(body, "\"id\""));
+    CHECK(!contains(body, "\"seeded\""));
+    CHECK(contains(body, "t0_scribe"));  // the handle IS model-facing
+    CHECK(contains(body, "a scribe who has not left the annex in years"));
+
+    // There is no place_catalog tool anywhere in the body (REQ-BARD-SEL-15).
+    CHECK(!contains(body, "place_catalog"));
+}
+
+// --- canned responses for the two bard gates -------------------------------
+// The Anthropic shape the gates navigate: content[] carrying tool_use blocks.
+
+static nlohmann::json bardToolUse(const char* name, nlohmann::json input) {
+    nlohmann::json block;
+    block["type"] = "tool_use";
+    block["id"] = "toolu_bard";
+    block["name"] = name;
+    block["input"] = std::move(input);
+    return block;
+}
+
+static HttpResponse bardCanned(nlohmann::json content) {
+    nlohmann::json j;
+    j["stop_reason"] = "tool_use";
+    j["content"] = std::move(content);
+    HttpResponse r;
+    r.status = 200;
+    r.body = j.dump();
+    return r;
+}
+
+// A well-formed entry, which each per-entry test then breaks in exactly one way.
+static nlohmann::json bardEntry(const std::string& handle) {
+    nlohmann::json e;
+    e["kind"] = "character";
+    e["handle"] = handle;
+    e["name"] = "cloistered scribe";
+    e["blurb"] = "a scribe who has not left the annex in years";
+    e["motive"] = "curiosity";
+    e["tier"] = 1;
+    return e;
+}
+
+static HttpResponse bardOvertureCanned(nlohmann::json entries,
+                                       const std::string& journal = "a note") {
+    nlohmann::json input;
+    input["entries"] = std::move(entries);
+    input["journal"] = journal;
+    return bardCanned(nlohmann::json::array({bardToolUse("write_catalog", input)}));
+}
+
+// Everything written to stderr while `fn` runs. Used where the ABSENCE of a
+// diagnostic is the assertion.
+template <typename Fn>
+static std::string bardCapturedStderr(Fn fn) {
+    const std::filesystem::path tmp =
+        std::filesystem::temp_directory_path() / "textworld_bard_stderr.txt";
+    std::fflush(stderr);
+    const int saved = dup(fileno(stderr));
+    CHECK(std::freopen(tmp.string().c_str(), "w", stderr) != nullptr);
+    fn();
+    std::fflush(stderr);
+    dup2(saved, fileno(stderr));
+    close(saved);
+    const std::string out = readFileBytes(tmp);
+    std::filesystem::remove(tmp);
+    return out;
+}
+
+// The overture gate (REQ-BARD-SEL-16, -17, -18): strict per response, lenient
+// per entry. Every case below is called OUTSIDE a try/catch — the gate never
+// throws, and that is the point of calling them this way.
+static void testBardSelGateOverture() {
+    const std::vector<std::string> motives = {
+        "curiosity", "secrecy", "rivalry",  "obligation",
+        "grief",     "appetite", "pride",   "homesickness"};
+
+    // --- happy path ---------------------------------------------------------
+    {
+        auto p = validateOvertureResponse(
+            bardOvertureCanned(nlohmann::json::array({bardEntry("one"),
+                                                      bardEntry("two")}),
+                               "watching the annex"),
+            motives);
+        CHECK(p.has_value());
+        CHECK(p->entries.size() == 2);
+        CHECK(p->entries[0].handle == "one");
+        CHECK(p->entries[0].kind == "character");
+        CHECK(p->entries[0].tier == 1);
+        CHECK(p->journal == "watching the annex");
+    }
+
+    // A well-formed fact survives intact; an absent one leaves both halves empty.
+    {
+        nlohmann::json withFact = bardEntry("lore");
+        withFact["kind"] = "beat";
+        withFact["fact"] = {{"archetype", "rime_touched"}, {"element", "fire"}};
+        auto p = validateOvertureResponse(
+            bardOvertureCanned(nlohmann::json::array({withFact})), motives);
+        CHECK(p.has_value());
+        CHECK(p->entries.size() == 1);
+        CHECK(p->entries[0].factArchetype == "rime_touched");
+        CHECK(p->entries[0].factElement == "fire");
+    }
+
+    // --- lenient per entry: every REQ-BARD-SEL-17 failure mode --------------
+    // Three entries, the middle one broken: TWO survive, and the response is
+    // never rejected.
+    {
+        const auto broken = [&](const nlohmann::json& bad) {
+            auto p = validateOvertureResponse(
+                bardOvertureCanned(nlohmann::json::array(
+                    {bardEntry("first"), bad, bardEntry("third")})),
+                motives);
+            CHECK(p.has_value());  // dropping an entry NEVER rejects
+            if (!p.has_value()) return;
+            CHECK(p->entries.size() == 2);
+            CHECK(p->entries[0].handle == "first");
+            CHECK(p->entries[1].handle == "third");
+        };
+
+        nlohmann::json e = bardEntry("bad");
+        e["handle"] = "   ";
+        broken(e);
+        e = bardEntry("bad");
+        e["name"] = "";
+        broken(e);
+        e = bardEntry("bad");
+        e["blurb"] = "\t\n ";
+        broken(e);
+        e = bardEntry("bad");
+        e["kind"] = "place";
+        broken(e);
+        e = bardEntry("bad");
+        e["motive"] = "vengeance";  // outside the vocabulary
+        broken(e);
+        e = bardEntry("bad");
+        e["tier"] = -1;
+        broken(e);
+        e = bardEntry("bad");
+        e["tier"] = "deep";  // not an integer
+        broken(e);
+        e = bardEntry("bad");
+        e["tier"] = 1.5;  // still not an integer
+        broken(e);
+        e = bardEntry("bad");
+        e["fact"] = {{"archetype", "rime_touched"}};  // element missing
+        broken(e);
+        e = bardEntry("bad");
+        e["fact"] = {{"element", "fire"}};  // archetype missing
+        broken(e);
+        broken(nlohmann::json("not an object"));
+    }
+
+    // Two write_catalog blocks: the FIRST is the overture, and the extra is
+    // noted rather than treated as a rejection — REQ-BARD-SEL-18 lists the only
+    // three clauses that reject in full, and this is not one of them.
+    {
+        nlohmann::json firstInput;
+        firstInput["entries"] = nlohmann::json::array({bardEntry("kept")});
+        firstInput["journal"] = "the first";
+        nlohmann::json secondInput;
+        secondInput["entries"] = nlohmann::json::array({bardEntry("ignored")});
+        secondInput["journal"] = "the second";
+        auto p = validateOvertureResponse(
+            bardCanned(nlohmann::json::array(
+                {bardToolUse("write_catalog", firstInput),
+                 bardToolUse("write_catalog", secondInput)})),
+            motives);
+        CHECK(p.has_value());
+        CHECK(p->entries.size() == 1);
+        CHECK(p->entries[0].handle == "kept");
+        CHECK(p->journal == "the first");
+    }
+
+    // An EMPTY vocabulary means "unchecked here" — admission still refuses a
+    // motive with no motive_catalog row.
+    {
+        nlohmann::json e = bardEntry("odd");
+        e["motive"] = "vengeance";
+        auto p = validateOvertureResponse(
+            bardOvertureCanned(nlohmann::json::array({e})), {});
+        CHECK(p.has_value());
+        CHECK(p->entries.size() == 1);
+    }
+
+    // An overture with zero entries is well formed, not a rejection.
+    {
+        auto p = validateOvertureResponse(
+            bardOvertureCanned(nlohmann::json::array()), motives);
+        CHECK(p.has_value());
+        CHECK(p->entries.empty());
+    }
+
+    // --- strict per response (REQ-BARD-SEL-18) ------------------------------
+    {
+        HttpResponse r = bardOvertureCanned(
+            nlohmann::json::array({bardEntry("one")}));
+        r.status = 500;
+        CHECK(!validateOvertureResponse(r, motives));
+    }
+    {
+        HttpResponse r;  // transport error: status 0
+        r.transportError = true;
+        CHECK(!validateOvertureResponse(r, motives));
+    }
+    {
+        HttpResponse r;
+        r.status = 200;
+        r.body = "}{ not json";
+        CHECK(!validateOvertureResponse(r, motives));
+    }
+    {
+        HttpResponse r;
+        r.status = 200;
+        r.body = "[1, 2, 3]";  // valid JSON, but an array
+        CHECK(!validateOvertureResponse(r, motives));
+    }
+    {
+        HttpResponse r;
+        r.status = 200;
+        r.body = "{\"stop_reason\":\"end_turn\"}";  // no content array
+        CHECK(!validateOvertureResponse(r, motives));
+    }
+    {
+        // A 200 whose only tool_use is some OTHER tool.
+        CHECK(!validateOvertureResponse(
+            bardCanned(nlohmann::json::array(
+                {bardToolUse("write_focus", {{"text", "a line"}})})),
+            motives));
+    }
+    {
+        // Text only, no tool call at all.
+        CHECK(!validateOvertureResponse(
+            bardCanned(nlohmann::json::array(
+                {{{"type", "text"}, {"text", "I decline."}}})),
+            motives));
+    }
+}
+
+// The wake gate (REQ-BARD-SEL-16, -14, -20): four tools accumulated, and NO
+// tool call at all as a success.
+static void testBardSelGateWake() {
+    const std::vector<std::string> motives = {
+        "curiosity", "secrecy", "rivalry",  "obligation",
+        "grief",     "appetite", "pride",   "homesickness"};
+
+    // --- all four tools in one response ------------------------------------
+    {
+        nlohmann::json entryInput;
+        entryInput["entry"] = bardEntry("appended_one");
+        auto p = validateWakeResponse(
+            bardCanned(nlohmann::json::array(
+                {bardToolUse("write_focus", {{"text", "the annex is watching"}}),
+                 bardToolUse("write_journal", {{"text", "a longer note"}}),
+                 bardToolUse("append_catalog", entryInput),
+                 bardToolUse("mark_seeded", {{"handle", "t0_scribe"}})})),
+            motives);
+        CHECK(p.has_value());
+        CHECK(p->hasFocus);
+        CHECK(p->focus == "the annex is watching");
+        CHECK(p->hasJournal);
+        CHECK(p->journal == "a longer note");
+        CHECK(p->appended.size() == 1);
+        CHECK(p->appended[0].handle == "appended_one");
+        CHECK(p->seededHandles == std::vector<std::string>{"t0_scribe"});
+    }
+
+    // --- a partial wake: journal only ---------------------------------------
+    {
+        auto p = validateWakeResponse(
+            bardCanned(nlohmann::json::array(
+                {bardToolUse("write_journal", {{"text", "only this"}})})),
+            motives);
+        CHECK(p.has_value());
+        CHECK(p->hasJournal);
+        CHECK(!p->hasFocus);
+        CHECK(p->focus.empty());
+        CHECK(p->appended.empty());
+        CHECK(p->seededHandles.empty());
+    }
+
+    // An EMPTY focus and NO focus are different facts — the flag, not the
+    // string, is what admission reads.
+    {
+        auto p = validateWakeResponse(
+            bardCanned(nlohmann::json::array(
+                {bardToolUse("write_focus", {{"text", ""}})})),
+            motives);
+        CHECK(p.has_value());
+        CHECK(p->hasFocus);
+        CHECK(p->focus.empty());
+    }
+
+    // --- spec test 15: no tool call at all is a SUCCESSFUL, EMPTY wake ------
+    {
+        std::optional<WakeProposal> p;
+        const std::string diagnostics = bardCapturedStderr([&] {
+            p = validateWakeResponse(
+                bardCanned(nlohmann::json::array(
+                    {{{"type", "text"}, {"text", "Nothing has changed."}}})),
+                motives);
+        });
+        CHECK(p.has_value());  // NOT nullopt
+        CHECK(!p->hasFocus);
+        CHECK(!p->hasJournal);
+        CHECK(p->appended.empty());
+        CHECK(p->seededHandles.empty());
+        // And stderr carries no claim of failure: declining to act is normal.
+        CHECK(diagnostics.empty());
+    }
+
+    // --- accumulation, and per-entry leniency inside a wake -----------------
+    {
+        nlohmann::json first;
+        first["entry"] = bardEntry("appended_one");
+        nlohmann::json second;
+        second["entry"] = bardEntry("appended_two");
+        auto p = validateWakeResponse(
+            bardCanned(nlohmann::json::array(
+                {bardToolUse("append_catalog", first),
+                 bardToolUse("append_catalog", second)})),
+            motives);
+        CHECK(p.has_value());
+        CHECK(p->appended.size() == 2);
+
+        nlohmann::json broken;
+        broken["entry"] = bardEntry("appended_two");
+        broken["entry"]["kind"] = "place";
+        auto q = validateWakeResponse(
+            bardCanned(nlohmann::json::array(
+                {bardToolUse("append_catalog", first),
+                 bardToolUse("append_catalog", broken)})),
+            motives);
+        CHECK(q.has_value());
+        CHECK(q->appended.size() == 1);
+        CHECK(q->appended[0].handle == "appended_one");
+    }
+
+    // Two mark_seeded calls accumulate; a blank handle is dropped here, while
+    // an UNKNOWN one is admission's problem (it is not detectable without a DB).
+    {
+        auto p = validateWakeResponse(
+            bardCanned(nlohmann::json::array(
+                {bardToolUse("mark_seeded", {{"handle", "one"}}),
+                 bardToolUse("mark_seeded", {{"handle", "  "}}),
+                 bardToolUse("mark_seeded", {{"handle", "two"}})})),
+            motives);
+        CHECK(p.has_value());
+        CHECK(p->seededHandles == (std::vector<std::string>{"one", "two"}));
+    }
+
+    // --- rejection is transport/parse only, and never a throw ---------------
+    {
+        HttpResponse r = bardCanned(nlohmann::json::array(
+            {bardToolUse("write_focus", {{"text", "a line"}})}));
+        r.status = 429;
+        CHECK(!validateWakeResponse(r, motives));
+    }
+    {
+        HttpResponse r;
+        r.transportError = true;
+        CHECK(!validateWakeResponse(r, motives));
+    }
+    {
+        HttpResponse r;
+        r.status = 200;
+        r.body = "not json at all";
+        CHECK(!validateWakeResponse(r, motives));
+    }
+}
+
+// A proposal in the shape admission takes, built field by field so each test
+// below can break exactly one thing.
+static CatalogEntryProposal bardProposal(const std::string& handle,
+                                         const std::string& motive = "curiosity",
+                                         int64_t tier = 1) {
+    CatalogEntryProposal e;
+    e.kind = "character";
+    e.handle = handle;
+    e.name = "cloistered scribe";
+    e.blurb = "a scribe who has not left the annex in years";
+    e.motive = motive;
+    e.tier = tier;
+    return e;
+}
+
+// Admission (REQ-BARD-SEL-19, -20, -24): the only place in the unit that
+// causes a write, and it causes them only through Brick 1's helpers.
+static void testBardSelAdmit() {
+    // --- a false fact drops its WHOLE entry, siblings admitted (test 14) ----
+    {
+        const TempDbFile worldPath("textworld_bard_admit_tests.db");
+        Db db = openWorld(worldPath.string(), "tests/combat_fixture.sql");
+
+        OvertureProposal proposal;
+        proposal.entries.push_back(bardProposal("first"));
+        // The neutral matchup: goblin_grunt has no resistance row for fire, so
+        // this beat would promise a falsehood about the rules.
+        CatalogEntryProposal liar = bardProposal("liar");
+        liar.kind = "beat";
+        liar.factArchetype = "goblin_grunt";
+        liar.factElement = "fire";
+        proposal.entries.push_back(liar);
+        proposal.entries.push_back(bardProposal("third"));
+        proposal.journal = "the annex is the thread";
+
+        CHECK(admitOvertureProposal(db, proposal) == 2);
+        CHECK(queryInt(db, "SELECT COUNT(*) FROM catalog") == 2);
+        // ZERO rows for the false entry — not a row minus its fact.
+        CHECK(queryInt(db,
+                       "SELECT COUNT(*) FROM catalog WHERE handle = 'liar'") == 0);
+        CHECK(queryInt(db,
+                       "SELECT COUNT(*) FROM catalog WHERE handle IN "
+                       "('first','third')") == 2);
+        // And the journal still lands.
+        CHECK(queryText(db, "SELECT value FROM meta WHERE key = 'bard_journal'") ==
+              "the annex is the thread");
+
+        // A TRUE fact is admitted with both halves intact.
+        OvertureProposal truthful;
+        CatalogEntryProposal lore = bardProposal("rime_lore");
+        lore.kind = "beat";
+        lore.factArchetype = "rime_touched";
+        lore.factElement = "fire";
+        truthful.entries.push_back(lore);
+        CHECK(admitOvertureProposal(db, truthful) == 1);
+        CHECK(queryText(db, "SELECT fact_archetype FROM catalog "
+                            "WHERE handle = 'rime_lore'") == "rime_touched");
+    }
+
+    // --- duplicate handles inside ONE overture ------------------------------
+    // Exactly one is admitted, and admission does NOT throw — the case that
+    // would otherwise surface as a UNIQUE violation and, under a catch, be
+    // indistinguishable from a disk fault.
+    {
+        const TempDbFile worldPath("textworld_bard_admit_dup_tests.db");
+        Db db = openWorld(worldPath.string(), "tests/combat_fixture.sql");
+
+        OvertureProposal proposal;
+        proposal.entries.push_back(bardProposal("twin"));
+        proposal.entries.push_back(bardProposal("twin"));
+        int admitted = -1;
+        CHECK(!threwRuntimeError([&] {
+            admitted = admitOvertureProposal(db, proposal);
+        }));
+        CHECK(admitted == 1);
+        CHECK(queryInt(db, "SELECT COUNT(*) FROM catalog WHERE handle = 'twin'") == 1);
+    }
+
+    // --- the equivalence guard (plan micro-decision 6a) ---------------------
+    // The pre-flight refuses IFF the helper throws, for the same arguments.
+    // Both are driven from ONE loop, so the duplicated predicate cannot drift
+    // without this test going red.
+    {
+        const TempDbFile worldPath("textworld_bard_equiv_tests.db");
+        Db db = openWorld(worldPath.string(), "tests/combat_fixture.sql");
+
+        const auto agree = [&db](const CatalogEntryProposal& e) {
+            const bool refused = !catalogEntryRefusal(db, e, {}).empty();
+            const bool threw = threwRuntimeError([&] {
+                writeCatalogEntry(db, e.kind, e.handle, e.name, e.blurb, e.motive,
+                                  e.tier, e.factArchetype, e.factElement);
+            });
+            CHECK(refused == threw);
+            return refused;
+        };
+
+        CatalogEntryProposal e = bardProposal("bad_kind");
+        e.kind = "place";
+        CHECK(agree(e));
+
+        e = bardProposal("bad_motive", "vengeance");
+        CHECK(agree(e));
+
+        e = bardProposal("   ");
+        CHECK(agree(e));
+
+        e = bardProposal("blank_name");
+        e.name = "  ";
+        CHECK(agree(e));
+
+        e = bardProposal("blank_blurb");
+        e.blurb = "";
+        CHECK(agree(e));
+
+        e = bardProposal("neg_tier", "curiosity", -1);
+        CHECK(agree(e));
+
+        e = bardProposal("half_fact_a");
+        e.factArchetype = "rime_touched";
+        CHECK(agree(e));
+
+        e = bardProposal("half_fact_b");
+        e.factElement = "fire";
+        CHECK(agree(e));
+
+        // The three truth-gate clauses, one at a time.
+        e = bardProposal("no_such_beast");
+        e.factArchetype = "wyrm";
+        e.factElement = "fire";
+        CHECK(agree(e));
+
+        e = bardProposal("not_an_element");
+        e.factArchetype = "rime_touched";
+        e.factElement = "ward";  // a spell, not an element
+        CHECK(agree(e));
+
+        e = bardProposal("neutral_pair");
+        e.factArchetype = "goblin_grunt";
+        e.factElement = "fire";  // no resistance row: teaches nothing
+        CHECK(agree(e));
+
+        // A VALID entry: both paths accept, which is the other half of "iff".
+        e = bardProposal("taken");
+        CHECK(!agree(e));  // no refusal, no throw — and the row is now written
+        CHECK(queryInt(db, "SELECT COUNT(*) FROM catalog WHERE handle = 'taken'") == 1);
+
+        // Duplicate handle: refused by the pre-flight, thrown by the helper.
+        CHECK(agree(bardProposal("taken")));
+    }
+
+    // --- the wake path (REQ-BARD-SEL-20, -24) -------------------------------
+    {
+        const TempDbFile worldPath("textworld_bard_wake_apply_tests.db");
+        Db db = openWorld(worldPath.string(), "tests/combat_fixture.sql");
+
+        // An entry ineligible EVERYWHERE: tier 9 is above any reachable room's
+        // distance, so catalogForHandle would refuse it in every room.
+        const int64_t deep =
+            writeCatalogEntry(db, "character", "t9_stranger", "far stranger",
+                              "someone who has not arrived yet", "rivalry", 9);
+        CHECK(catalogForHandle(db, 1, "t9_stranger") == 0);
+
+        WakeProposal wake;
+        wake.hasFocus = true;
+        wake.focus = "the annex is watching the stair";
+        wake.appended.push_back(bardProposal("appended_one"));
+        wake.seededHandles.push_back("t9_stranger");
+        wake.seededHandles.push_back("no_such_handle");
+
+        const int applied = applyWakeProposal(db, wake);
+        CHECK(applied == 3);  // focus + one entry + one seeding; the unknown is
+                              // ignored, not counted and not fatal
+        CHECK(queryText(db, "SELECT value FROM meta WHERE key = 'bard_focus'") ==
+              "the annex is watching the stair");
+        CHECK(queryInt(db, "SELECT COUNT(*) FROM catalog "
+                           "WHERE handle = 'appended_one'") == 1);
+        // The ineligible-everywhere entry IS seeded — the assertion that catches
+        // catalogForHandle being wired here instead of catalogIdForHandle.
+        CHECK(queryInt(db, ("SELECT seeded FROM catalog WHERE id = " +
+                            std::to_string(deep)).c_str()) == 1);
+        // The unknown handle latched nothing anywhere.
+        CHECK(queryInt(db, "SELECT COUNT(*) FROM catalog WHERE seeded = 1") == 1);
+    }
+
+    // --- the transaction shape Brick 3 relies on (REQ-BARD-WAKE-7) ----------
+    // Admission neither begins nor commits, so the caller's rollback discards
+    // everything it wrote.
+    {
+        const TempDbFile worldPath("textworld_bard_admit_txn_tests.db");
+        Db db = openWorld(worldPath.string(), "tests/combat_fixture.sql");
+
+        OvertureProposal proposal;
+        proposal.entries.push_back(bardProposal("rolled_back"));
+        proposal.journal = "never committed";
+
+        db.begin();
+        CHECK(admitOvertureProposal(db, proposal) == 1);
+        CHECK(queryInt(db, "SELECT COUNT(*) FROM catalog") == 1);
+        db.rollback();
+        CHECK(queryInt(db, "SELECT COUNT(*) FROM catalog") == 0);
+        CHECK(queryText(db,
+                        "SELECT value FROM meta WHERE key = 'bard_journal'").empty());
+    }
+}
+
+// The unit's contract, encoded as source-text assertions rather than greps run
+// once by hand (the testCombatFinalSweep precedent). Each of these is a
+// mechanical check from the spec's AI Validation section, kept as a standing
+// regression guard.
+static void testBardSelContract() {
+    const std::string bard = readFileBytes("src/bard.cpp");
+    CHECK(!bard.empty());
+
+    // REQ-BARD-SEL-21: the bard's TU performs only SELECTs. This is the spec's
+    // own grep, encoded — every write goes through the mutations helpers, which
+    // contain the SQL.
+    CHECK(!contains(bard, "INSERT"));
+    CHECK(!contains(bard, "UPDATE"));
+    CHECK(!contains(bard, "DELETE"));
+    // It DOES call the helpers — otherwise the check above passes vacuously.
+    CHECK(contains(bard, "writeCatalogEntry"));
+    CHECK(contains(bard, "writeBardJournal"));
+    CHECK(contains(bard, "writeBardFocus"));
+    CHECK(contains(bard, "markCatalogSeeded"));
+
+    // Plan micro-decision 6a: admission catches NOTHING. A catch here could not
+    // tell a validation refusal from a disk fault (db.hpp raises the same type
+    // for both), and would swallow the fault Brick 3 must roll back on.
+    CHECK(!contains(bard, "catch"));
+
+    // REQ-BARD-SEL-15: there is no place_catalog tool, anywhere under src/.
+    // The bard cannot express a room; placement is the architect's.
+    for (const auto& entry : std::filesystem::directory_iterator("src")) {
+        if (!entry.is_regular_file()) continue;
+        const std::string ext = entry.path().extension().string();
+        if (ext != ".cpp" && ext != ".hpp") continue;
+        CHECK(!contains(readFileBytes(entry.path()), "place_catalog"));
+    }
+
+    // REQ-BARD-SEL-7: no eligibility gate reads a per-entry unlock condition,
+    // and no such column exists. The storylet/time-cave line, asserted rather
+    // than remembered.
+    CHECK(!contains(bard, "unlock"));
+    CHECK(!contains(readFileBytes("src/world.cpp"), "unlock"));
+
+    // REQ-BARD-SEL-23, asserted again HERE as well as in testBardSelPrompt:
+    // this is the sweep a future reworder runs.
+    for (const std::string& prompt :
+         {std::string(kBardOverturePrompt), std::string(kBardWakePrompt)}) {
+        CHECK(contains(prompt, "situations, not urgency"));
+        CHECK(contains(prompt, "No deadlines"));
+    }
+}
+
+// The two system prompts (REQ-BARD-SEL-22, -23), modeled on
+// testArchitectPrompt: STRUCTURE only, pinned by substring. Nothing here judges
+// wording — that is a live concern, and Brick 3's.
+static void testBardSelPrompt() {
+    const std::string overture(kBardOverturePrompt);
+    const std::string wake(kBardWakePrompt);
+    CHECK(!overture.empty());
+    CHECK(!wake.empty());
+
+    // Each names its own tools, and only its own.
+    CHECK(contains(overture, "write_catalog"));
+    CHECK(!contains(overture, "mark_seeded"));
+    for (const char* tool : {"write_focus", "write_journal", "append_catalog",
+                             "mark_seeded"}) {
+        CHECK(contains(wake, tool));
+    }
+    CHECK(!contains(wake, "write_catalog"));
+
+    // Each names the context keys it will be reading, so the model knows what
+    // it is looking at.
+    for (const char* key : {"setting", "motives"}) {
+        CHECK(contains(overture, key));
+        CHECK(contains(wake, key));
+    }
+    for (const char* key : {"journal", "events", "catalog"}) {
+        CHECK(contains(wake, key));
+    }
+
+    // The urgency prohibition, in BOTH (spec mechanical check 4). Asserted on
+    // distinctive phrases rather than whole sentences, so a rewording that
+    // keeps the rule keeps the test.
+    for (const std::string& prompt : {overture, wake}) {
+        CHECK(contains(prompt, "situations, not urgency"));
+        CHECK(contains(prompt, "No deadlines"));
+        CHECK(contains(prompt, "countdowns"));
+        CHECK(contains(prompt, "spatial"));
+    }
+
+    // Neither invites the model to emit an engine identifier. `tier` IS
+    // discussed — it is a field the model fills — but only as DEPTH, never as
+    // danger, which is the misreading the prompt exists to prevent.
+    for (const std::string& prompt : {overture, wake}) {
+        CHECK(contains(prompt, "Invent no numbers or identifiers"));
+    }
+    CHECK(contains(overture, "Tier is distance, not danger"));
+    CHECK(contains(wake, "tier is DEPTH"));
+
+    // The overture's two load-bearing clauses: what a false fact costs, and
+    // that nothing exists yet. The wake's: declining to act is legitimate.
+    CHECK(contains(overture, "WHOLE entry"));
+    CHECK(contains(overture, "Nothing exists yet"));
+    CHECK(contains(wake, "Doing nothing is a legitimate turn"));
+}
+
+// The wake context (REQ-BARD-SEL-10): five keys, the tag shield on the event
+// lines, no ids anywhere, and the event cap.
+static void testBardSelWakeContext() {
+    {
+        const TempDbFile worldPath("textworld_bard_wake_ctx_tests.db");
+        Db db = openWorld(worldPath.string(), "tests/combat_fixture.sql");
+        db.exec("UPDATE meta SET value = 'a drowned abbey' WHERE key = 'setting'");
+        writeBardJournal(db, "the scribe is the one to watch");
+
+        const int64_t scribe =
+            writeCatalogEntry(db, "character", "t0_scribe", "cloistered scribe",
+                              "a scribe who has not left the annex in years",
+                              "curiosity", 0);
+        writeCatalogEntry(db, "character", "t9_stranger", "far stranger",
+                          "someone who has not arrived yet", "rivalry", 9);
+
+        // Ids well clear of the single-digit trap: a room and an entity whose
+        // decimal forms cannot collide with a turn number or a tier.
+        db.exec("INSERT INTO entities(id) VALUES (4321), (5000)");
+        db.exec("INSERT INTO room(entity) VALUES (4321)");
+        db.exec("INSERT INTO name(entity, value) VALUES (5000, 'quiet copyist')");
+        db.exec("INSERT INTO events(turn, actor, verb, subject, object, detail) "
+                "VALUES (5, 3, 'moved', 3, 4321, NULL)");
+        // The wake carries events SINCE the last wake, and a fresh world sits
+        // at turn 0 — so the turn has to advance before an event the helpers
+        // stamp with meta.turn can qualify at all.
+        db.exec("UPDATE meta SET value = 6 WHERE key = 'turn'");
+        CHECK(materializeCatalogEntry(db, scribe, 5000, 3));
+
+        const std::string payload = buildWakeContext(db);
+        const nlohmann::json j = nlohmann::json::parse(payload);
+
+        // --- exactly five keys ---------------------------------------------
+        CHECK(j.is_object());
+        CHECK(j.size() == 5);
+        for (const char* key : {"setting", "motives", "journal", "events", "catalog"}) {
+            CHECK(j.contains(key));
+        }
+        CHECK(j["setting"] == "a drowned abbey");
+        CHECK(j["journal"] == "the scribe is the one to watch");
+
+        // --- the vocabulary reaches the wire, keys AND blurbs (test 11a) ----
+        CHECK(j["motives"].size() == 8);
+        for (const auto& [key, blurb] : fixtureMotives()) {
+            CHECK(contains(payload, key));
+            CHECK(contains(payload, blurb));
+        }
+
+        // --- the FULL catalog: known handle + blurb, materialized marked -----
+        CHECK(j["catalog"].size() == 2);
+        for (const nlohmann::json& entry : j["catalog"]) {
+            CHECK(entry.size() == 4);  // handle, blurb, motive, materialized
+            CHECK(entry.contains("handle"));
+            CHECK(entry.contains("blurb"));
+            CHECK(entry.contains("motive"));
+            CHECK(entry.contains("materialized"));
+            CHECK(!entry.contains("id"));
+            CHECK(!entry.contains("tier"));
+            CHECK(!entry.contains("seeded"));
+            CHECK(!entry.contains("entity"));
+        }
+        CHECK(j["catalog"][0]["handle"] == "t0_scribe");
+        CHECK(j["catalog"][0]["blurb"] ==
+              "a scribe who has not left the annex in years");
+        CHECK(j["catalog"][0]["materialized"] == true);   // it has been cast
+        CHECK(j["catalog"][1]["handle"] == "t9_stranger");
+        CHECK(j["catalog"][1]["materialized"] == false);  // still latent, and
+                                                          // still carried
+
+        // --- the no-ids sweep (REQ-BARD-SEL-8) ------------------------------
+        // The room id an event's `object` column carried, and the entity id its
+        // `subject` resolved from, appear NOWHERE — while the subject's NAME
+        // does, which is the point of resolving it.
+        CHECK(!contains(payload, "4321"));
+        CHECK(!contains(payload, "5000"));
+        CHECK(contains(payload, "quiet copyist"));
+        // Nor the tier of the entry that is nine deep.
+        CHECK(!contains(payload, "\"tier\""));
+        CHECK(!contains(payload, "\"seeded\""));
+
+        // --- the tag shield on 'materialized' (plan micro-decision 8) -------
+        // The event line names the verb, never the catalog HANDLE its detail
+        // carries — the handle is a machine token, and it is already in the
+        // catalog block as a selection field.
+        {
+            bool sawMaterialized = false;
+            for (const nlohmann::json& line : j["events"]) {
+                const std::string text = line.get<std::string>();
+                if (contains(text, "materialized")) {
+                    sawMaterialized = true;
+                    CHECK(!contains(text, "t0_scribe"));
+                }
+                CHECK(!contains(text, "4321"));  // the object column, dropped
+            }
+            CHECK(sawMaterialized);
+        }
+    }
+
+    // --- the event cap: the most recent kBardWakeEventLimit, oldest-first ---
+    {
+        const TempDbFile worldPath("textworld_bard_wake_cap_tests.db");
+        Db db = openWorld(worldPath.string(), "tests/combat_fixture.sql");
+        db.exec("DELETE FROM events");
+        for (int i = 1; i <= 200; ++i) {
+            Stmt s = db.prepare(
+                "INSERT INTO events(turn, actor, verb, subject, object, detail) "
+                "VALUES (?, 3, 'looked', 0, 0, ?)");
+            s.bind(1, static_cast<int64_t>(i));
+            s.bind(2, "ev" + std::to_string(i));
+            CHECK(!s.step());
+        }
+
+        const nlohmann::json j = nlohmann::json::parse(buildWakeContext(db));
+        CHECK(j["events"].size() == static_cast<size_t>(kBardWakeEventLimit));
+        // The RECENT tail, not the oldest: ev1..ev80 are dropped.
+        CHECK(contains(j["events"][0].get<std::string>(), "ev81"));
+        CHECK(contains(j["events"][119].get<std::string>(), "ev200"));
+        CHECK(!contains(buildWakeContext(db), "ev1)"));
+        // Rendered oldest-first, so the narrative order survives the cap.
+        CHECK(contains(j["events"][0].get<std::string>(), "turn 81:"));
+        CHECK(contains(j["events"][1].get<std::string>(), "turn 82:"));
+
+        // Events at or before the last wake are not carried at all.
+        db.exec("UPDATE meta SET value = 199 WHERE key = 'bard_last_wake_turn'");
+        const nlohmann::json after = nlohmann::json::parse(buildWakeContext(db));
+        CHECK(after["events"].size() == 1);
+        CHECK(contains(after["events"][0].get<std::string>(), "ev200"));
+    }
+}
+
+// The two handle lookups (REQ-BARD-SEL-6, -24). They answer different
+// questions, and the assertions below are what catch mark_seeded being wired to
+// the gated one.
+static void testBardSelHandle() {
+    const TempDbFile worldPath("textworld_bard_handle_tests.db");
+    Db db = openWorld(worldPath.string(), "tests/combat_fixture.sql");
+
+    const int64_t scribe =
+        writeCatalogEntry(db, "character", "t0_scribe", "cloistered scribe",
+                          "a scribe who has not left the annex in years",
+                          "curiosity", 0);
+    const int64_t ink = writeCatalogEntry(db, "beat", "t0_ink", "spilled ink",
+                                          "a dark stain, still wet", "secrecy", 0);
+    // Tier 9: above every reachable room's distance, so it is ineligible
+    // EVERYWHERE — the case mark_seeded must still resolve.
+    const int64_t deep =
+        writeCatalogEntry(db, "character", "t9_stranger", "far stranger",
+                          "someone who has not arrived yet", "rivalry", 9);
+
+    // --- catalogForHandle: the live re-check --------------------------------
+    CHECK(catalogForHandle(db, 1, "t0_scribe") == scribe);
+    CHECK(catalogForHandle(db, 1, "t0_ink") == ink);  // both kinds are searched
+    CHECK(catalogForHandle(db, 1, "no_such_handle") == 0);
+    CHECK(catalogForHandle(db, 1, "") == 0);
+    CHECK(catalogForHandle(db, 1, "t9_stranger") == 0);  // tier above distance
+
+    // The stale-snapshot case: eligible when the menu was built, materialized
+    // before the proposal committed.
+    const std::vector<CatalogChoice> snapshot = eligibleCatalog(db, 1, "character");
+    CHECK(handlesOf(snapshot) == std::vector<std::string>{"t0_scribe"});
+    db.exec("INSERT INTO entities(id) VALUES (30)");
+    CHECK(materializeCatalogEntry(db, scribe, 30, 3));
+    CHECK(catalogForHandle(db, 1, "t0_scribe") == 0);  // the snapshot is stale
+
+    // --- catalogIdForHandle: room-free and gate-free ------------------------
+    // Non-zero for BOTH handles catalogForHandle just refused.
+    CHECK(catalogIdForHandle(db, "t0_scribe") == scribe);   // materialized
+    CHECK(catalogIdForHandle(db, "t9_stranger") == deep);   // ineligible everywhere
+    CHECK(catalogIdForHandle(db, "no_such_handle") == 0);
+    CHECK(catalogIdForHandle(db, "") == 0);
+}
+
+// The prospective-room menu (REQ-BARD-SEL-5): one hop past the origin, both
+// kinds in one call.
+static void testBardSelEligibleNewRoom() {
+    const TempDbFile worldPath("textworld_bard_newroom_tests.db");
+    Db db = openWorld(worldPath.string(), "tests/combat_fixture.sql");
+
+    writeCatalogEntry(db, "character", "t0_scribe", "cloistered scribe",
+                      "a scribe who has not left the annex in years",
+                      "curiosity", 0);
+    writeCatalogEntry(db, "beat", "t1_ink", "spilled ink",
+                      "a dark stain, still wet", "secrecy", 1);
+    writeCatalogEntry(db, "character", "t2_pilgrim", "late pilgrim",
+                      "a pilgrim arrived long after the gate closed",
+                      "homesickness", 2);
+
+    // The origin (the seed room) is at distance 0, so its OWN menu stops at
+    // tier 0 while the prospective room's reaches tier 1 — the two differ by
+    // exactly one tier, so a menu built against the wrong distance cannot pass.
+    CHECK(handlesOf(eligibleCatalog(db, 1, "character")) ==
+          std::vector<std::string>{"t0_scribe"});
+    CHECK(eligibleCatalog(db, 1, "beat").empty());
+    CHECK(handlesOf(eligibleCatalogForNewRoom(db, 1)) ==
+          (std::vector<std::string>{"t0_scribe", "t1_ink"}));
+
+    // Both kinds arrive in that ONE call — a character and a beat.
+    CHECK(handlesOf(eligibleCatalogForNewRoom(db, 1)).size() == 2);
+
+    // It equals the menu at a REAL room of distance d+1 (the corridor), taken
+    // over both kinds and still in catalog.id order.
+    {
+        std::vector<std::string> real =
+            handlesOf(eligibleCatalog(db, 2, "character"));
+        for (const std::string& h : handlesOf(eligibleCatalog(db, 2, "beat"))) {
+            real.push_back(h);
+        }
+        std::sort(real.begin(), real.end());
+        std::vector<std::string> prospective = handlesOf(eligibleCatalogForNewRoom(db, 1));
+        std::sort(prospective.begin(), prospective.end());
+        CHECK(real == prospective);
+    }
+
+    // An origin BFS cannot reach yields empty, and the +1 does not overflow the
+    // sentinel into a very small (very permissive) distance.
+    db.exec("INSERT INTO entities(id) VALUES (20)");
+    db.exec("INSERT INTO room(entity) VALUES (20)");
+    CHECK(distanceFromSeed(db, 20) == INT64_MAX);
+    CHECK(eligibleCatalogForNewRoom(db, 20).empty());
+}
+
+// Gate (d): a knowledge beat is offered only where its subject is LIVE — the
+// archetype appears in eligibleArchetypes for this room or for one a realized
+// exit away (REQ-BARD-SEL-2d, -3). Both states are driven from ONE world by
+// changing only the room argument, so the test cannot pass by fixture
+// divergence.
+static void testBardSelEligibleFact() {
+    const TempDbFile worldPath("textworld_bard_fact_tests.db");
+    Db db = openWorld(worldPath.string(), "tests/combat_fixture.sql");
+
+    // Take combat out of bootstrap and teach the player fire, so rime_touched
+    // (weak to fire) enters the eligible menu of every CONTESTED room — the
+    // only archetype the fixture can carry a TRUE fact about.
+    db.exec("INSERT INTO meta(key, value) VALUES ('architect_spawn_count', 1)");
+    db.exec("INSERT INTO known_spells(entity, spell) VALUES (3, 'fire')");
+    {
+        const std::vector<std::string> here = eligibleArchetypes(db, 6);
+        CHECK(std::find(here.begin(), here.end(), "rime_touched") != here.end());
+        CHECK(eligibleArchetypes(db, 15).empty());  // distance 3: a safe edge
+    }
+
+    // Room 21: a second safe-edge room one hop PAST the outer hall (distance
+    // 4), so neither it nor its only neighbour offers anything. Room 15's exits
+    // are rewritten so the EMPTY neighbour is scanned first — a
+    // first-neighbour-only implementation of the union would withhold the beat.
+    db.exec("INSERT INTO entities(id) VALUES (21)");
+    db.exec("INSERT INTO room(entity) VALUES (21)");
+    db.exec("INSERT INTO name(entity, value) VALUES (21, 'dust stair')");
+    db.exec("DELETE FROM exits WHERE room = 15");
+    db.exec("INSERT INTO exits(room, direction, dest) VALUES (15, 'north', 21)");
+    db.exec("INSERT INTO exits(room, direction, dest) VALUES (15, 'west', 6)");
+    db.exec("INSERT INTO exits(room, direction, dest) VALUES (21, 'south', 15)");
+    CHECK(distanceFromSeed(db, 15) == 3);
+    CHECK(distanceFromSeed(db, 21) == 4);
+
+    // One knowledge beat and one ordinary entry, both tier 0 so gate (b) can
+    // never be the reason either is missing.
+    writeCatalogEntry(db, "beat", "rime_lore", "rime lore",
+                      "frost-bitten things burn faster than they look",
+                      "curiosity", 0, "rime_touched", "fire");
+    writeCatalogEntry(db, "beat", "plain_beat", "plain beat",
+                      "a door left open onto nothing", "secrecy", 0);
+
+    // Withheld where the subject is nowhere live; offered one room closer,
+    // where a NEIGHBOUR (not this room) has it. Only the argument changes.
+    CHECK(handlesOf(eligibleCatalog(db, 21, "beat")) ==
+          std::vector<std::string>{"plain_beat"});
+    CHECK(handlesOf(eligibleCatalog(db, 15, "beat")) ==
+          (std::vector<std::string>{"rime_lore", "plain_beat"}));
+
+    // And offered in a room whose OWN menu carries it.
+    CHECK(handlesOf(eligibleCatalog(db, 6, "beat")) ==
+          (std::vector<std::string>{"rime_lore", "plain_beat"}));
+
+    // The factless entry is unaffected in every state above — gate (d) applies
+    // to knowledge beats only.
+    for (const int64_t room : {int64_t{6}, int64_t{15}, int64_t{21}}) {
+        const std::vector<std::string> menu = handlesOf(eligibleCatalog(db, room, "beat"));
+        CHECK(std::find(menu.begin(), menu.end(), "plain_beat") != menu.end());
+    }
+
+    // Forget fire and the subject stops being live everywhere — the beat is
+    // withheld even in its own room, because eligibleArchetypes says so.
+    db.exec("DELETE FROM known_spells WHERE entity = 3 AND spell = 'fire'");
+    CHECK(handlesOf(eligibleCatalog(db, 6, "beat")) ==
+          std::vector<std::string>{"plain_beat"});
+}
+
 int main() {
     // libcurl init/shutdown for the whole run (REQ-LAT-7), ABOVE the live
     // smokes: they use the production transports and must run with libcurl
@@ -8554,6 +9898,20 @@ int main() {
     testTermTruncate();
     testBardStoreMeta();
     testBardStoreAppendOnly();
+    testBardSelExports();
+    testBardSelEligible();
+    testBardSelEligibleFact();
+    testBardSelEligibleNewRoom();
+    testBardSelHandle();
+    testBardSelContext();
+    testBardSelWakeContext();
+    testBardSelPrompt();
+    testBardSelRequestBody();
+    testBardSelWakeRequestBody();
+    testBardSelGateOverture();
+    testBardSelGateWake();
+    testBardSelAdmit();
+    testBardSelContract();
 
     std::printf("%d checks, %d failures\n", g_checks, g_failures);
     return g_failures == 0 ? 0 : 1;

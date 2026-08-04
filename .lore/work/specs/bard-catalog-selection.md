@@ -69,7 +69,9 @@ The motive blurbs are not optional. The tool schema constrains `motive` to eight
 
 **REQ-BARD-SEL-18.** An overture response is rejected in full only when the HTTP status is non-200, the body is unparseable, or it contains no `write_catalog` tool call. A rejected overture yields an empty catalog.
 
-**REQ-BARD-SEL-19.** A `fact` that fails the truth gate at admission (REQ-BARD-STORE-10) causes its **entire entry** to be dropped, not merely the fact — a knowledge beat whose knowledge is false has no remaining purpose. This is enforced by catching the helper's throw at the call site and continuing with the remaining entries.
+**REQ-BARD-SEL-19.** A `fact` that fails the truth gate at admission (REQ-BARD-STORE-10) causes its **entire entry** to be dropped, not merely the fact — a knowledge beat whose knowledge is false has no remaining purpose. Admission drops it and continues with the remaining entries.
+
+*Mechanism amended 2026-08-03* (plan micro-decision 6a, approved). This originally read "enforced by catching the helper's throw at the call site." It is instead enforced by a **read-only pre-flight** at the call site that mirrors every refusal `writeCatalogEntry` makes, so a refused entry never reaches the helper. Admission catches nothing: `db.hpp` raises `std::runtime_error` for a genuine SQLite fault and for a validation refusal alike, so a catch could not tell them apart and would swallow the fault that REQ-BARD-WAKE-7/-23 require to roll the whole write back. The requirement above — and its test 14 — are unchanged.
 
 **REQ-BARD-SEL-20.** A `mark_seeded` naming an unknown handle is ignored with a diagnostic; the rest of the wake still applies.
 
