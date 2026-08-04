@@ -104,7 +104,7 @@ std::optional<RoomProposal> runJob(const PregenJob& job,
                                    const HttpTransport& transport) {
     try {
         return architectProposeRoom(job.contextPayload, job.enemyBlurbs,
-                                    job.direction, transport);
+                                    job.storyHandles, job.direction, transport);
     } catch (const std::exception& e) {
         // Silent to the player (REQ-PREGEN-9): this is stderr, and the turn
         // that eventually walks this exit simply takes the miss path.
