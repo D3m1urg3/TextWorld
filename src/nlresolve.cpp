@@ -18,6 +18,7 @@
 
 #include "aihttp.hpp"  // modelForRole + the shared production transport
 #include "json.hpp"
+#include "log.hpp"
 #include "lookup.hpp"
 
 namespace {
@@ -83,8 +84,8 @@ std::vector<std::string> portableNamesIn(Db& db, int64_t holder) {
 // a..e order. Mirrors prose's failClause; std::nullopt_t converts to the
 // optional<Action> the gate returns.
 std::nullopt_t failClause(char clause, const char* why) {
-    std::fprintf(stderr, "aiResolve: response rejected, clause %c failed: %s\n",
-                 clause, why);
+    logEmitf(LogLevel::Debug, "nlresolve",
+             "aiResolve: response rejected, clause %c failed: %s", clause, why);
     return std::nullopt;
 }
 
@@ -351,13 +352,16 @@ std::optional<Action> aiResolve(Db& db, const std::string& line,
         // rejection; a clean no-tool-call returns nullopt silently.
         return validateAndLower(resp, db);
     } catch (const std::exception& e) {
-        std::fprintf(stderr, "aiResolve: failed, falling back to parser: %s\n",
-                     e.what());
+        // WARN, not ERROR: the turn still resolves, just through the
+        // deterministic parser. The exception message is a failure reason —
+        // no response body and no key can reach it (REQ-LOG-26).
+        logEmitf(LogLevel::Warn, "nlresolve",
+                 "aiResolve: failed, falling back to parser: %s", e.what());
         return std::nullopt;
     } catch (...) {
-        std::fprintf(stderr,
-                     "aiResolve: failed, falling back to parser: "
-                     "unknown exception\n");
+        logEmit(LogLevel::Warn, "nlresolve",
+                "aiResolve: failed, falling back to parser: unknown "
+                "exception");
         return std::nullopt;
     }
 }

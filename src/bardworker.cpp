@@ -17,12 +17,13 @@
 #include <utility>
 
 #include "aihttp.hpp"  // makeAnthropicTransport + AiHttpWorkerClient
+#include "log.hpp"
 #include "prose.hpp"   // aiNarrationEnabled — the AI half of the gate
 
 namespace {
 
 // TEXTWORLD_BARD: ON unless set to exactly "0" (REQ-BARD-WAKE-20).
-// Deliberately the TEXTWORLD_AI rule and not TEXTWORLD_PROFILE's — an unset
+// Deliberately the TEXTWORLD_AI rule and not the log threshold's — an unset
 // variable means the feature is on, so a player who has never heard of it gets
 // a world with a story in it.
 bool readBardEnv() {
@@ -96,8 +97,8 @@ HttpTransport g_testTransport;
 // catch-all: a throwing transport must never escape onto the worker thread,
 // where there is no caller to catch it and the process would die — which is the
 // exact inverse of the degradation claim this whole brick is built to keep. The
-// diagnostic says `bard` because a failed wake and a walled turn are different
-// events to whoever is reading stderr.
+// diagnostic's source is `bard` because a failed wake and a walled turn are
+// different events to whoever is reading the log.
 std::optional<WakeProposal> runWake(const BardJob& job,
                                     const HttpTransport& transport) {
     try {
@@ -106,12 +107,13 @@ std::optional<WakeProposal> runWake(const BardJob& job,
         // and a response calling NO tool is a successful, EMPTY wake.
         return validateWakeResponse(transport(job.requestBody), job.motives);
     } catch (const std::exception& e) {
-        // Silent to the player: this is stderr, and the turn that would have
-        // committed this wake simply has nothing to commit.
-        std::fprintf(stderr, "bard: wake failed: %s\n", e.what());
+        // Silent to the player (REQ-LOG-1): this goes to the session log, and
+        // the turn that would have committed this wake simply has nothing to
+        // commit.
+        logEmitf(LogLevel::Error, "bard", "wake failed: %s", e.what());
         return std::nullopt;
     } catch (...) {
-        std::fprintf(stderr, "bard: wake failed (non-std)\n");
+        logEmit(LogLevel::Error, "bard", "wake failed (non-std)");
         return std::nullopt;
     }
 }
@@ -124,6 +126,8 @@ std::optional<WakeProposal> runWake(const BardJob& job,
 // created and destroyed on the thread that uses it (REQ-BARD-WAKE-16) — and
 // binds g_stopping as its abort flag.
 void workerMain(HttpTransport testTransport) {
+    // REQ-LOG-12: everything this thread says is labelled `bard`.
+    logSetThreadName("bard");
     std::unique_ptr<AiHttpWorkerClient> client;
     HttpTransport transport;
     if (testTransport) {

@@ -16,6 +16,7 @@
 
 #include "aihttp.hpp"  // modelForRole + the shared production transport
 #include "json.hpp"
+#include "log.hpp"
 
 namespace {
 
@@ -185,8 +186,8 @@ Rules, absolute:
 // One diagnostic line per rejected response, naming the first failed clause
 // in a..e order. This wording is reused by later steps; keep it one line.
 std::nullopt_t failClause(char clause, const char* why) {
-    std::fprintf(stderr, "aiRender: response rejected, clause %c failed: %s\n",
-                 clause, why);
+    logEmitf(LogLevel::Debug, "prose",
+             "aiRender: response rejected, clause %c failed: %s", clause, why);
     return std::nullopt;
 }
 
@@ -407,7 +408,7 @@ bool aiNarrationEnabled() {
 std::optional<std::string> aiRender(Db& db, int64_t turn,
                                     const HttpTransport& transport) {
     // REQ-PROSE-3: no AI-path failure may crash a turn. The whole pipeline
-    // sits inside try/catch; ANY failure yields one stderr diagnostic line
+    // sits inside try/catch; ANY failure yields one logged diagnostic line
     // (never player prose) and nullopt — the caller falls back to templates.
     try {
         // Exactly ONE transport call — no retry loop, ever.
@@ -426,13 +427,17 @@ std::optional<std::string> aiRender(Db& db, int64_t turn,
         out += deterministicAppends(db, turn);
         return out;
     } catch (const std::exception& e) {
-        std::fprintf(stderr, "aiRender: failed, falling back to templates: %s\n",
-                     e.what());
+        // WARN, not ERROR: the player still gets a room description, just a
+        // duller one. The exception message is a failure reason — no response
+        // body and no key can reach it (REQ-LOG-26); bodies are parsed with
+        // allow_exceptions=false and the key never leaves the x-api-key header.
+        logEmitf(LogLevel::Warn, "prose",
+                 "aiRender: failed, falling back to templates: %s", e.what());
         return std::nullopt;
     } catch (...) {
-        std::fprintf(stderr,
-                     "aiRender: failed, falling back to templates: "
-                     "unknown exception\n");
+        logEmit(LogLevel::Warn, "prose",
+                "aiRender: failed, falling back to templates: unknown "
+                "exception");
         return std::nullopt;
     }
 }

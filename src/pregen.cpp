@@ -18,11 +18,12 @@
 #include <utility>
 
 #include "aihttp.hpp"  // makeAnthropicTransport + AiHttpWorkerClient
+#include "log.hpp"
 
 namespace {
 
 // TEXTWORLD_PREGEN: ON unless set to exactly "0" (REQ-PREGEN-1). Deliberately
-// the TEXTWORLD_AI rule and not TEXTWORLD_PROFILE's — an unset variable means
+// the TEXTWORLD_AI rule and not the log threshold's — an unset variable means
 // the feature is on, so a player who has never heard of it gets the fast turn.
 bool readPregenEnv() {
     const char* v = std::getenv("TEXTWORLD_PREGEN");
@@ -99,19 +100,20 @@ Key keyOf(int64_t room, const std::string& direction) {
 // transport must never escape onto the worker thread, where there is no caller
 // to catch it and the process would die. The diagnostic says `pregen` rather
 // than `architectGenerate` because a failed background job and a walled turn
-// are different events to whoever is reading stderr.
+// are different events to whoever is reading the log.
 std::optional<RoomProposal> runJob(const PregenJob& job,
                                    const HttpTransport& transport) {
     try {
         return architectProposeRoom(job.contextPayload, job.enemyBlurbs,
                                     job.storyHandles, job.direction, transport);
     } catch (const std::exception& e) {
-        // Silent to the player (REQ-PREGEN-9): this is stderr, and the turn
-        // that eventually walks this exit simply takes the miss path.
-        std::fprintf(stderr, "pregen: job failed: %s\n", e.what());
+        // Silent to the player (REQ-PREGEN-9, REQ-LOG-1): this goes to the
+        // session log, and the turn that eventually walks this exit simply
+        // takes the miss path.
+        logEmitf(LogLevel::Error, "pregen", "job failed: %s", e.what());
         return std::nullopt;
     } catch (...) {
-        std::fprintf(stderr, "pregen: job failed (non-std)\n");
+        logEmit(LogLevel::Error, "pregen", "job failed (non-std)");
         return std::nullopt;
     }
 }
@@ -156,6 +158,9 @@ void storeResultLocked(const Key& key, const PregenJob& job,
 // created and destroyed on the thread that uses it (REQ-PREGEN-8) — and binds
 // g_stopping as its abort flag.
 void workerMain(HttpTransport testTransport) {
+    // REQ-LOG-12: everything this thread says is labelled `pregen`, so a
+    // background job's messages are distinguishable from the main thread's.
+    logSetThreadName("pregen");
     std::unique_ptr<AiHttpWorkerClient> client;
     HttpTransport transport;
     if (testTransport) {

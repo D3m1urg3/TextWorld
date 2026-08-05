@@ -1,0 +1,2 @@
+world file 'world.db' has schema_version 999999 but this build expects 6.
+No migrations exist yet: delete the world file and let the game recreate it from the seed.

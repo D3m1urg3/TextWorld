@@ -22,7 +22,7 @@ The **engine foundation**, the **AI prose renderer**, the **AI action resolver**
 
 **Combat** is a deterministic **puzzle**: enemies are locks, spells are keys, and the engine owns every number — there is no RNG anywhere. It rides the same tick model (one prompt = one tick = one transaction) and the same seams — new verbs, engine-owned mutation helpers, template + AI narration — so a fight is just more events in the same transcript. See [Combat](#combat) below.
 
-**Turn latency** is now measurable, and a little cheaper. All three AI roles share one persistent libcurl handle owned by the process, so only the first call of a session pays DNS, TCP, and TLS — every later call, of any role and across idle gaps, reuses the connection. Input resolution runs on a fast model while narration and generation keep the prose model. Gated profiling (`TEXTWORLD_PROFILE`) reports per-phase wall-clock and a per-call setup-vs-TTFB split, which is how the honest accounting below got made: a turn is ~99.9% model latency, so connection reuse buys back well under 1% of it. It is free and permanent; the levers that would actually move a turn — streaming narration, pre-generating neighbor rooms — are deferred, and profiling now exists to measure them.
+**Turn latency** is now measurable, and a little cheaper. All three AI roles share one persistent libcurl handle owned by the process, so only the first call of a session pays DNS, TCP, and TLS — every later call, of any role and across idle gaps, reuses the connection. Input resolution runs on a fast model while narration and generation keep the prose model. Gated profiling (`TEXTWORLD_LOG_LEVEL=debug`) reports per-phase wall-clock and a per-call setup-vs-TTFB split — into the session log, not onto the screen — which is how the honest accounting below got made: a turn is ~99.9% model latency, so connection reuse buys back well under 1% of it. It is free and permanent; the levers that would actually move a turn — streaming narration, pre-generating neighbor rooms — are deferred, and profiling now exists to measure them.
 
 **The status band** is the engine's answer to "where am I and what is happening": an ANSI-colored block printed above the prompt on *every* turn — including turns the world declines — showing the room, its exits, the objects in it, every living hostile with its HP, telegraphed strikes and active states, and your own HP and spell readiness. It is composed once, in the turn loop, from read-only queries, so the AI and template paths get identical bytes and no model-supplied number can ever reach it. Prose is wrapped to the terminal width, color follows the `NO_COLOR` / `CLICOLOR` conventions and vanishes entirely when output is piped, and nothing is ever truncated to fit — a narrow terminal makes the band taller, never quieter. See [The status band](#the-status-band) below.
 
@@ -94,13 +94,46 @@ Environment variables:
 | `ANTHROPIC_API_KEY` | Enables both AI features (narration and input resolution) when set and non-empty. The key is sent only in the request's `x-api-key` header — never logged, stored, or written to the world file. |
 | `TEXTWORLD_AI` | Kill switch for both AI features. Set to exactly `0` to force template + fixed-verb mode even with a key present. Any other value (or unset) leaves AI on. |
 | `TEXTWORLD_MODEL` | Overrides the model **for every role**. Without it each role uses its own default: input resolution runs on `claude-haiku-4-5` (a constrained, schema-gated classification — a wrong answer fails the same validation gate and falls back to the fixed-verb parser), while narration and world generation stay on `claude-opus-4-8` for prose quality. Set and non-empty, this variable replaces all three. |
-| `TEXTWORLD_PROFILE` | Turn profiling. Off unless set to something other than empty or `0`. When on, each turn writes one `twprof key=value` line per phase (`resolve`, `tick`, `narrate`, `generate`, `total`) and per network call (curl's namelookup/connect/appconnect/starttransfer/total split, plus role, model, and token counts) to **stderr** — game text on stdout is untouched. Off, a turn's output and behavior are byte-for-byte what they are without the variable. |
+| `TEXTWORLD_LOG_LEVEL` | How much the engine records about itself: `error`, `warn`, `info`, or `debug`, case-insensitive. **Defaults to `info`**; unset, empty, or unrecognized values all mean `info`, silently. Everything lands in `logs/textworld-*.log` and **nothing ever reaches the terminal** — see [The session log](#the-session-log) below. `debug` is also the profiling switch: at that level each turn writes one `twprof key=value` line per phase (`resolve`, `tick`, `narrate`, `generate`, `total`) and per network call (curl's namelookup/connect/appconnect/starttransfer/total split, plus role, model, and token counts). Whatever the level, a turn's output and behavior on screen are byte-for-byte identical. |
 
 With AI enabled, a turn makes up to two synchronous Claude calls — one to resolve the input line, one to narrate the result — and a `go` across an unmapped edge adds one more to generate the room. Each call has an 8-second timeout and no retries; a slow or failed call falls back (to the fixed-verb parser, that turn's template, or the `You can't go that way.` wall, respectively). No network access happens in template mode.
 
 All three roles go out through one shared client holding a single persistent libcurl handle, initialized and torn down at the process boundaries. The first call of a session pays the full DNS + TCP + TLS handshake; every later one reuses that connection and TLS session, so its setup time is effectively zero. The handle is main-thread-only by contract — nothing here starts a thread — which is recorded in `src/aihttp.hpp` for the deferred background pre-generation work.
 
-Turning on `TEXTWORLD_PROFILE` makes all of this visible. Each turn writes `twprof` lines to stderr — stage durations, plus one record per network call carrying curl's timing split, the role, the model, and the token counts. Failed calls are marked and carry no token counts rather than fabricated zeros, and a stage that did not run is absent rather than reported as zero. A measured live run is written up in `.lore/work/validation/turn-latency-polish/findings.md`.
+Setting `TEXTWORLD_LOG_LEVEL=debug` makes all of this visible. Each turn writes `twprof` lines into the session log — stage durations, plus one record per network call carrying curl's timing split, the role, the model, and the token counts. The `twprof key=value` payload is unchanged from when these records went to stderr; it now follows the log's standard six-field prefix. Failed calls are marked and carry no token counts rather than fabricated zeros, and a stage that did not run is absent rather than reported as zero. A measured live run is written up in `.lore/work/validation/turn-latency-polish/findings.md`.
+
+### The session log
+
+The terminal is the game screen, and only game text reaches it. Everything the
+engine has to say about itself — a rejected AI response, a fallback to template
+prose, a failed background job — goes to a log file instead.
+
+One file per session, created at startup in a `logs/` directory beside
+`world.db`, named `textworld-YYYYMMDD-HHMMSS.log` so a directory listing sorts
+chronologically. The 20 most recent are kept, the session's own file included;
+older ones are deleted at startup, and a file in `logs/` that does not match
+that pattern is never touched. Logging is **best effort**: if the file cannot be
+created the game plays normally and records nothing — no retry, no message, no
+non-zero exit.
+
+Every entry is one line of six fields — timestamp, level, thread, turn, source,
+message:
+
+```
+2026-08-05 14:30:44.310  WARN   main    turn=3   prose   aiRender: failed, falling back to templates: timeout
+```
+
+The turn number is what correlates a message with what the player was doing, and
+the thread field (`main`, `pregen`, or `bard`) says which part of the program was
+speaking. Entries are flushed as they are written, so a session killed mid-turn
+still has everything up to that point.
+
+Two messages are exempt and still reach the terminal, because they fire when
+there is no game on screen: the schema-mismatch refusal and the fatal-exception
+message. Both are written to the log as well.
+
+No log entry at any level contains an API key, and none at `info` or above
+contains a prompt, a response body, or the player's typed input.
 
 ### AI world generation
 
@@ -184,9 +217,10 @@ TEXTWORLD_AI_LIVE_TEST=1 ANTHROPIC_API_KEY=sk-ant-... ./build/tests
 ## Project layout
 
 ```
-src/        engine sources (built into the twcore static library); prose.cpp is the AI renderer, nlresolve.cpp the AI input resolver, architect.cpp the AI world generator (which also offers the storyteller's eligible entries and places the one chosen), combat.cpp the deterministic combat system, band.cpp the status band and term.cpp its terminal services (color gating, width detection, wrapping), aihttp.cpp the shared persistent-connection HTTP client and per-role model rule, profile.cpp the gated turn profiling, bard.cpp the storyteller's eligibility, wire format, validation gates, overture, and post-turn scheduling (read-only: every write goes through mutations.cpp), bardworker.cpp its background waking thread (no database access of any kind, by construction)
+src/        engine sources (built into the twcore static library); prose.cpp is the AI renderer, nlresolve.cpp the AI input resolver, architect.cpp the AI world generator (which also offers the storyteller's eligible entries and places the one chosen), combat.cpp the deterministic combat system, band.cpp the status band and term.cpp its terminal services (color gating, width detection, wrapping), aihttp.cpp the shared persistent-connection HTTP client and per-role model rule, log.cpp the session log (levels, the six-field entry format, the one file per session, and the redirect that keeps internal messages off the game screen), profile.cpp the turn profiling that rides on it, bard.cpp the storyteller's eligibility, wire format, validation gates, overture, and post-turn scheduling (read-only: every write goes through mutations.cpp), bardworker.cpp its background waking thread (no database access of any kind, by construction)
 tests/      test suite (hand-rolled micro-harness, no framework)
 seed/       base.sql — the hand-authored starting world, the bestiary catalog, and the closed motive vocabulary; setting.txt — the freeform setting (including the invasion premise) that guides world generation
+logs/       one session log per run, 20 kept (created at runtime, git-ignored)
 vendor/     SQLite and nlohmann/json amalgamations
 .lore/      vision, specs, designs, plans, and retros
 ```

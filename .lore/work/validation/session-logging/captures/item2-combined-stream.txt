@@ -1,0 +1,58 @@
+The corridor opens here into a broad landing where a tall mullioned window looks
+out over the black mere, the water pale with moonlight and utterly still. The
+panelling gives way to cold stone, and the air carries the faint chill of the
+outer wall. Wrapped in a blanket on the deep windowsill sits a small girl, knees
+drawn up, watching the moon on the water as if she could see all the way home
+from here. A narrow stair climbs up into the dark, and an arched doorway leads
+west into further rooms.
+Exits: south, up, west.
+-- windowed landing ------------------------------------------------------------
+ Exits    south, up, west
+ You      HP: 10/12
+> The corridor opens here into a broad landing where a tall mullioned window looks
+out over the black mere, the water pale with moonlight and utterly still. The
+panelling gives way to cold stone, and the air carries the faint chill of the
+outer wall. Wrapped in a blanket on the deep windowsill sits a small girl, knees
+drawn up, watching the moon on the water as if she could see all the way home
+from here. A narrow stair climbs up into the dark, and an arched doorway leads
+west into further rooms.
+Exits: south, up, west.
+-- windowed landing ------------------------------------------------------------
+ Exits    south, up, west
+ You      HP: 10/12
+> You're already carrying that.
+-- windowed landing ------------------------------------------------------------
+ Exits    south, up, west
+ You      HP: 10/12
+> You can't go that way.
+-- windowed landing ------------------------------------------------------------
+ Exits    south, up, west
+ You      HP: 10/12
+> The corridor opens here into a broad landing where a tall mullioned window looks
+out over the black mere, the water pale with moonlight and utterly still. The
+panelling gives way to cold stone, and the air carries the faint chill of the
+outer wall. Wrapped in a blanket on the deep windowsill sits a small girl, knees
+drawn up, watching the moon on the water as if she could see all the way home
+from here. A narrow stair climbs up into the dark, and an arched doorway leads
+west into further rooms.
+Exits: south, up, west.
+-- windowed landing ------------------------------------------------------------
+ Exits    south, up, west
+ You      HP: 10/12
+> You can't go that way.
+-- windowed landing ------------------------------------------------------------
+ Exits    south, up, west
+ You      HP: 10/12
+> You are carrying: candle, key, wand, fire grimoire.
+-- windowed landing ------------------------------------------------------------
+ Exits    south, up, west
+ You      HP: 10/12
+> I don't understand that.
+-- windowed landing ------------------------------------------------------------
+ Exits    south, up, west
+ You      HP: 10/12
+> I don't understand that.
+-- windowed landing ------------------------------------------------------------
+ Exits    south, up, west
+ You      HP: 10/12
+> 

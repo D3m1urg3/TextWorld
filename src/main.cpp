@@ -9,13 +9,43 @@
 #include "architect.hpp"   // architectQueuePregen — the pre-generation scheduler
 #include "bard.hpp"        // bardOverture — the one cold call, at creation
 #include "bardworker.hpp"  // BardGuard — worker two
+#include "log.hpp"  // logInit — the first thing main() does (REQ-LOG-29)
 #include "loop.hpp"
 #include "pregen.hpp"
 #include "profile.hpp"    // ScopedDwell — how long the player took to answer
 #include "prose.hpp"
 #include "world.hpp"
 
+namespace {
+
+// REQ-LOG-21's session-end entry, written from a destructor so that every way
+// out of main() reaches it: normal return, quit, EOF, SchemaMismatch, and the
+// generic catch alike. The turn count is the process-local counter, which is
+// what every other entry in the file is stamped with.
+struct SessionLogGuard {
+    ~SessionLogGuard() {
+        logEmitf(LogLevel::Info, "main", "session end: %lld turns",
+                 static_cast<long long>(logCurrentTurn()));
+    }
+};
+
+}  // namespace
+
 int main() {
+    // REQ-LOG-29 steps 1-5, and they are FIRST: the terminal duplicate has to
+    // be taken before anything can redirect the error channel, and the backstop
+    // has to be in place before any code that might print. Best-effort — a
+    // failure here is silent and the game plays on (REQ-LOG-7).
+    const LogInit logFile = logInit("logs");
+    const SessionLogGuard sessionLogGuard;
+
+    // Step 6: the session-start entries, so a healthy run produces a file that
+    // is visibly working rather than an empty one (REQ-LOG-21).
+    logEmitf(LogLevel::Info, "main", "session start: logging to %s",
+             logFile.path.string().c_str());
+    logEmitf(LogLevel::Info, "main", "ai narration %s",
+             aiNarrationEnabled() ? "on" : "off");
+
     try {
         // libcurl init/shutdown, once per process (REQ-LAT-7). First local in
         // the try, so its destructor covers every way out below: normal return,
@@ -24,6 +54,8 @@ int main() {
 
         auto world = openWorld("world.db");
         Db& db = world.db;
+        logEmitf(LogLevel::Info, "world", "opened world.db (%s)",
+                 world.created ? "created" : "resumed");
 
         // The overture (REQ-BARD-WAKE-2, -3): ONCE per world file, on the MAIN
         // thread, blocking, and before either worker thread exists. `created`
@@ -108,10 +140,13 @@ int main() {
         }
         return 0;
     } catch (const SchemaMismatch&) {
-        // openWorld already printed the refusal message to stderr.
+        // openWorld already wrote the refusal to the terminal duplicate and
+        // to the log (REQ-LOG-2). Nothing is added here.
         return 1;
     } catch (const std::exception& e) {
-        std::fprintf(stderr, "fatal: %s\n", e.what());
+        // The other REQ-LOG-2 exemption: the binary is already dying, so there
+        // is no game on screen for this to intrude on. One call, both channels.
+        logExempt(LogLevel::Error, "main", "fatal: %s\n", e.what());
         return 1;
     }
 }
