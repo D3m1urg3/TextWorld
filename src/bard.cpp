@@ -22,6 +22,7 @@
 #include "bardworker.hpp"  // bardEnabled — the feature gate, owned by the worker unit
 #include "combat.hpp"     // eligibleArchetypes / distanceFromSeed — the shared gates
 #include "json.hpp"
+#include "log.hpp"
 #include "mutations.hpp"  // the fact-store helpers: the SOLE sanctioned write path
 
 namespace {
@@ -232,7 +233,10 @@ json catalogEntrySchema(const std::vector<std::string>& motives) {
 // Mirrors the architect's and the resolver's failClause; std::nullopt_t
 // converts to whichever optional the caller returns.
 std::nullopt_t failClause(const char* who, const char* why) {
-    std::fprintf(stderr, "%s: rejected: %s\n", who, why);
+    // `who` names the validator, not a subsystem, so it stays inside the
+    // message; the source column is the subsystem the entry can be filtered by
+    // (REQ-LOG-14, REQ-LOG-20).
+    logEmitf(LogLevel::Debug, "bard", "%s: rejected: %s", who, why);
     return std::nullopt;
 }
 
@@ -689,10 +693,10 @@ std::optional<OvertureProposal> validateOvertureResponse(
         // Not a rejection: REQ-BARD-SEL-18 lists the only three clauses that
         // reject in full, and this is not one of them. The first call is the
         // overture; the rest are noted and ignored.
-        std::fprintf(stderr,
-                     "validateOvertureResponse: %d write_catalog blocks, using "
-                     "the first\n",
-                     calls);
+        logEmitf(LogLevel::Debug, "bard",
+                 "validateOvertureResponse: %d write_catalog blocks, using the "
+                 "first",
+                 calls);
     }
     if (call == nullptr) {
         // The tool was OPTIONAL, but an overture that calls nothing has
@@ -718,9 +722,9 @@ std::optional<OvertureProposal> validateOvertureResponse(
             if (!refusal.empty()) {
                 // One diagnostic, and the siblings are kept: nine entries beat
                 // no story at all.
-                std::fprintf(stderr,
-                             "validateOvertureResponse: entry dropped: %s\n",
-                             refusal.c_str());
+                logEmitf(LogLevel::Debug, "bard",
+                         "validateOvertureResponse: entry dropped: %s",
+                         refusal.c_str());
                 continue;
             }
             proposal.entries.push_back(std::move(entry));
@@ -762,9 +766,9 @@ std::optional<WakeProposal> validateWakeResponse(
                 readEntry(block["input"].value("entry", json::object()), motives,
                           entry);
             if (!refusal.empty()) {
-                std::fprintf(stderr,
-                             "validateWakeResponse: appended entry dropped: %s\n",
-                             refusal.c_str());
+                logEmitf(LogLevel::Debug, "bard",
+                         "validateWakeResponse: appended entry dropped: %s",
+                         refusal.c_str());
             } else {
                 proposal.appended.push_back(std::move(entry));
             }
@@ -773,9 +777,9 @@ std::optional<WakeProposal> validateWakeResponse(
             if (handle.empty()) {
                 // A blank handle is detectable here; an UNKNOWN one is not,
                 // and is admission's to ignore (REQ-BARD-SEL-20).
-                std::fprintf(stderr,
-                             "validateWakeResponse: mark_seeded dropped: "
-                             "handle is empty after trim\n");
+                logEmit(LogLevel::Debug, "bard",
+                        "validateWakeResponse: mark_seeded dropped: handle is "
+                        "empty after trim");
             } else {
                 proposal.seededHandles.push_back(handle);
             }
@@ -846,9 +850,9 @@ int admitOvertureProposal(Db& db, const OvertureProposal& proposal) {
     for (const CatalogEntryProposal& entry : proposal.entries) {
         const std::string refusal = catalogEntryRefusal(db, entry, handles);
         if (!refusal.empty()) {
-            std::fprintf(stderr,
-                         "admitOvertureProposal: entry '%s' dropped: %s\n",
-                         entry.handle.c_str(), refusal.c_str());
+            logEmitf(LogLevel::Debug, "bard",
+                     "admitOvertureProposal: entry '%s' dropped: %s",
+                     entry.handle.c_str(), refusal.c_str());
             continue;
         }
         writeCatalogEntry(db, entry.kind, entry.handle, entry.name, entry.blurb,
@@ -880,9 +884,9 @@ int applyWakeProposal(Db& db, const WakeProposal& proposal) {
     for (const CatalogEntryProposal& entry : proposal.appended) {
         const std::string refusal = catalogEntryRefusal(db, entry, handles);
         if (!refusal.empty()) {
-            std::fprintf(stderr,
-                         "applyWakeProposal: appended entry '%s' dropped: %s\n",
-                         entry.handle.c_str(), refusal.c_str());
+            logEmitf(LogLevel::Debug, "bard",
+                     "applyWakeProposal: appended entry '%s' dropped: %s",
+                     entry.handle.c_str(), refusal.c_str());
             continue;
         }
         writeCatalogEntry(db, entry.kind, entry.handle, entry.name, entry.blurb,
@@ -897,10 +901,10 @@ int applyWakeProposal(Db& db, const WakeProposal& proposal) {
         // entry was HINTED, which can be true of one that is offerable nowhere.
         const int64_t id = catalogIdForHandle(db, handle);
         if (id == 0) {
-            std::fprintf(stderr,
-                         "applyWakeProposal: mark_seeded ignored: unknown "
-                         "handle '%s'\n",
-                         handle.c_str());
+            logEmitf(LogLevel::Debug, "bard",
+                     "applyWakeProposal: mark_seeded ignored: unknown handle "
+                     "'%s'",
+                     handle.c_str());
             continue;
         }
         markCatalogSeeded(db, id);
@@ -1005,9 +1009,9 @@ void bardOverture(Db& db, const HttpTransport* transport) {
             throw;
         }
     } catch (const std::exception& e) {
-        std::fprintf(stderr, "bard: overture failed: %s\n", e.what());
+        logEmitf(LogLevel::Error, "bard", "overture failed: %s", e.what());
     } catch (...) {
-        std::fprintf(stderr, "bard: overture failed (non-std)\n");
+        logEmit(LogLevel::Error, "bard", "overture failed (non-std)");
     }
 }
 
@@ -1136,8 +1140,8 @@ void bardAfterTurn(Db& db) {
                               // followed by its one further evaluation below
         evaluateTrigger(db);
     } catch (const std::exception& e) {
-        std::fprintf(stderr, "bard: after-turn failed: %s\n", e.what());
+        logEmitf(LogLevel::Error, "bard", "after-turn failed: %s", e.what());
     } catch (...) {
-        std::fprintf(stderr, "bard: after-turn failed (non-std)\n");
+        logEmit(LogLevel::Error, "bard", "after-turn failed (non-std)");
     }
 }

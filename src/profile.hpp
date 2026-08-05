@@ -1,22 +1,21 @@
 // Turn profiling: permanent, gated instrumentation for where a turn's time
-// goes (REQ-LAT-1..-6). Off by default — with TEXTWORLD_PROFILE unset the only
-// cost on the turn path is one monotonic clock read per ScopedStage plus a
-// cached bool test, and nothing is ever written.
+// goes (REQ-LAT-1..-6). Off by default — below TEXTWORLD_LOG_LEVEL=debug the
+// only cost on the turn path is one monotonic clock read per ScopedStage plus a
+// cached enum test, and nothing is ever formatted or written (REQ-LOG-25).
 //
 // Record kinds, one machine-parseable `key=value` line each (REQ-LAT-5),
-// written to a sink that defaults to **stderr** so player output on stdout is
-// never interleaved:
+// emitted as DEBUG **log entries** (REQ-LOG-22): the payload below is carried
+// byte-for-byte after the logger's standard six-field prefix (REQ-LOG-23), and
+// lands in the session log rather than on the terminal (REQ-LOG-1):
 //   twprof kind=stage turn=7 stage=narrate ms=1843.221
 //   twprof kind=call  turn=7 role=narrate model=... status=200 ... input_tokens=…
 //   twprof kind=dwell turn=7 ms=1234.567
 //
-// THREAD SAFETY (REQ-PREGEN-22). Records are emitted from TWO threads once
-// background pre-generation exists: the main thread and the pregen worker.
-// Emission is serialized under a file-static mutex, so one record is one
-// ATOMIC line — never interleaved, never truncated. Keep the invariant "one
-// record is one write() call" when adding a sink or a record kind; splitting a
-// record into two writes would reintroduce exactly the interleaving the mutex
-// exists to prevent.
+// THREAD SAFETY (REQ-PREGEN-22, widened by REQ-LOG-15). Records are emitted
+// from the main thread and both workers. Serialization is log.cpp's now — one
+// entry is one line written under one mutex, never interleaved, never
+// truncated. Nothing here needs to restate it, but the invariant "one record is
+// one write" still governs any new sink or record kind.
 //
 // Absent, never zero-faked (REQ-LAT-2): a stage that does not run on a turn
 // constructs no ScopedStage, so it emits no record. `generate` is the one
@@ -34,13 +33,14 @@
 #include <optional>
 #include <string>
 
-// TEXTWORLD_PROFILE set, non-empty, and not exactly "0" (the "0 means off"
-// convention aiNarrationEnabled() already uses for TEXTWORLD_AI). The getenv
-// happens ONCE per process — the result is cached in a file-static bool, so
-// this is a plain bool read on the turn path (REQ-LAT-1).
+// True at TEXTWORLD_LOG_LEVEL=debug and nowhere else (REQ-LOG-22 — the
+// separate profiling variable is retired, and there is now ONE switch for the
+// whole engine). The getenv happens ONCE per process and the threshold is
+// cached, so this is a plain enum comparison on the turn path (REQ-LAT-1,
+// REQ-LOG-25).
 bool profilingEnabled();
 
-// TEST-ONLY. Re-reads TEXTWORLD_PROFILE into the cache so a test can flip the
+// TEST-ONLY. Re-reads TEXTWORLD_LOG_LEVEL into the cache so a test can flip the
 // gate inside one process. Production code never calls this.
 void profileRefreshEnabled();
 
@@ -133,16 +133,20 @@ void profileEmit(const CallRecord& record);
 void profileEmit(const DwellRecord& record);
 void profileEmit(const PregenRecord& record);
 
-// Redirect records. The default sink writes the line + '\n' to stderr; an
-// empty function restores that default. Used by tests to capture records.
+// Redirect records — the LOGGER's sink, under profiling's old name so no call
+// site had to move. A sink receives the whole formatted entry: six-field prefix
+// AND twprof payload (REQ-LOG-27). An empty function restores the default
+// writer. Used by tests to capture records.
 void profileSetSink(std::function<void(const std::string&)> sink);
 
 // Process-local turn sequence, so every record of one turn shares a `turn=`
 // value. Independent of meta.turn — no extra SELECT on the turn path.
 //
-// The counter is a std::atomic, so profileCurrentTurn() is safe to read from
-// ANY thread while the main thread advances it (REQ-PREGEN-22). Only the main
-// thread ever calls profileNextTurn().
+// The counter itself lives in log.cpp (REQ-LOG-13 makes it a logging concern,
+// and this unit depends on the logger); these two are forwarders. It is a
+// std::atomic, so profileCurrentTurn() is safe to read from ANY thread while
+// the main thread advances it (REQ-PREGEN-22). Only the main thread ever calls
+// profileNextTurn().
 int64_t profileNextTurn();
 int64_t profileCurrentTurn();
 

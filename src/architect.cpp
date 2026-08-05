@@ -21,6 +21,7 @@
 #include "aihttp.hpp"     // modelForRole + the shared production transport
 #include "combat.hpp"     // eligibleEnemyBlurbs / archetypeForEnemyBlurb — the gated menu
 #include "json.hpp"
+#include "log.hpp"
 #include "mutations.hpp"  // writeGeneratedRoom / placeEnemy — the SOLE sanctioned write path
 #include "pregen.hpp"     // the store this schedules work into
 #include "profile.hpp"    // ScopedStage — the nested `generate` timer
@@ -35,9 +36,9 @@ using nlohmann::json;
 // a..c order. Mirrors the resolver's failClause; std::nullopt_t converts to the
 // optional<RoomProposal> the gate returns.
 std::nullopt_t failClause(char clause, const char* why) {
-    std::fprintf(stderr,
-                 "validateRoomProposal: rejected, clause %c failed: %s\n", clause,
-                 why);
+    logEmitf(LogLevel::Debug, "architect",
+             "validateRoomProposal: rejected, clause %c failed: %s", clause,
+             why);
     return std::nullopt;
 }
 
@@ -420,25 +421,24 @@ std::optional<RoomProposal> validateRoomProposal(
     if (input.contains("exits") && input["exits"].is_array()) {
         for (const json& entry : input["exits"]) {
             if (!entry.is_string()) {
-                std::fprintf(stderr,
-                             "validateRoomProposal: dropped exit, not a "
-                             "string\n");
+                logEmit(LogLevel::Debug, "architect",
+                        "validateRoomProposal: dropped exit, not a string");
                 continue;
             }
             const std::string norm =
                 normalizeDirection(entry.get<std::string>());
             if (!inverseDirection(norm)) {
-                std::fprintf(stderr,
-                             "validateRoomProposal: dropped exit '%s', not an "
-                             "invertible direction\n",
-                             norm.c_str());
+                logEmitf(LogLevel::Debug, "architect",
+                         "validateRoomProposal: dropped exit '%s', not an "
+                         "invertible direction",
+                         norm.c_str());
                 continue;
             }
             if (returnDir && norm == *returnDir) {
-                std::fprintf(stderr,
-                             "validateRoomProposal: dropped exit '%s', the "
-                             "entry-return direction\n",
-                             norm.c_str());
+                logEmitf(LogLevel::Debug, "architect",
+                         "validateRoomProposal: dropped exit '%s', the "
+                         "entry-return direction",
+                         norm.c_str());
                 continue;
             }
             bool duplicate = false;
@@ -449,10 +449,9 @@ std::optional<RoomProposal> validateRoomProposal(
                 }
             }
             if (duplicate) {
-                std::fprintf(stderr,
-                             "validateRoomProposal: dropped exit '%s', a "
-                             "duplicate\n",
-                             norm.c_str());
+                logEmitf(LogLevel::Debug, "architect",
+                         "validateRoomProposal: dropped exit '%s', a duplicate",
+                         norm.c_str());
                 continue;
             }
             proposal.exits.push_back(norm);
@@ -478,31 +477,31 @@ std::optional<RoomProposal> validateRoomProposal(
     // a spurious `id` or `catalog` field inside the story object is never
     // touched (REQ-BARD-ARCH-17), exactly as a spurious room id is not.
     //
-    // ABSENCE IS SILENT. Every other drop gets a line on stderr, but "the model
+    // ABSENCE IS SILENT. Every other drop gets a line in the log, but "the model
     // brought no story" is the common case on a room the catalog has nothing
     // for, not a fault, and a diagnostic per generation would be noise.
     if (input.contains("story")) {
         const json& story = input["story"];
         if (!story.is_object()) {
-            std::fprintf(stderr,
-                         "validateRoomProposal: dropped story, not an object\n");
+            logEmit(LogLevel::Debug, "architect",
+                    "validateRoomProposal: dropped story, not an object");
         } else if (!story.contains("handle") || !story["handle"].is_string()) {
-            std::fprintf(stderr,
-                         "validateRoomProposal: dropped story, handle missing "
-                         "or not a string\n");
+            logEmit(LogLevel::Debug, "architect",
+                    "validateRoomProposal: dropped story, handle missing or "
+                    "not a string");
         } else if (blankAfterTrim(story["handle"].get<std::string>())) {
-            std::fprintf(stderr,
-                         "validateRoomProposal: dropped story, handle is empty "
-                         "after trim\n");
+            logEmit(LogLevel::Debug, "architect",
+                    "validateRoomProposal: dropped story, handle is empty "
+                    "after trim");
         } else if (!story.contains("description") ||
                    !story["description"].is_string()) {
-            std::fprintf(stderr,
-                         "validateRoomProposal: dropped story, description "
-                         "missing or not a string\n");
+            logEmit(LogLevel::Debug, "architect",
+                    "validateRoomProposal: dropped story, description missing "
+                    "or not a string");
         } else if (blankAfterTrim(story["description"].get<std::string>())) {
-            std::fprintf(stderr,
-                         "validateRoomProposal: dropped story, description is "
-                         "empty after trim\n");
+            logEmit(LogLevel::Debug, "architect",
+                    "validateRoomProposal: dropped story, description is empty "
+                    "after trim");
         } else {
             proposal.story.handle = trimmed(story["handle"].get<std::string>());
             proposal.story.description =
@@ -552,10 +551,12 @@ bool architectGenerate(Db& db, int64_t room, const std::string& direction,
         proposal = architectProposeRoom(ctx, enemyBlurbs, storyHandles, direction,
                                         transport);
     } catch (const std::exception& e) {
-        std::fprintf(stderr, "architectGenerate: phase 1 failed: %s\n", e.what());
+        logEmitf(LogLevel::Error, "architect",
+                 "architectGenerate: phase 1 failed: %s", e.what());
         return false;  // → wall (REQ-ARCH-3c)
     } catch (...) {  // mirror aiResolve's catch-all
-        std::fprintf(stderr, "architectGenerate: phase 1 failed (non-std)\n");
+        logEmit(LogLevel::Error, "architect",
+                "architectGenerate: phase 1 failed (non-std)");
         return false;
     }
     if (!proposal) return false;  // gate failure → wall

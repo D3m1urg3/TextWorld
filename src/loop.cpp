@@ -149,7 +149,7 @@ TurnResult runTurnCore(Db& db, const std::string& line) {
 }  // namespace
 
 TurnResult runTurn(Db& db, const std::string& line) {
-    // Profiling (REQ-LAT-2), inert unless TEXTWORLD_PROFILE is on: one process-
+    // Profiling (REQ-LAT-2), inert below TEXTWORLD_LOG_LEVEL=debug: one process-
     // local turn number shared by every record of this turn, then a stage timer
     // per SEMANTIC phase. The stages are scopes, so a phase this turn never
     // reaches simply constructs no timer and is ABSENT from the log rather than

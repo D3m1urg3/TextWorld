@@ -8,6 +8,7 @@
 #include <vector>
 
 #include "architect.hpp"  // RoomProposal (full definition) + inverseDirection
+#include "log.hpp"
 #include "term.hpp"       // utf8Truncate — the code-point-safe cut for bard_focus
 
 namespace {
@@ -513,11 +514,11 @@ int64_t writeGeneratedRoom(Db& db, int64_t originRoom,
         chk.bind(1, originRoom);
         chk.bind(2, direction);
         if (!chk.step()) {
-            std::fprintf(stderr,
-                         "writeGeneratedRoom: latent origin exit absent for "
-                         "room %lld direction '%s' (REQ-EXITS-2b precondition "
-                         "violation) — realizing via insert\n",
-                         static_cast<long long>(originRoom), direction.c_str());
+            logEmitf(LogLevel::Warn, "mutations",
+                     "writeGeneratedRoom: latent origin exit absent for room "
+                     "%lld direction '%s' (REQ-EXITS-2b precondition "
+                     "violation) — realizing via insert",
+                     static_cast<long long>(originRoom), direction.c_str());
         }
     }
     {

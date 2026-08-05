@@ -6,6 +6,8 @@
 #include <string>
 #include <utility>
 
+#include "log.hpp"  // logToTerminal — the REQ-LOG-2 schema-refusal exemption
+
 namespace {
 
 // Schema per .lore/work/design/engine-foundation.md §3, verbatim.
@@ -175,12 +177,17 @@ OpenedWorld openWorld(const std::string& path, const std::string& seedPath,
 
     const int64_t found = readSchemaVersion(db);
     if (found != SCHEMA_VERSION) {
-        std::fprintf(stderr,
-                     "world file '%s' has schema_version %lld but this build expects %lld.\n"
-                     "No migrations exist yet: delete the world file and let the game "
-                     "recreate it from the seed.\n",
-                     path.c_str(), static_cast<long long>(found),
-                     static_cast<long long>(SCHEMA_VERSION));
+        // One of the two REQ-LOG-2 exemptions: the binary is refusing to
+        // start, so there is no game on screen for this to intrude on. One
+        // call, both channels — the terminal duplicate (the only sanctioned
+        // route to the screen besides game text) and the log, which REQ-LOG-29
+        // step 7 guarantees is already open by the time the schema check runs.
+        logExempt(LogLevel::Error, "world",
+                  "world file '%s' has schema_version %lld but this build "
+                  "expects %lld.\nNo migrations exist yet: delete the world "
+                  "file and let the game recreate it from the seed.\n",
+                  path.c_str(), static_cast<long long>(found),
+                  static_cast<long long>(SCHEMA_VERSION));
         throw SchemaMismatch("schema_version mismatch in " + path);
     }
     return {std::move(db), false};  // resumed, not created

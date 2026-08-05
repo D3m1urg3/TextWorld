@@ -1,0 +1,83 @@
+2026-08-05 20:56:30.795  INFO   main    turn=0   main    session start: logging to logs/textworld-20260805-205630.log
+2026-08-05 20:56:30.795  INFO   main    turn=0   main    ai narration on
+2026-08-05 20:56:30.798  INFO   main    turn=0   world   opened world.db (resumed)
+2026-08-05 20:56:30.799  DEBUG  main    turn=0   profile  twprof kind=dwell turn=0 ms=0.010
+2026-08-05 20:56:30.800  DEBUG  main    turn=1   profile  twprof kind=call turn=1 role=resolve model=claude-haiku-4-5 status=0 failed=1 namelookup_us=46 connect_us=0 appconnect_us=0 starttransfer_us=0 total_us=144
+2026-08-05 20:56:30.800  DEBUG  main    turn=1   nlresolve  aiResolve: response rejected, clause a failed: HTTP status is not 200
+2026-08-05 20:56:30.800  DEBUG  main    turn=1   profile  twprof kind=stage turn=1 stage=resolve ms=0.704
+2026-08-05 20:56:30.800  DEBUG  pregen  turn=1   profile  twprof kind=call turn=1 role=generate model=claude-opus-4-8 status=0 failed=1 background=1 namelookup_us=73 connect_us=0 appconnect_us=0 starttransfer_us=0 total_us=225
+2026-08-05 20:56:30.800  DEBUG  pregen  turn=1   architect  validateRoomProposal: rejected, clause a failed: HTTP status is not 200
+2026-08-05 20:56:30.801  DEBUG  main    turn=1   profile  twprof kind=stage turn=1 stage=tick ms=0.568
+2026-08-05 20:56:30.801  DEBUG  main    turn=1   profile  twprof kind=call turn=1 role=narrate model=claude-opus-4-8 status=0 failed=1 namelookup_us=7 connect_us=0 appconnect_us=0 starttransfer_us=0 total_us=99
+2026-08-05 20:56:30.801  DEBUG  pregen  turn=1   profile  twprof kind=call turn=1 role=generate model=claude-opus-4-8 status=0 failed=1 background=1 namelookup_us=11 connect_us=0 appconnect_us=0 starttransfer_us=0 total_us=106
+2026-08-05 20:56:30.801  DEBUG  pregen  turn=1   architect  validateRoomProposal: rejected, clause a failed: HTTP status is not 200
+2026-08-05 20:56:30.801  DEBUG  main    turn=1   prose   aiRender: response rejected, clause a failed: HTTP status is not 200
+2026-08-05 20:56:30.801  DEBUG  main    turn=1   profile  twprof kind=stage turn=1 stage=narrate ms=0.696
+2026-08-05 20:56:30.801  DEBUG  main    turn=1   profile  twprof kind=stage turn=1 stage=total ms=2.178
+2026-08-05 20:56:30.802  DEBUG  main    turn=1   profile  twprof kind=dwell turn=1 ms=0.003
+2026-08-05 20:56:30.802  DEBUG  main    turn=2   profile  twprof kind=call turn=2 role=resolve model=claude-haiku-4-5 status=0 failed=1 namelookup_us=5 connect_us=0 appconnect_us=0 starttransfer_us=0 total_us=84
+2026-08-05 20:56:30.802  DEBUG  main    turn=2   nlresolve  aiResolve: response rejected, clause a failed: HTTP status is not 200
+2026-08-05 20:56:30.802  DEBUG  main    turn=2   profile  twprof kind=stage turn=2 stage=resolve ms=0.610
+2026-08-05 20:56:30.803  DEBUG  main    turn=2   profile  twprof kind=stage turn=2 stage=tick ms=0.449
+2026-08-05 20:56:30.803  DEBUG  main    turn=2   profile  twprof kind=call turn=2 role=narrate model=claude-opus-4-8 status=0 failed=1 namelookup_us=7 connect_us=0 appconnect_us=0 starttransfer_us=0 total_us=85
+2026-08-05 20:56:30.803  DEBUG  main    turn=2   prose   aiRender: response rejected, clause a failed: HTTP status is not 200
+2026-08-05 20:56:30.803  DEBUG  main    turn=2   profile  twprof kind=stage turn=2 stage=narrate ms=0.656
+2026-08-05 20:56:30.804  DEBUG  main    turn=2   profile  twprof kind=stage turn=2 stage=total ms=1.916
+2026-08-05 20:56:30.805  DEBUG  main    turn=2   profile  twprof kind=dwell turn=2 ms=0.003
+2026-08-05 20:56:30.806  DEBUG  main    turn=3   profile  twprof kind=call turn=3 role=resolve model=claude-haiku-4-5 status=0 failed=1 namelookup_us=6 connect_us=0 appconnect_us=0 starttransfer_us=0 total_us=79
+2026-08-05 20:56:30.806  DEBUG  main    turn=3   nlresolve  aiResolve: response rejected, clause a failed: HTTP status is not 200
+2026-08-05 20:56:30.806  DEBUG  main    turn=3   profile  twprof kind=stage turn=3 stage=resolve ms=0.585
+2026-08-05 20:56:30.806  DEBUG  bard    turn=3   profile  twprof kind=call turn=3 role=bard model=claude-opus-4-8 status=0 failed=1 background=1 namelookup_us=49 connect_us=0 appconnect_us=0 starttransfer_us=0 total_us=138
+2026-08-05 20:56:30.806  DEBUG  bard    turn=3   bard    validateWakeResponse: rejected: HTTP status is not 200
+2026-08-05 20:56:30.806  DEBUG  main    turn=3   profile  twprof kind=stage turn=3 stage=tick ms=0.381
+2026-08-05 20:56:30.807  DEBUG  main    turn=3   profile  twprof kind=call turn=3 role=narrate model=claude-opus-4-8 status=0 failed=1 namelookup_us=5 connect_us=0 appconnect_us=0 starttransfer_us=0 total_us=88
+2026-08-05 20:56:30.807  DEBUG  main    turn=3   prose   aiRender: response rejected, clause a failed: HTTP status is not 200
+2026-08-05 20:56:30.807  DEBUG  main    turn=3   profile  twprof kind=stage turn=3 stage=narrate ms=0.558
+2026-08-05 20:56:30.807  DEBUG  main    turn=3   profile  twprof kind=stage turn=3 stage=total ms=1.688
+2026-08-05 20:56:30.807  DEBUG  main    turn=3   profile  twprof kind=dwell turn=3 ms=0.001
+2026-08-05 20:56:30.808  DEBUG  main    turn=4   profile  twprof kind=call turn=4 role=resolve model=claude-haiku-4-5 status=0 failed=1 namelookup_us=4 connect_us=0 appconnect_us=0 starttransfer_us=0 total_us=97
+2026-08-05 20:56:30.808  DEBUG  main    turn=4   nlresolve  aiResolve: response rejected, clause a failed: HTTP status is not 200
+2026-08-05 20:56:30.808  DEBUG  main    turn=4   profile  twprof kind=stage turn=4 stage=resolve ms=0.568
+2026-08-05 20:56:30.808  DEBUG  main    turn=4   profile  twprof kind=stage turn=4 stage=tick ms=0.350
+2026-08-05 20:56:30.808  DEBUG  main    turn=4   profile  twprof kind=call turn=4 role=narrate model=claude-opus-4-8 status=0 failed=1 namelookup_us=4 connect_us=0 appconnect_us=0 starttransfer_us=0 total_us=85
+2026-08-05 20:56:30.808  DEBUG  main    turn=4   prose   aiRender: response rejected, clause a failed: HTTP status is not 200
+2026-08-05 20:56:30.808  DEBUG  main    turn=4   profile  twprof kind=stage turn=4 stage=narrate ms=0.560
+2026-08-05 20:56:30.809  DEBUG  main    turn=4   profile  twprof kind=stage turn=4 stage=total ms=1.665
+2026-08-05 20:56:30.809  DEBUG  main    turn=4   profile  twprof kind=dwell turn=4 ms=0.001
+2026-08-05 20:56:30.809  DEBUG  main    turn=5   profile  twprof kind=call turn=5 role=resolve model=claude-haiku-4-5 status=0 failed=1 namelookup_us=4 connect_us=0 appconnect_us=0 starttransfer_us=0 total_us=94
+2026-08-05 20:56:30.809  DEBUG  main    turn=5   nlresolve  aiResolve: response rejected, clause a failed: HTTP status is not 200
+2026-08-05 20:56:30.809  DEBUG  main    turn=5   profile  twprof kind=stage turn=5 stage=resolve ms=0.556
+2026-08-05 20:56:30.811  DEBUG  main    turn=5   profile  twprof kind=call turn=5 role=generate model=claude-opus-4-8 status=0 failed=1 namelookup_us=4 connect_us=0 appconnect_us=0 starttransfer_us=0 total_us=73
+2026-08-05 20:56:30.811  DEBUG  main    turn=5   architect  validateRoomProposal: rejected, clause a failed: HTTP status is not 200
+2026-08-05 20:56:30.811  DEBUG  main    turn=5   profile  twprof kind=stage turn=5 stage=generate ms=1.200 nested_in=tick
+2026-08-05 20:56:30.811  DEBUG  main    turn=5   profile  twprof kind=pregen turn=5 outcome=miss
+2026-08-05 20:56:30.811  DEBUG  main    turn=5   profile  twprof kind=stage turn=5 stage=tick ms=1.575
+2026-08-05 20:56:30.811  DEBUG  main    turn=5   profile  twprof kind=call turn=5 role=narrate model=claude-opus-4-8 status=0 failed=1 namelookup_us=6 connect_us=0 appconnect_us=0 starttransfer_us=0 total_us=77
+2026-08-05 20:56:30.811  DEBUG  main    turn=5   prose   aiRender: response rejected, clause a failed: HTTP status is not 200
+2026-08-05 20:56:30.811  DEBUG  main    turn=5   profile  twprof kind=stage turn=5 stage=narrate ms=0.498
+2026-08-05 20:56:30.812  DEBUG  main    turn=5   profile  twprof kind=stage turn=5 stage=total ms=2.775
+2026-08-05 20:56:30.812  DEBUG  main    turn=5   profile  twprof kind=dwell turn=5 ms=0.002
+2026-08-05 20:56:30.812  DEBUG  main    turn=6   profile  twprof kind=call turn=6 role=resolve model=claude-haiku-4-5 status=0 failed=1 namelookup_us=4 connect_us=0 appconnect_us=0 starttransfer_us=0 total_us=75
+2026-08-05 20:56:30.812  DEBUG  main    turn=6   nlresolve  aiResolve: response rejected, clause a failed: HTTP status is not 200
+2026-08-05 20:56:30.812  DEBUG  main    turn=6   profile  twprof kind=stage turn=6 stage=resolve ms=0.516
+2026-08-05 20:56:30.813  DEBUG  main    turn=6   profile  twprof kind=stage turn=6 stage=tick ms=0.335
+2026-08-05 20:56:30.813  DEBUG  main    turn=6   profile  twprof kind=call turn=6 role=narrate model=claude-opus-4-8 status=0 failed=1 namelookup_us=3 connect_us=0 appconnect_us=0 starttransfer_us=0 total_us=73
+2026-08-05 20:56:30.813  DEBUG  main    turn=6   prose   aiRender: response rejected, clause a failed: HTTP status is not 200
+2026-08-05 20:56:30.813  DEBUG  main    turn=6   profile  twprof kind=stage turn=6 stage=narrate ms=0.498
+2026-08-05 20:56:30.813  DEBUG  main    turn=6   profile  twprof kind=stage turn=6 stage=total ms=1.496
+2026-08-05 20:56:30.813  DEBUG  main    turn=6   profile  twprof kind=dwell turn=6 ms=0.005
+2026-08-05 20:56:30.814  DEBUG  main    turn=7   profile  twprof kind=call turn=7 role=resolve model=claude-haiku-4-5 status=0 failed=1 namelookup_us=4 connect_us=0 appconnect_us=0 starttransfer_us=0 total_us=72
+2026-08-05 20:56:30.814  DEBUG  main    turn=7   nlresolve  aiResolve: response rejected, clause a failed: HTTP status is not 200
+2026-08-05 20:56:30.814  DEBUG  main    turn=7   profile  twprof kind=stage turn=7 stage=resolve ms=0.531
+2026-08-05 20:56:30.814  DEBUG  main    turn=7   profile  twprof kind=stage turn=7 stage=total ms=0.673
+2026-08-05 20:56:30.814  DEBUG  main    turn=7   profile  twprof kind=dwell turn=7 ms=0.005
+2026-08-05 20:56:30.815  DEBUG  main    turn=8   profile  twprof kind=call turn=8 role=resolve model=claude-haiku-4-5 status=0 failed=1 namelookup_us=4 connect_us=0 appconnect_us=0 starttransfer_us=0 total_us=71
+2026-08-05 20:56:30.815  DEBUG  main    turn=8   nlresolve  aiResolve: response rejected, clause a failed: HTTP status is not 200
+2026-08-05 20:56:30.815  DEBUG  main    turn=8   profile  twprof kind=stage turn=8 stage=resolve ms=0.527
+2026-08-05 20:56:30.815  DEBUG  main    turn=8   profile  twprof kind=stage turn=8 stage=total ms=0.669
+2026-08-05 20:56:30.815  DEBUG  main    turn=8   profile  twprof kind=dwell turn=8 ms=0.001
+2026-08-05 20:56:30.816  DEBUG  main    turn=9   profile  twprof kind=call turn=9 role=resolve model=claude-haiku-4-5 status=0 failed=1 namelookup_us=4 connect_us=0 appconnect_us=0 starttransfer_us=0 total_us=76
+2026-08-05 20:56:30.816  DEBUG  main    turn=9   nlresolve  aiResolve: response rejected, clause a failed: HTTP status is not 200
+2026-08-05 20:56:30.816  DEBUG  main    turn=9   profile  twprof kind=stage turn=9 stage=resolve ms=0.514
+2026-08-05 20:56:30.816  DEBUG  main    turn=9   profile  twprof kind=stage turn=9 stage=total ms=0.517
+2026-08-05 20:56:30.816  INFO   main    turn=9   main    session end: 9 turns

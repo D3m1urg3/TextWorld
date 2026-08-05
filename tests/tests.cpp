@@ -15,8 +15,6 @@
 #include <thread>
 #include <vector>
 
-#include <unistd.h>
-
 #include <curl/curl.h>  // architect live smoke's single bounded judge call (gated)
 
 #include "action.hpp"
@@ -26,6 +24,7 @@
 #include "band.hpp"
 #include "combat.hpp"
 #include "db.hpp"
+#include "log.hpp"
 #include "lookup.hpp"  // lookupNoun — the shared recognition rule (Brick 4 Step 9)
 #include "loop.hpp"
 #include "mutations.hpp"
@@ -2347,28 +2346,446 @@ static std::map<std::string, std::string> parseProfileRecord(
     return kv;
 }
 
+// One log line broken back into the six fields of REQ-LOG-10. The four middle
+// fields contain no spaces by construction, so scanning tokens after the
+// fixed-width timestamp is exact; whatever follows the fourth is the message,
+// with its own internal spacing intact.
+struct ParsedLogLine {
+    bool ok = false;
+    std::string timestamp;
+    std::string level;
+    std::string thread;
+    std::string turn;
+    std::string source;
+    std::string message;
+};
+
+static ParsedLogLine parseLogLine(const std::string& line) {
+    ParsedLogLine p;
+    // REQ-LOG-11: YYYY-MM-DD HH:MM:SS.mmm is exactly 23 characters.
+    if (line.size() < 25) return p;
+    p.timestamp = line.substr(0, 23);
+    const std::string digits = "0123456789";
+    const char* shape = "dddd-dd-dd dd:dd:dd.ddd";
+    for (size_t i = 0; i < 23; ++i) {
+        const bool isDigit = digits.find(p.timestamp[i]) != std::string::npos;
+        if (shape[i] == 'd' ? !isDigit : p.timestamp[i] != shape[i]) return p;
+    }
+
+    std::string* const fields[4] = {&p.level, &p.thread, &p.turn, &p.source};
+    size_t i = 23;
+    for (std::string* field : fields) {
+        while (i < line.size() && line[i] == ' ') ++i;
+        const size_t start = i;
+        while (i < line.size() && line[i] != ' ') ++i;
+        if (start == i) return p;
+        *field = line.substr(start, i - start);
+    }
+    while (i < line.size() && line[i] == ' ') ++i;
+    p.message = line.substr(i);
+
+    if (p.level != "ERROR" && p.level != "WARN" && p.level != "INFO" &&
+        p.level != "DEBUG") {
+        return p;
+    }
+    if (p.turn.rfind("turn=", 0) != 0) return p;
+    p.ok = true;
+    return p;
+}
+
+// True iff a captured log entry carries a twprof payload. Since REQ-LOG-22 a
+// profiling sink IS the logger's sink, so it also hears the ordinary DEBUG
+// entries of whatever subsystem a test happens to drive. The profiling tests
+// want the timing records alone — exactly the set they captured before the
+// move — so every one of them filters on this. Nothing else about them
+// changes, which is what REQ-LOG-30 asks for.
+static bool isTwprofEntry(const std::string& line) {
+    const ParsedLogLine p = parseLogLine(line);
+    return p.ok && p.source == "profile";
+}
+
+// The sink the profiling tests install: keep the twprof records, drop
+// everything else the logger hears. Built here rather than written out at each
+// call site — five copies of it had already started to diverge.
+static std::function<void(const std::string&)> captureTwprof(
+    std::vector<std::string>& out) {
+    return [&out](const std::string& line) {
+        if (isTwprofEntry(line)) out.push_back(line);
+    };
+}
+
+// The same sink, serialized — for the one test that emits from two threads.
+static std::function<void(const std::string&)> captureTwprofLocked(
+    std::vector<std::string>& out, std::mutex& mutex) {
+    return [&out, &mutex](const std::string& line) {
+        if (!isTwprofEntry(line)) return;
+        const std::lock_guard<std::mutex> lock(mutex);
+        out.push_back(line);
+    };
+}
+
+// Strip the six-field log prefix, returning the bare twprof payload — the
+// string these assertions were written against, before REQ-LOG-22 made a timing
+// record a DEBUG log entry. The record assertions themselves are therefore
+// unchanged by that move, which is what makes REQ-LOG-23's byte-for-byte claim
+// checkable here rather than only against a real session log.
+static std::string twprofPayload(const std::string& line) {
+    const ParsedLogLine p = parseLogLine(line);
+    CHECK(p.ok);
+    if (!p.ok) return line;
+    return p.message;
+}
+
+// --- the logging mechanism (REQ-LOG-10..-19, -27) ---------------------------
+// ORDERING NOTE, the same one profiling has: logEnabled() caches its getenv
+// once per process, so every threshold flip below must be followed by a
+// logRefreshLevel() or the cache still holds the value static-init installed.
+// This test restores the env var (via the guard), the cached threshold, and the
+// default writer before returning, so no later test emits a line.
+static void testLogFormatAndLevels() {
+    const ScopedEnvVar levelGuard("TEXTWORLD_LOG_LEVEL");
+
+    // (a) the pure formatter (REQ-LOG-10, -11): six fields, fixed order, one
+    // line, for every level.
+    const LogLevel levels[4] = {LogLevel::Error, LogLevel::Warn, LogLevel::Info,
+                                LogLevel::Debug};
+    const char* names[4] = {"ERROR", "WARN", "INFO", "DEBUG"};
+    for (int i = 0; i < 4; ++i) {
+        const std::string line = formatEntry(
+            LogEntry{levels[i], "pregen", 7, "prose", "render failed"});
+        const ParsedLogLine p = parseLogLine(line);
+        CHECK(p.ok);
+        CHECK(p.level == names[i]);
+        CHECK(p.thread == "pregen");
+        CHECK(p.turn == "turn=7");
+        CHECK(p.source == "prose");
+        CHECK(p.message == "render failed");
+        CHECK(line.find('\n') == std::string::npos);  // no trailing newline
+    }
+    // A message with its own internal double space survives intact — the
+    // parser's field scan stops at the fourth field, not at every gap.
+    {
+        const ParsedLogLine p = parseLogLine(formatEntry(
+            LogEntry{LogLevel::Info, "main", 0, "world", "a  b   c"}));
+        CHECK(p.ok);
+        CHECK(p.message == "a  b   c");
+    }
+    // A field wider than its column pushes the line out rather than being
+    // truncated.
+    {
+        const ParsedLogLine p = parseLogLine(formatEntry(
+            LogEntry{LogLevel::Info, "main", 1234567, "nlresolve", "x"}));
+        CHECK(p.ok);
+        CHECK(p.source == "nlresolve");
+        CHECK(p.turn == "turn=1234567");
+        CHECK(p.message == "x");
+    }
+
+    // (b) the threshold (REQ-LOG-17, -18, -19). Unset, empty and unrecognized
+    // all fall back to INFO, silently — there is no "off" value.
+    unsetenv("TEXTWORLD_LOG_LEVEL");
+    logRefreshLevel();
+    CHECK(logEnabled(LogLevel::Info));
+    CHECK(!logEnabled(LogLevel::Debug));
+
+    setenv("TEXTWORLD_LOG_LEVEL", "debug", 1);
+    logRefreshLevel();
+    CHECK(logEnabled(LogLevel::Debug));
+    CHECK(logEnabled(LogLevel::Error));
+
+    setenv("TEXTWORLD_LOG_LEVEL", "DEBUG", 1);  // case-insensitive
+    logRefreshLevel();
+    CHECK(logEnabled(LogLevel::Debug));
+
+    setenv("TEXTWORLD_LOG_LEVEL", "error", 1);
+    logRefreshLevel();
+    CHECK(logEnabled(LogLevel::Error));
+    CHECK(!logEnabled(LogLevel::Warn));
+    CHECK(!logEnabled(LogLevel::Info));
+
+    setenv("TEXTWORLD_LOG_LEVEL", "warn", 1);
+    logRefreshLevel();
+    CHECK(logEnabled(LogLevel::Warn));
+    CHECK(!logEnabled(LogLevel::Info));
+
+    setenv("TEXTWORLD_LOG_LEVEL", "banana", 1);
+    logRefreshLevel();
+    CHECK(logEnabled(LogLevel::Info));
+    CHECK(!logEnabled(LogLevel::Debug));
+
+    setenv("TEXTWORLD_LOG_LEVEL", "", 1);
+    logRefreshLevel();
+    CHECK(logEnabled(LogLevel::Info));
+    CHECK(!logEnabled(LogLevel::Debug));
+
+    // (c) the sink, and the gate governing emission (REQ-LOG-27).
+    std::vector<std::string> captured;
+    logSetSink(
+        [&captured](const std::string& line) { captured.push_back(line); });
+
+    setenv("TEXTWORLD_LOG_LEVEL", "info", 1);
+    logRefreshLevel();
+    logEmit(LogLevel::Debug, "bard", "below the threshold");
+    logEmitf(LogLevel::Debug, "bard", "below %s", "too");
+    CHECK(captured.empty());  // nothing under the threshold reaches the sink
+
+    logEmit(LogLevel::Warn, "prose", "fell back to templates");
+    CHECK(captured.size() == 1);
+    {
+        const ParsedLogLine p = parseLogLine(captured.back());
+        CHECK(p.ok);
+        CHECK(p.level == "WARN");
+        CHECK(p.thread == "main");  // the default thread_local label
+        CHECK(p.source == "prose");
+        CHECK(p.message == "fell back to templates");
+    }
+
+    // logEmitf keeps a migrated site's format string verbatim (REQ-LOG-14).
+    logEmitf(LogLevel::Error, "pregen", "job failed: %s after %ds", "timeout",
+             20);
+    CHECK(captured.size() == 2);
+    CHECK(parseLogLine(captured.back()).message ==
+          "job failed: timeout after 20s");
+
+    // The turn column tracks the process-local counter (REQ-LOG-13), and
+    // profile.cpp's forwarders address the same counter.
+    {
+        captured.clear();
+        const int64_t turn = logNextTurn();
+        CHECK(logCurrentTurn() == turn);
+        CHECK(profileCurrentTurn() == turn);
+        CHECK(profileNextTurn() == turn + 1);
+        CHECK(logCurrentTurn() == turn + 1);
+        logEmit(LogLevel::Info, "world", "stamped");
+        CHECK(parseLogLine(captured.back()).turn ==
+              "turn=" + std::to_string(turn + 1));
+    }
+
+    // (d) REQ-LOG-15: THREE threads, the shape of the 400-record profiling
+    // stress widened to the three that actually emit. Every line must arrive
+    // complete and well-formed — never interleaved, never truncated, never two
+    // entries braided into one.
+    {
+        std::vector<std::string> lines;
+        std::mutex linesMutex;
+        logSetSink([&](const std::string& line) {
+            const std::lock_guard<std::mutex> lock(linesMutex);
+            lines.push_back(line);
+        });
+        setenv("TEXTWORLD_LOG_LEVEL", "debug", 1);
+        logRefreshLevel();
+
+        auto emitMany = [](const char* threadName, const char* source) {
+            logSetThreadName(threadName);
+            for (int i = 0; i < 200; ++i) {
+                logEmitf(LogLevel::Debug, source, "record %d of a long "
+                         "enough message to be torn if the write were split",
+                         i);
+            }
+        };
+        std::thread a([&] { emitMany("main", "bard"); });
+        std::thread b([&] { emitMany("pregen", "pregen"); });
+        std::thread c([&] { emitMany("bard", "architect"); });
+        a.join();
+        b.join();
+        c.join();
+
+        CHECK(lines.size() == 600);
+        bool allWellFormed = true;
+        for (const std::string& line : lines) {
+            const ParsedLogLine p = parseLogLine(line);
+            // A torn write shows up as an unparseable line, as a second
+            // timestamp spliced in mid-line, or as a message cut short of the
+            // tail the format string always ends with.
+            if (!p.ok || line.find(" record ", 1) != line.rfind(" record ") ||
+                p.message.rfind("record ", 0) != 0 ||
+                p.message.find("the write were split") == std::string::npos) {
+                allWellFormed = false;
+                break;
+            }
+        }
+        CHECK(allWellFormed);
+    }
+
+    // Restore the default writer AND the cached threshold: the guard only
+    // restores the env var, and the cache would otherwise outlive this test.
+    logSetSink({});
+    unsetenv("TEXTWORLD_LOG_LEVEL");
+    logRefreshLevel();
+    CHECK(!logEnabled(LogLevel::Debug));
+}
+
+// --- the session file: creation, naming, retention (REQ-LOG-3..-9) ----------
+// NOTE ON SCOPE. logInit() is the one thing that redirects the error channel,
+// and the test binary otherwise never calls it (REQ-LOG-28) — main.cpp is not
+// linked here. This test calls it deliberately, against a TEMP directory, and
+// every path out of it goes through logShutdown(), which points the error
+// channel back at the terminal duplicate. Leave that pairing intact or every
+// test that follows writes its stderr into a temp file.
+static void testLogFile() {
+    namespace fs = std::filesystem;
+    const fs::path root =
+        fs::temp_directory_path() / "textworld-log-tests";
+
+    auto matchingLogs = [](const fs::path& dir) {
+        std::vector<std::string> names;
+        for (const auto& entry : fs::directory_iterator(dir)) {
+            const std::string name = entry.path().filename().string();
+            if (name.rfind("textworld-", 0) == 0 &&
+                name.size() == std::string("textworld-20260805-143022.log")
+                                   .size()) {
+                names.push_back(name);
+            }
+        }
+        std::sort(names.begin(), names.end());
+        return names;
+    };
+
+    // (a) REQ-LOG-4, -5, -6: the directory is created if absent, exactly one
+    // file appears, and its name carries the local date and time year-first.
+    {
+        const fs::path dir = root / "create";
+        fs::remove_all(dir);
+        CHECK(!fs::exists(dir));
+
+        const LogInit init = logInit(dir);
+        logShutdown();
+
+        CHECK(init.fileOpen);
+        CHECK(fs::is_directory(dir));
+        const std::vector<std::string> names = matchingLogs(dir);
+        CHECK(names.size() == 1);
+        if (names.size() == 1) {
+            CHECK(init.path.filename().string() == names[0]);
+            // textworld-YYYYMMDD-HHMMSS.log, checked digit by digit.
+            const std::string& n = names[0];
+            bool shaped = n.rfind("textworld-", 0) == 0 &&
+                          n.substr(n.size() - 4) == ".log" && n[18] == '-';
+            for (size_t i = 10; i < n.size() - 4 && shaped; ++i) {
+                if (i == 18) continue;
+                if (n[i] < '0' || n[i] > '9') shaped = false;
+            }
+            CHECK(shaped);
+        }
+        fs::remove_all(dir);
+    }
+
+    // (b) REQ-LOG-9: 25 files in, 20 out — the session's own file among them.
+    // Sorting by name equals sorting by modification time, which is the whole
+    // point of the REQ-LOG-5 naming. A file that does not match the pattern is
+    // never eligible for deletion.
+    {
+        const fs::path dir = root / "retention";
+        fs::remove_all(dir);
+        fs::create_directories(dir);
+
+        const auto now = fs::file_time_type::clock::now();
+        for (int i = 0; i < 25; ++i) {
+            char name[64];
+            std::snprintf(name, sizeof(name), "textworld-2026080%d-1200%02d.log",
+                          1 + i / 10, i);
+            const fs::path p = dir / name;
+            { std::ofstream out(p); out << "seeded\n"; }
+            // Older names get older mtimes, so name order IS age order.
+            fs::last_write_time(p, now - std::chrono::hours(25 - i));
+        }
+        { std::ofstream out(dir / "notes.txt"); out << "not a log\n"; }
+
+        const std::vector<std::string> before = matchingLogs(dir);
+        CHECK(before.size() == 25);
+
+        const LogInit init = logInit(dir);
+        logShutdown();
+        CHECK(init.fileOpen);
+
+        const std::vector<std::string> after = matchingLogs(dir);
+        CHECK(after.size() == 20);  // the new file counts toward the 20
+        CHECK(fs::exists(dir / "notes.txt"));  // never eligible
+        // The survivors are the newest: the five oldest seeded names are gone,
+        // and the session's own file is present.
+        bool oldestGone = true;
+        for (int i = 0; i < 5; ++i) {
+            char name[64];
+            std::snprintf(name, sizeof(name), "textworld-2026080%d-1200%02d.log",
+                          1 + i / 10, i);
+            if (fs::exists(dir / name)) oldestGone = false;
+        }
+        CHECK(oldestGone);
+        CHECK(fs::exists(init.path));
+
+        // Name order equals mtime order across everything that survived.
+        std::vector<std::pair<fs::file_time_type, std::string>> byTime;
+        for (const std::string& name : after) {
+            byTime.emplace_back(fs::last_write_time(dir / name), name);
+        }
+        std::sort(byTime.begin(), byTime.end());
+        bool sameOrder = true;
+        for (size_t i = 0; i < after.size(); ++i) {
+            if (byTime[i].second != after[i]) sameOrder = false;
+        }
+        CHECK(sameOrder);
+
+        fs::remove_all(dir);
+    }
+
+    // (c) REQ-LOG-7, -8: an unwritable directory is not an error. logInit
+    // reports the file did not open, throws nothing, and — the half that
+    // matters — does not leave the error channel aimed at the game screen.
+    {
+        const fs::path dir = root / "readonly";
+        fs::remove_all(dir);
+        fs::create_directories(dir);
+        fs::permissions(dir, fs::perms::owner_read | fs::perms::owner_exec,
+                        fs::perm_options::replace);
+
+        bool threw = false;
+        LogInit init;
+        try {
+            init = logInit(dir);
+        } catch (...) {
+            threw = true;
+        }
+        logShutdown();
+
+        CHECK(!threw);
+        CHECK(!init.fileOpen);
+
+        fs::permissions(dir, fs::perms::owner_all, fs::perm_options::replace);
+        fs::remove_all(dir);
+    }
+
+    fs::remove_all(root);
+}
+
 // --- profiling mechanism (REQ-LAT-1, -4, -5) --------------------------------
 // ORDERING NOTE: profilingEnabled() caches its getenv (once per process, so the
-// turn path pays only a bool read), which is exactly why the test-only
+// turn path pays only an enum test), which is exactly why the test-only
 // profileRefreshEnabled() exists — every gate flip below must be followed by
 // one, or the cache still holds the value main() installed. This test restores
-// BOTH the env var (via the guard) and the cached bool + default sink before
-// returning, so no later test emits a profiling line.
+// BOTH the env var (via the guard) and the cached threshold + default writer
+// before returning, so no later test emits a profiling line.
 static void testProfileRecords() {
-    const ScopedEnvVar profGuard("TEXTWORLD_PROFILE");
+    const ScopedEnvVar profGuard("TEXTWORLD_LOG_LEVEL");
 
-    // (a) the gate matrix (REQ-LAT-1). "0" counts as off, matching
-    // TEXTWORLD_AI's convention — TEXTWORLD_PROFILE=0 must never mean ON.
-    unsetenv("TEXTWORLD_PROFILE");
+    // (a) the gate (REQ-LOG-22). Profiling is no longer a switch of its own —
+    // it is the DEBUG level of the one log threshold, so `debug` and only
+    // `debug` turns it on. There is deliberately no "off" value to test for
+    // (REQ-LOG-19): every other setting, valid or not, simply sits above DEBUG.
+    // The threshold's own contract is testLogFormatAndLevels's; this is the
+    // half that says profiling rides on it.
+    unsetenv("TEXTWORLD_LOG_LEVEL");
     profileRefreshEnabled();
     CHECK(!profilingEnabled());
-    setenv("TEXTWORLD_PROFILE", "1", 1);
+    setenv("TEXTWORLD_LOG_LEVEL", "debug", 1);
     profileRefreshEnabled();
     CHECK(profilingEnabled());
-    setenv("TEXTWORLD_PROFILE", "", 1);
+    setenv("TEXTWORLD_LOG_LEVEL", "info", 1);
     profileRefreshEnabled();
     CHECK(!profilingEnabled());
-    setenv("TEXTWORLD_PROFILE", "0", 1);
+    setenv("TEXTWORLD_LOG_LEVEL", "banana", 1);  // unrecognized => INFO
+    profileRefreshEnabled();
+    CHECK(!profilingEnabled());
+    setenv("TEXTWORLD_LOG_LEVEL", "error", 1);
     profileRefreshEnabled();
     CHECK(!profilingEnabled());
 
@@ -2453,17 +2870,16 @@ static void testProfileRecords() {
 
     // (c) the sink, and the gate governing emission (REQ-LAT-1).
     std::vector<std::string> captured;
-    profileSetSink(
-        [&captured](const std::string& line) { captured.push_back(line); });
+    profileSetSink(captureTwprof(captured));
 
-    setenv("TEXTWORLD_PROFILE", "0", 1);
+    setenv("TEXTWORLD_LOG_LEVEL", "error", 1);
     profileRefreshEnabled();
     profileEmit(StageRecord{"resolve", 1, 1.0, nullptr});
     profileEmit(ok);
     { const ScopedStage off("total"); }
     CHECK(captured.empty());  // profiling off => the sink hears nothing
 
-    setenv("TEXTWORLD_PROFILE", "1", 1);
+    setenv("TEXTWORLD_LOG_LEVEL", "debug", 1);
     profileRefreshEnabled();
     profileEmit(StageRecord{"resolve", 1, 1.0, nullptr});
     CHECK(captured.size() == 1);
@@ -2480,7 +2896,7 @@ static void testProfileRecords() {
     }
     CHECK(captured.size() == 3);
     {
-        const auto kv = parseProfileRecord(captured.back());
+        const auto kv = parseProfileRecord(twprofPayload(captured.back()));
         CHECK(kv.at("kind") == "stage");
         CHECK(kv.at("stage") == "total");
         CHECK(kv.at("turn") == std::to_string(turn));
@@ -2489,7 +2905,7 @@ static void testProfileRecords() {
     // Restore the default sink AND the cached gate: the guard only restores the
     // env var, and the cache would otherwise outlive this test.
     profileSetSink({});
-    unsetenv("TEXTWORLD_PROFILE");
+    unsetenv("TEXTWORLD_LOG_LEVEL");
     profileRefreshEnabled();
     CHECK(!profilingEnabled());
 }
@@ -2499,7 +2915,7 @@ static void testProfileRecords() {
 // the background flag's FORMAT, the dwell record's format and CORRECTNESS, and
 // serialized emission under genuine concurrent load. ---
 static void testProfileBackgroundAndDwell() {
-    const ScopedEnvVar profGuard("TEXTWORLD_PROFILE");
+    const ScopedEnvVar profGuard("TEXTWORLD_LOG_LEVEL");
 
     // (a) REQ-PREGEN-24: `background=1` appears on a background record and the
     // key is ABSENT — not `background=0` — on a foreground one, so every log
@@ -2542,11 +2958,8 @@ static void testProfileBackgroundAndDwell() {
 
     std::vector<std::string> captured;
     std::mutex capturedMutex;
-    profileSetSink([&](const std::string& line) {
-        const std::lock_guard<std::mutex> lock(capturedMutex);
-        captured.push_back(line);
-    });
-    setenv("TEXTWORLD_PROFILE", "1", 1);
+    profileSetSink(captureTwprofLocked(captured, capturedMutex));
+    setenv("TEXTWORLD_LOG_LEVEL", "debug", 1);
     profileRefreshEnabled();
 
     // (c) REQ-PREGEN-25 CORRECTNESS — the half the live run cannot establish,
@@ -2562,7 +2975,7 @@ static void testProfileBackgroundAndDwell() {
             std::this_thread::sleep_for(std::chrono::milliseconds(60));
         }
         CHECK(captured.size() == 1);
-        const auto kv = parseProfileRecord(captured.back());
+        const auto kv = parseProfileRecord(twprofPayload(captured.back()));
         CHECK(kv.at("kind") == "dwell");
         CHECK(kv.at("turn") == std::to_string(turn));
         const double ms = std::stod(kv.at("ms"));
@@ -2570,11 +2983,13 @@ static void testProfileBackgroundAndDwell() {
         CHECK(ms < 500.0);   // and is not some unrelated large number
     }
 
-    // (d) REQ-PREGEN-22: two threads, 200 records each. Every one of the 400
-    // must arrive as a COMPLETE, well-formed line — never interleaved, never
-    // truncated, never two records braided into one. The `twprof` marker
-    // appearing anywhere past position 0 is exactly what a torn write looks
-    // like, so that is what is asserted.
+    // (d) REQ-PREGEN-22, now carried by REQ-LOG-15: two threads, 200 records
+    // each. Every one of the 400 must arrive as a COMPLETE, well-formed line —
+    // never interleaved, never truncated, never two records braided into one.
+    // A record is now a DEBUG log entry, so the checks below run on the PAYLOAD
+    // after twprofPayload strips the six-field prefix; a second `twprof` marker
+    // anywhere past position 0 of that payload is exactly what a torn write
+    // looks like, so that is what is asserted.
     {
         captured.clear();
         auto emitMany = [](const char* role) {
@@ -2598,7 +3013,8 @@ static void testProfileBackgroundAndDwell() {
 
         CHECK(captured.size() == 400);
         bool allWellFormed = true;
-        for (const std::string& line : captured) {
+        for (const std::string& entry : captured) {
+            const std::string line = twprofPayload(entry);
             if (line.empty() || line.rfind("twprof ", 0) != 0) {
                 allWellFormed = false;
                 break;
@@ -2618,7 +3034,7 @@ static void testProfileBackgroundAndDwell() {
     }
 
     profileSetSink({});
-    unsetenv("TEXTWORLD_PROFILE");
+    unsetenv("TEXTWORLD_LOG_LEVEL");
     profileRefreshEnabled();
     CHECK(!profilingEnabled());
 }
@@ -2656,7 +3072,7 @@ static std::vector<std::string> capturedStages(
     const std::vector<std::string>& captured) {
     std::vector<std::string> stages;
     for (const std::string& line : captured) {
-        const auto kv = parseProfileRecord(line);
+        const auto kv = parseProfileRecord(twprofPayload(line));
         if (kv.at("kind") == "stage") stages.push_back(kv.at("stage"));
     }
     return stages;
@@ -2666,7 +3082,9 @@ static std::vector<std::string> capturedStages(
 static bool capturedAnyKind(const std::vector<std::string>& captured,
                             const std::string& kind) {
     for (const std::string& line : captured) {
-        if (parseProfileRecord(line).at("kind") == kind) return true;
+        if (parseProfileRecord(twprofPayload(line)).at("kind") == kind) {
+            return true;
+        }
     }
     return false;
 }
@@ -2677,10 +3095,9 @@ static bool capturedAnyKind(const std::vector<std::string>& captured,
 // are emitted whether or not a network call happened, and no kind=call record
 // appears at all (REQ-LAT-6).
 static void testProfileTurnStages() {
-    const ScopedEnvVar profGuard("TEXTWORLD_PROFILE");
+    const ScopedEnvVar profGuard("TEXTWORLD_LOG_LEVEL");
     std::vector<std::string> captured;
-    profileSetSink(
-        [&captured](const std::string& line) { captured.push_back(line); });
+    profileSetSink(captureTwprof(captured));
 
     // (d) identity check (REQ-LAT-1): the same first turn on two identically
     // seeded worlds, profiling off vs on. With profiling OFF the sink — which
@@ -2690,7 +3107,7 @@ static void testProfileTurnStages() {
     {
         const TempDbFile worldPath("textworld_profile_off_tests.db");
         Db db = openWorld(worldPath.string(), "tests/fixture.sql").db;
-        unsetenv("TEXTWORLD_PROFILE");
+        unsetenv("TEXTWORLD_LOG_LEVEL");
         profileRefreshEnabled();
         offOutput = runTurn(db, "look").output;
     }
@@ -2699,7 +3116,7 @@ static void testProfileTurnStages() {
     {
         const TempDbFile worldPath("textworld_profile_on_tests.db");
         Db db = openWorld(worldPath.string(), "tests/fixture.sql").db;
-        setenv("TEXTWORLD_PROFILE", "1", 1);
+        setenv("TEXTWORLD_LOG_LEVEL", "debug", 1);
         profileRefreshEnabled();
         onOutput = runTurn(db, "look").output;
     }
@@ -2715,9 +3132,10 @@ static void testProfileTurnStages() {
                                                   "total"}));
         CHECK(!capturedAnyKind(captured, "call"));
         // Every record of one turn shares its process-local turn number.
-        const auto first = parseProfileRecord(captured.front());
+        const auto first = parseProfileRecord(twprofPayload(captured.front()));
         for (const std::string& line : captured) {
-            CHECK(parseProfileRecord(line).at("turn") == first.at("turn"));
+            CHECK(parseProfileRecord(twprofPayload(line)).at("turn") ==
+                  first.at("turn"));
         }
     }
 
@@ -2752,7 +3170,7 @@ static void testProfileTurnStages() {
     }
 
     profileSetSink({});
-    unsetenv("TEXTWORLD_PROFILE");
+    unsetenv("TEXTWORLD_LOG_LEVEL");
     profileRefreshEnabled();
     CHECK(!profilingEnabled());
 }
@@ -7196,7 +7614,7 @@ static void testPregenOutcomeRecords() {
     const ScopedEnvVar keyGuard("ANTHROPIC_API_KEY");
     const ScopedEnvVar aiGuard("TEXTWORLD_AI");
     const ScopedEnvVar pregenGuard("TEXTWORLD_PREGEN");
-    const ScopedEnvVar profGuard("TEXTWORLD_PROFILE");
+    const ScopedEnvVar profGuard("TEXTWORLD_LOG_LEVEL");
     setenv("ANTHROPIC_API_KEY", "test-key-never-used", 1);
     unsetenv("TEXTWORLD_AI");
     unsetenv("TEXTWORLD_PREGEN");
@@ -7204,16 +7622,15 @@ static void testPregenOutcomeRecords() {
     const int64_t player = 3;
 
     std::vector<std::string> captured;
-    profileSetSink(
-        [&captured](const std::string& line) { captured.push_back(line); });
-    setenv("TEXTWORLD_PROFILE", "1", 1);
+    profileSetSink(captureTwprof(captured));
+    setenv("TEXTWORLD_LOG_LEVEL", "debug", 1);
     profileRefreshEnabled();
 
     // Every kind=pregen record in the capture, parsed.
     auto pregenRecords = [&captured]() {
         std::vector<std::map<std::string, std::string>> out;
         for (const std::string& line : captured) {
-            auto kv = parseProfileRecord(line);
+            auto kv = parseProfileRecord(twprofPayload(line));
             if (kv.at("kind") == "pregen") out.push_back(std::move(kv));
         }
         return out;
@@ -7221,7 +7638,7 @@ static void testPregenOutcomeRecords() {
     // True iff a stage=generate record was emitted.
     auto sawGenerateStage = [&captured]() {
         for (const std::string& line : captured) {
-            const auto kv = parseProfileRecord(line);
+            const auto kv = parseProfileRecord(twprofPayload(line));
             if (kv.at("kind") == "stage" && kv.at("stage") == "generate") return true;
         }
         return false;
@@ -7371,7 +7788,7 @@ static void testPregenOutcomeRecords() {
     }
 
     profileSetSink({});
-    unsetenv("TEXTWORLD_PROFILE");
+    unsetenv("TEXTWORLD_LOG_LEVEL");
     profileRefreshEnabled();
     unsetenv("TEXTWORLD_PREGEN");
     pregenRefreshEnabledForTest();
@@ -7384,15 +7801,14 @@ static void testPregenOutcomeRecords() {
 static void testProfileGenerateStage() {
     const ScopedEnvVar keyGuard("ANTHROPIC_API_KEY");
     const ScopedEnvVar aiGuard("TEXTWORLD_AI");
-    const ScopedEnvVar profGuard("TEXTWORLD_PROFILE");
+    const ScopedEnvVar profGuard("TEXTWORLD_LOG_LEVEL");
     setenv("ANTHROPIC_API_KEY", "test-key-never-used", 1);
     unsetenv("TEXTWORLD_AI");
-    setenv("TEXTWORLD_PROFILE", "1", 1);
+    setenv("TEXTWORLD_LOG_LEVEL", "debug", 1);
     profileRefreshEnabled();
 
     std::vector<std::string> captured;
-    profileSetSink(
-        [&captured](const std::string& line) { captured.push_back(line); });
+    profileSetSink(captureTwprof(captured));
 
     const int64_t player = 3;
 
@@ -7408,7 +7824,7 @@ static void testProfileGenerateStage() {
         tickT(db, Action{Verb::Go, 0, "east"}, fake, player);
 
         CHECK(capturedStages(captured) == std::vector<std::string>({"generate"}));
-        const auto kv = parseProfileRecord(captured.front());
+        const auto kv = parseProfileRecord(twprofPayload(captured.front()));
         CHECK(kv.at("nested_in") == "tick");
         CHECK(!capturedAnyKind(captured, "call"));  // the fake makes no call
         // The exit really was realized — this is a generating turn.
@@ -7444,7 +7860,8 @@ static void testProfileGenerateStage() {
         tickT(db, Action{Verb::Go, 0, "east"}, err, player);
 
         CHECK(capturedStages(captured) == std::vector<std::string>({"generate"}));
-        CHECK(parseProfileRecord(captured.front()).at("nested_in") == "tick");
+        CHECK(parseProfileRecord(twprofPayload(captured.front())).at(
+                  "nested_in") == "tick");
         CHECK(queryText(db, "SELECT detail FROM events ORDER BY id DESC LIMIT 1") ==
               "You can't go that way.");
         // Latent row untouched — still retryable.
@@ -7454,7 +7871,7 @@ static void testProfileGenerateStage() {
     }
 
     profileSetSink({});
-    unsetenv("TEXTWORLD_PROFILE");
+    unsetenv("TEXTWORLD_LOG_LEVEL");
     profileRefreshEnabled();
     CHECK(!profilingEnabled());
 }
@@ -10071,22 +10488,34 @@ static HttpResponse bardOvertureCanned(nlohmann::json entries,
     return bardCanned(nlohmann::json::array({bardToolUse("write_catalog", input)}));
 }
 
-// Everything written to stderr while `fn` runs. Used where the ABSENCE of a
-// diagnostic is the assertion.
+// Every log entry the bard emits while `fn` runs, at DEBUG. Used where the
+// ABSENCE of a diagnostic is the assertion.
+//
+// This used to capture the error channel by reopening it onto a temp file.
+// Since REQ-LOG-1 nothing writes there directly any more, so that capture would
+// come back empty whatever happened — a test that passes because the mechanism
+// it watches no longer exists. The capture is the REQ-LOG-27 sink instead, and
+// the level is RAISED to debug for the duration: at the default INFO threshold
+// the bard's rejection entries are below the bar and the absence assertion
+// would be vacuous a second time (REQ-LOG-28).
 template <typename Fn>
-static std::string bardCapturedStderr(Fn fn) {
-    const std::filesystem::path tmp =
-        std::filesystem::temp_directory_path() / "textworld_bard_stderr.txt";
-    std::fflush(stderr);
-    const int saved = dup(fileno(stderr));
-    CHECK(std::freopen(tmp.string().c_str(), "w", stderr) != nullptr);
+static std::vector<std::string> bardCapturedEntries(Fn fn) {
+    const ScopedEnvVar levelGuard("TEXTWORLD_LOG_LEVEL");
+    setenv("TEXTWORLD_LOG_LEVEL", "debug", 1);
+    logRefreshLevel();
+    CHECK(logEnabled(LogLevel::Debug));  // the capture is not vacuous
+
+    std::vector<std::string> entries;
+    logSetSink([&entries](const std::string& line) {
+        const ParsedLogLine p = parseLogLine(line);
+        if (p.ok && p.source == std::string("bard")) entries.push_back(line);
+    });
     fn();
-    std::fflush(stderr);
-    dup2(saved, fileno(stderr));
-    close(saved);
-    const std::string out = readFileBytes(tmp);
-    std::filesystem::remove(tmp);
-    return out;
+    logSetSink({});
+
+    unsetenv("TEXTWORLD_LOG_LEVEL");
+    logRefreshLevel();
+    return entries;
 }
 
 // The overture gate (REQ-BARD-SEL-16, -17, -18): strict per response, lenient
@@ -10317,7 +10746,7 @@ static void testBardSelGateWake() {
     // --- spec test 15: no tool call at all is a SUCCESSFUL, EMPTY wake ------
     {
         std::optional<WakeProposal> p;
-        const std::string diagnostics = bardCapturedStderr([&] {
+        const std::vector<std::string> diagnostics = bardCapturedEntries([&] {
             p = validateWakeResponse(
                 bardCanned(nlohmann::json::array(
                     {{{"type", "text"}, {"text", "Nothing has changed."}}})),
@@ -10328,7 +10757,8 @@ static void testBardSelGateWake() {
         CHECK(!p->hasJournal);
         CHECK(p->appended.empty());
         CHECK(p->seededHandles.empty());
-        // And stderr carries no claim of failure: declining to act is normal.
+        // And the log carries no claim of failure: declining to act is normal.
+        // Asserted with DEBUG active, so an entry WOULD have been recorded.
         CHECK(diagnostics.empty());
     }
 
@@ -12434,6 +12864,225 @@ static void testBardDegradation() {
     CHECK(wakeCalls.load() > 0);
 }
 
+// --- REQ-LOG-1/-3 source guard ----------------------------------------------
+// The migration is complete only if it STAYS complete. In the same family as
+// the band read-only-ness and main()-declaration-order guards: assert as source
+// text what no behavioral test can, because a stray write to the error channel
+// is invisible from inside the test binary (REQ-LOG-28 keeps the backstop out
+// of it) and shows up only as a smear on a player's screen.
+static void testLogSourceGuards() {
+    // src/log.cpp is the ONE unit allowed to touch the error channel: it owns
+    // the default writer and the REQ-LOG-2 terminal duplicate. Every other unit
+    // goes through logEmit / logToTerminal. Note world.cpp and main.cpp are on
+    // this list too — their REQ-LOG-2 exemptions route through logToTerminal
+    // rather than through a direct write of their own.
+    for (const char* file :
+         {"src/bard.cpp", "src/bardworker.cpp", "src/architect.cpp",
+          "src/prose.cpp", "src/nlresolve.cpp", "src/pregen.cpp",
+          "src/mutations.cpp", "src/world.cpp", "src/main.cpp",
+          "src/profile.cpp", "src/loop.cpp", "src/systems.cpp",
+          "src/combat.cpp", "src/render.cpp", "src/band.cpp", "src/db.cpp",
+          "src/term.cpp", "src/parser.cpp", "src/aihttp.cpp"}) {
+        const std::string src = readFileBytes(file);
+        CHECK(!src.empty());
+        CHECK(!contains(src, "fprintf(stderr"));
+        CHECK(!contains(src, "std::cerr"));
+    }
+
+    // The logger is really in the build graph — a source file that compiles
+    // nowhere would make every check above vacuously true.
+    const std::string cmake = readFileBytes("CMakeLists.txt");
+    CHECK(contains(cmake, "src/log.cpp"));
+
+    // REQ-LOG-22/-30: the retired variable survives nowhere in the code. The
+    // needle is ASSEMBLED rather than written out, because this file is on the
+    // list it checks — spelling it whole here would fail the guard by being it.
+    const std::string retired = std::string("TEXTWORLD_") + "PROFILE";
+    for (const char* file : {"src/profile.cpp", "src/profile.hpp",
+                             "src/log.cpp", "src/log.hpp", "src/main.cpp",
+                             "src/loop.cpp", "src/pregen.cpp",
+                             "src/bardworker.cpp", "tests/tests.cpp",
+                             "README.md"}) {
+        CHECK(!contains(readFileBytes(file), retired));
+    }
+}
+
+// --- REQ-LOG-12/-20/-26: the migration inventory, driven ---------------------
+// One row of the REQ-LOG-20 table at a time: drive the condition with a fake
+// transport and assert an entry appears at the STATED level with the STATED
+// source. A row that silently stopped emitting, or that drifted to a different
+// level, is exactly what this catches and what a grep cannot.
+//
+// The thread labels of REQ-LOG-12 ride along here rather than standing alone,
+// because the only honest way to prove a worker's entries say `pregen` or
+// `bard` is to drive a real worker thread through a failing transport — which
+// is also what two of the ERROR rows need.
+static void testLogMigrationCoverage() {
+    const ScopedEnvVar levelGuard("TEXTWORLD_LOG_LEVEL");
+    const ScopedEnvVar keyGuard("ANTHROPIC_API_KEY");
+    const ScopedEnvVar aiGuard("TEXTWORLD_AI");
+    setenv("TEXTWORLD_LOG_LEVEL", "debug", 1);
+    logRefreshLevel();
+    setenv("ANTHROPIC_API_KEY", "test-key-never-used", 1);
+    unsetenv("TEXTWORLD_AI");
+
+    std::vector<std::string> entries;
+    std::mutex entriesMutex;
+    logSetSink([&](const std::string& line) {
+        const std::lock_guard<std::mutex> lock(entriesMutex);
+        entries.push_back(line);
+    });
+
+    // True iff some captured entry is at `level` with source `source`, and
+    // (when given) its message contains `needle`.
+    auto sawEntry = [&](const char* level, const char* source,
+                        const char* needle = nullptr) {
+        const std::lock_guard<std::mutex> lock(entriesMutex);
+        for (const std::string& line : entries) {
+            const ParsedLogLine p = parseLogLine(line);
+            if (!p.ok || p.level != level || p.source != source) continue;
+            if (needle == nullptr ||
+                p.message.find(needle) != std::string::npos) {
+                return true;
+            }
+        }
+        return false;
+    };
+    auto threadOf = [&](const char* source) {
+        const std::lock_guard<std::mutex> lock(entriesMutex);
+        for (const std::string& line : entries) {
+            const ParsedLogLine p = parseLogLine(line);
+            if (p.ok && p.source == source) return p.thread;
+        }
+        return std::string("<none>");
+    };
+    auto clear = [&] {
+        const std::lock_guard<std::mutex> lock(entriesMutex);
+        entries.clear();
+    };
+
+    const TempDbFile worldPath("textworld_log_coverage_tests.db");
+    Db db = openWorld(worldPath.string(), "tests/fixture.sql").db;
+
+    const HttpResponse notOk{false, 500, "{}"};
+    const HttpTransport failing = [&](const std::string&) { return notOk; };
+    const HttpTransport throwing = [](const std::string&) -> HttpResponse {
+        throw std::runtime_error("transport exploded");
+    };
+
+    // --- DEBUG rows: the validation rejections ------------------------------
+    clear();
+    CHECK(!aiRender(db, 1, failing).has_value());
+    CHECK(sawEntry("DEBUG", "prose", "rejected"));  // prose.cpp failClause
+
+    clear();
+    CHECK(!aiResolve(db, "take the lantern", failing).has_value());
+    CHECK(sawEntry("DEBUG", "nlresolve", "rejected"));
+
+    clear();
+    CHECK(!architectProposeRoom(R"({"setting":""})", {}, {}, "east", failing)
+               .has_value());
+    CHECK(sawEntry("DEBUG", "architect", "rejected"));
+
+    clear();
+    CHECK(!validateWakeResponse(HttpResponse{false, 500, "{}"}, {"curiosity"})
+               .has_value());
+    CHECK(sawEntry("DEBUG", "bard", "rejected"));
+
+    // --- WARN rows: the silent downgrades -----------------------------------
+    // A THROWING transport, not a rejecting one: the fallback warning lives in
+    // the catch, one layer above the clause rejection asserted just now.
+    clear();
+    CHECK(!aiRender(db, 1, throwing).has_value());
+    CHECK(sawEntry("WARN", "prose", "falling back to templates"));
+
+    clear();
+    CHECK(!aiResolve(db, "take the lantern", throwing).has_value());
+    CHECK(sawEntry("WARN", "nlresolve", "falling back to parser"));
+
+    // --- ERROR rows, and the REQ-LOG-12 thread labels with them -------------
+    clear();
+    CHECK(!architectGenerate(db, 1, "east", /*actor=*/3, throwing));
+    CHECK(sawEntry("ERROR", "architect", "phase 1 failed"));
+    CHECK(threadOf("architect") == "main");  // the default label
+
+    // The pregen worker: a real thread, a throwing transport, and the entry it
+    // leaves behind must say thread `pregen` (REQ-LOG-12), not `main`.
+    clear();
+    unsetenv("TEXTWORLD_PREGEN");
+    pregenRefreshEnabledForTest();
+    pregenResetForTest();
+    pregenSetWorkerTransportForTest(throwing);
+    pregenStart();
+    CHECK(pregenWorkerRunning());
+    {
+        PregenJob job;
+        job.room = 1;
+        job.direction = "east";
+        job.contextPayload = R"({"setting":"","origin_name":"stone hall"})";
+        job.snapshotTurn = 1;
+        pregenSubmit(std::move(job));
+    }
+    for (int i = 0; i < 400 && !sawEntry("ERROR", "pregen"); ++i) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    pregenResetForTest();
+    CHECK(sawEntry("ERROR", "pregen", "job failed"));
+    CHECK(threadOf("pregen") == "pregen");
+
+    // The bard worker, the same way.
+    clear();
+    unsetenv("TEXTWORLD_BARD");
+    bardRefreshEnabledForTest();
+    bardResetForTest();
+    bardSetWorkerTransportForTest(throwing);
+    bardStart();
+    CHECK(bardWorkerRunning());
+    {
+        BardJob job;
+        job.requestBody = "{}";
+        job.motives = {"curiosity"};
+        job.snapshotTurn = 1;
+        CHECK(bardSubmit(std::move(job)));
+    }
+    bardWaitForIdleForTest();
+    bardResetForTest();
+    CHECK(sawEntry("ERROR", "bard", "wake failed"));
+    CHECK(threadOf("bard") == "bard");
+
+    // --- privacy (REQ-LOG-26, validation item 18) ---------------------------
+    // A transport that echoes a sentinel in the body it RECEIVES and in the
+    // body it RETURNS. Neither the sentinel nor the key may appear in the log —
+    // at DEBUG, which is the widest setting there is.
+    {
+        clear();
+        const std::string sentinel = "SENTINEL-a7f3c1e9-DO-NOT-LOG";
+        const std::string key = "sk-ant-test-KEYSENTINEL-9f2b";
+        setenv("ANTHROPIC_API_KEY", key.c_str(), 1);
+        std::string sawRequest;
+        const HttpTransport echoing = [&](const std::string& body) {
+            sawRequest = body;
+            return HttpResponse{false, 200,
+                                std::string("{\"echo\":\"") + sentinel + "\"}"};
+        };
+        CHECK(!aiRender(db, 1, echoing).has_value());  // 200 but not a tool call
+        CHECK(!sawRequest.empty());  // the fake really ran
+
+        const std::lock_guard<std::mutex> lock(entriesMutex);
+        CHECK(!entries.empty());  // and really logged something
+        bool leaked = false;
+        for (const std::string& line : entries) {
+            if (line.find(sentinel) != std::string::npos) leaked = true;
+            if (line.find(key) != std::string::npos) leaked = true;
+        }
+        CHECK(!leaked);
+    }
+
+    logSetSink({});
+    unsetenv("TEXTWORLD_LOG_LEVEL");
+    logRefreshLevel();
+}
+
 // Step 7, REQ-BARD-WAKE-8/-12: the two claims that are about ABSENCE, which no
 // behavioral test can make.
 static void testBardTriggerContract() {
@@ -12486,14 +13135,20 @@ static void testBardOvertureContract() {
     // and it is invisible at runtime until it is not — so it is pinned as a
     // regression guard rather than left to review. Strictly increasing offsets:
     //
-    //   AiHttpGuard < openWorld < bardOverture < PregenGuard < BardGuard
+    //   logInit < AiHttpGuard < openWorld < bardOverture < PregenGuard < BardGuard
     //
     // The overture must precede both workers because it runs before any worker
     // thread exists; both guards must follow AiHttpGuard so reverse destruction
-    // joins them before curl_global_cleanup.
+    // joins them before curl_global_cleanup. logInit heads the chain for a
+    // different reason (REQ-LOG-29): the terminal duplicate must be taken
+    // before anything can redirect the error channel, and the backstop must be
+    // up before any code that might print — libcurl's own init included.
     const std::string main_ = readFileBytes("src/main.cpp");
     CHECK(!main_.empty());
+    const size_t logInit_ = main_.find("logInit(\"logs\")");
     const size_t http = main_.find("const AiHttpGuard httpGuard;");
+    CHECK(logInit_ != std::string::npos);
+    CHECK(logInit_ < http);
     const size_t open = main_.find("openWorld(\"world.db\")");
     const size_t overture = main_.find("bardOverture(db, nullptr)");
     const size_t pregen = main_.find("const PregenGuard pregenGuard;");
@@ -12542,12 +13197,16 @@ int main() {
     unsetenv("ANTHROPIC_API_KEY");
     unsetenv("TEXTWORLD_AI");
 
-    // Same discipline for TEXTWORLD_PROFILE (REQ-LAT-1): a developer shell with
-    // it set would otherwise spray profiling lines through every runTurn test.
-    // profilingEnabled() caches its getenv at static-init time, so unsetting the
-    // var is not enough — the cache must be refreshed too.
-    const ScopedEnvVar profileGuard("TEXTWORLD_PROFILE");
-    unsetenv("TEXTWORLD_PROFILE");
+    // Same discipline for TEXTWORLD_LOG_LEVEL (REQ-LAT-1, REQ-LOG-19): a
+    // developer shell with it set to `debug` would otherwise spray profiling
+    // lines through every runTurn test. The threshold is cached at static-init
+    // time, so unsetting the var is not enough — the cache must be refreshed
+    // too. Note this leaves the suite at the REQ-LOG-18 default of INFO, not
+    // at "logging off": what keeps the suite quiet is that nothing here calls
+    // logInit() or leaves a sink installed, so the logger is inert
+    // (REQ-LOG-28).
+    const ScopedEnvVar profileGuard("TEXTWORLD_LOG_LEVEL");
+    unsetenv("TEXTWORLD_LOG_LEVEL");
     profileRefreshEnabled();
 
 
@@ -12611,6 +13270,10 @@ int main() {
     testNlResolveContext();
     testNlResolvePrompt();
     testProseTransport();
+    testLogFormatAndLevels();
+    testLogFile();
+    testLogSourceGuards();
+    testLogMigrationCoverage();
     testProfileRecords();
     testProfileBackgroundAndDwell();
     testAiHttpWorkerClient();

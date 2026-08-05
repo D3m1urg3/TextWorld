@@ -1,56 +1,19 @@
 // Profiling mechanism (see profile.hpp for the contract). No call sites live
 // here — loop.cpp, architect.cpp and aihttp.cpp own those.
+//
+// Since REQ-LOG-22 this unit owns FORMAT ONLY. The gate, the serialization, the
+// sink and the writing all belong to log.cpp: a timing record is a DEBUG log
+// entry whose message is the `twprof key=value` payload, carried byte-for-byte
+// after the standard six-field prefix (REQ-LOG-23). The four format* functions
+// below are therefore untouched by that move, which is what makes the payload
+// identity checkable rather than merely intended.
 #include "profile.hpp"
 
-#include <atomic>
 #include <cstdio>
-#include <cstdlib>
-#include <mutex>
+
+#include "log.hpp"  // the gate, the turn counter, and the emission path
 
 namespace {
-
-// TEXTWORLD_PROFILE: set, non-empty, and not exactly "0".
-bool readProfileEnv() {
-    const char* v = std::getenv("TEXTWORLD_PROFILE");
-    if (v == nullptr || v[0] == '\0') return false;
-    return std::string(v) != "0";
-}
-
-// Cached at static-init time: the getenv happens once per process (REQ-LAT-1).
-// No other translation unit reads this during ITS static init, so the
-// initialization order is unobservable.
-bool g_enabled = readProfileEnv();
-
-// Process-local turn sequence (not meta.turn). ATOMIC because the pregen
-// worker reads it via profileCurrentTurn() to stamp its background call
-// records while the main thread advances it between turns (REQ-PREGEN-22).
-// Only the main thread ever writes.
-std::atomic<int64_t> g_turn{0};
-
-// Empty => the default stderr sink.
-std::function<void(const std::string&)>& sink() {
-    static std::function<void(const std::string&)> s;
-    return s;
-}
-
-// Serializes the whole of write() — the sink lookup, the sink call, and the
-// default fprintf alike (REQ-PREGEN-22). Records come from two threads, and
-// this is what makes one record one ATOMIC line rather than two threads'
-// bytes braided together. Note the default sink is a SINGLE fprintf, not a
-// write-then-newline pair: splitting it would defeat the point of the lock.
-std::mutex& sinkMutex() {
-    static std::mutex m;
-    return m;
-}
-
-void write(const std::string& line) {
-    const std::lock_guard<std::mutex> lock(sinkMutex());
-    if (sink()) {
-        sink()(line);
-        return;
-    }
-    std::fprintf(stderr, "%s\n", line.c_str());
-}
 
 // Milliseconds with three decimals — microsecond resolution, no exponent.
 std::string formatMs(double ms) {
@@ -61,16 +24,27 @@ std::string formatMs(double ms) {
 
 }  // namespace
 
-bool profilingEnabled() { return g_enabled; }
+// One gate for the whole engine now (REQ-LOG-22): the old profiling variable
+// is retired and TEXTWORLD_LOG_LEVEL=debug is the single switch. Still a cached enum
+// comparison, so REQ-LAT-1's overhead budget — and REQ-LOG-25's restatement of
+// it — is unchanged.
+bool profilingEnabled() { return logEnabled(LogLevel::Debug); }
 
-void profileRefreshEnabled() { g_enabled = readProfileEnv(); }
+void profileRefreshEnabled() { logRefreshLevel(); }
 
-int64_t profileNextTurn() { return ++g_turn; }
+// The counter itself lives in log.cpp: REQ-LOG-13 makes it a logging concern,
+// and profile.cpp depends on the logger, so keeping it here would make the
+// dependency circular. These two survive as forwarders so every existing call
+// site and test compiles untouched.
+int64_t profileNextTurn() { return logNextTurn(); }
 
-int64_t profileCurrentTurn() { return g_turn; }
+int64_t profileCurrentTurn() { return logCurrentTurn(); }
 
+// Kept under its own name so no profiling call site had to move. What it
+// installs is the LOGGER's sink, which receives the whole formatted line —
+// six-field prefix and twprof payload together (REQ-LOG-27).
 void profileSetSink(std::function<void(const std::string&)> s) {
-    sink() = std::move(s);
+    logSetSink(std::move(s));
 }
 
 std::string formatStage(const StageRecord& record) {
@@ -113,13 +87,13 @@ std::string formatCall(const CallRecord& record) {
 }
 
 void profileEmit(const StageRecord& record) {
-    if (!g_enabled) return;
-    write(formatStage(record));
+    if (!logEnabled(LogLevel::Debug)) return;  // REQ-LOG-25: no formatting below
+    logEmit(LogLevel::Debug, "profile", formatStage(record));
 }
 
 void profileEmit(const CallRecord& record) {
-    if (!g_enabled) return;
-    write(formatCall(record));
+    if (!logEnabled(LogLevel::Debug)) return;  // REQ-LOG-25: no formatting below
+    logEmit(LogLevel::Debug, "profile", formatCall(record));
 }
 
 std::string formatDwell(const DwellRecord& record) {
@@ -128,8 +102,8 @@ std::string formatDwell(const DwellRecord& record) {
 }
 
 void profileEmit(const DwellRecord& record) {
-    if (!g_enabled) return;
-    write(formatDwell(record));
+    if (!logEnabled(LogLevel::Debug)) return;  // REQ-LOG-25: no formatting below
+    logEmit(LogLevel::Debug, "profile", formatDwell(record));
 }
 
 std::string formatPregen(const PregenRecord& record) {
@@ -144,8 +118,8 @@ std::string formatPregen(const PregenRecord& record) {
 }
 
 void profileEmit(const PregenRecord& record) {
-    if (!g_enabled) return;
-    write(formatPregen(record));
+    if (!logEnabled(LogLevel::Debug)) return;  // REQ-LOG-25: no formatting below
+    logEmit(LogLevel::Debug, "profile", formatPregen(record));
 }
 
 ScopedStage::~ScopedStage() {

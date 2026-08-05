@@ -1,0 +1,4 @@
+2026-08-05 21:37:24.031  INFO   main    turn=0   main    session start: logging to logs/textworld-20260805-213724.log
+2026-08-05 21:37:24.031  INFO   main    turn=0   main    ai narration on
+2026-08-05 21:37:24.036  ERROR  main    turn=0   world   world file 'world.db' has schema_version 999999 but this build expects 6. No migrations exist yet: delete the world file and let the game recreate it from the seed.
+2026-08-05 21:37:24.037  INFO   main    turn=0   main    session end: 0 turns

@@ -1,0 +1,39 @@
+twprof kind=dwell turn=0 ms=0.008
+twprof kind=stage turn=1 stage=resolve ms=0.014
+twprof kind=stage turn=1 stage=tick ms=0.458
+twprof kind=stage turn=1 stage=narrate ms=0.071
+twprof kind=stage turn=1 stage=total ms=0.741
+twprof kind=dwell turn=1 ms=0.003
+twprof kind=stage turn=2 stage=resolve ms=0.014
+twprof kind=stage turn=2 stage=tick ms=0.348
+twprof kind=stage turn=2 stage=narrate ms=0.029
+twprof kind=stage turn=2 stage=total ms=0.546
+twprof kind=dwell turn=2 ms=0.002
+twprof kind=stage turn=3 stage=resolve ms=0.001
+twprof kind=stage turn=3 stage=tick ms=0.348
+twprof kind=stage turn=3 stage=narrate ms=0.028
+twprof kind=stage turn=3 stage=total ms=0.528
+twprof kind=dwell turn=3 ms=0.001
+twprof kind=stage turn=4 stage=resolve ms=0.001
+twprof kind=stage turn=4 stage=tick ms=0.321
+twprof kind=stage turn=4 stage=narrate ms=0.067
+twprof kind=stage turn=4 stage=total ms=0.562
+twprof kind=dwell turn=4 ms=0.001
+twprof kind=stage turn=5 stage=resolve ms=0.001
+twprof kind=stage turn=5 stage=tick ms=0.369
+twprof kind=stage turn=5 stage=narrate ms=0.028
+twprof kind=stage turn=5 stage=total ms=0.546
+twprof kind=dwell turn=5 ms=0.002
+twprof kind=stage turn=6 stage=resolve ms=0.001
+twprof kind=stage turn=6 stage=tick ms=0.323
+twprof kind=stage turn=6 stage=narrate ms=0.049
+twprof kind=stage turn=6 stage=total ms=0.523
+twprof kind=dwell turn=6 ms=0.005
+twprof kind=stage turn=7 stage=resolve ms=0.014
+twprof kind=stage turn=7 stage=total ms=0.155
+twprof kind=dwell turn=7 ms=0.005
+twprof kind=stage turn=8 stage=resolve ms=0.012
+twprof kind=stage turn=8 stage=total ms=0.150
+twprof kind=dwell turn=8 ms=0.001
+twprof kind=stage turn=9 stage=resolve ms=0.001
+twprof kind=stage turn=9 stage=total ms=0.004
