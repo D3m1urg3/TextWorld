@@ -26,7 +26,20 @@ const char* roleName(AiRole role);
 // The uniform per-call transport budget, in seconds. Named so that the ONE
 // deliberate exception to it — kBardOvertureTimeoutSeconds, in bard.hpp — has
 // something to be an exception TO. Every other call site takes this default.
-inline constexpr long kAiHttpTimeoutSeconds = 8;
+//
+// 20 rather than 8, sized off the ARCHITECT — the heaviest call the binary
+// makes (~3.1k input tokens, a required create_room tool call, max_tokens 1024,
+// and not streamed, so nothing returns until the whole room is generated).
+// Measured over 24 live calls on claude-opus-4-8: p50 6.9 s, p95 9.8 s,
+// max 14.6 s — 42% of them exceeded the old 8 s budget. A timeout there is not
+// cosmetic: curl discards the response and the player gets "You can't go that
+// way." on an exit the Exits: line just advertised as walkable.
+//
+// Raising this never slows a call that already succeeds — a timeout only ever
+// bites the tail. Resolve (0.8-1.9 s) and narrate (2.0-3.3 s) never approach
+// either value; what changes for them is only how long a stalled call waits
+// before falling back to the deterministic parser or the template renderer.
+inline constexpr long kAiHttpTimeoutSeconds = 20;
 
 // The model id for one role. THE single place the precedence rule lives —
 // exactly two levels (REQ-LAT-13):
