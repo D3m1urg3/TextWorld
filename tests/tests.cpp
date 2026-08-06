@@ -1858,6 +1858,154 @@ static void testLoop() {
     }
 }
 
+static const char* const kExamineGoldenSession = R"GOLDEN(A bare stone cell.
+Exits: down, north.
+You see: wand.
+-- cell ------------------------------------------------------------------------
+ Exits    down, north
+ Objects  wand
+ You      HP: 12/12
+You are carrying nothing.
+-- cell ------------------------------------------------------------------------
+ Exits    down, north
+ Objects  wand
+ You      HP: 12/12
+You take the wand.
+-- cell ------------------------------------------------------------------------
+ Exits    down, north
+ You      HP: 12/12
+You are carrying: wand.
+-- cell ------------------------------------------------------------------------
+ Exits    down, north
+ You      HP: 12/12
+There's nothing to read there.
+-- cell ------------------------------------------------------------------------
+ Exits    down, north
+ You      HP: 12/12
+You drop the wand.
+-- cell ------------------------------------------------------------------------
+ Exits    down, north
+ Objects  wand
+ You      HP: 12/12
+Time passes.
+-- cell ------------------------------------------------------------------------
+ Exits    down, north
+ Objects  wand
+ You      HP: 12/12
+Spells you know:
+stun — element: none, cooldown: 3, interrupts a winding-up strike
+ward — element: none, cooldown: 2, blocks one telegraphed strike
+-- cell ------------------------------------------------------------------------
+ Exits    down, north
+ Objects  wand
+ You      HP: 12/12
+I don't understand that.
+-- cell ------------------------------------------------------------------------
+ Exits    down, north
+ Objects  wand
+ You      HP: 12/12
+You don't see that here.
+-- cell ------------------------------------------------------------------------
+ Exits    down, north
+ Objects  wand
+ You      HP: 12/12
+A long dim corridor.
+Exits: east, south, up.
+You see: key.
+-- corridor --------------------------------------------------------------------
+ Exits    east, south, up
+ Objects  key
+ Enemy    goblin grunt  HP: 8/8
+ You      HP: 12/12  Stun: ready  Ward: ready
+You strike the goblin grunt for 4 damage.
+The goblin grunt winds up a heavy blow — strike it down or brace!
+The goblin grunt wounds you for 1 damage.
+-- corridor --------------------------------------------------------------------
+ Exits    east, south, up
+ Objects  key
+ Enemy    goblin grunt  HP: 4/8  [WINDING UP]
+ You      HP: 11/12  Stun: ready  Ward: ready
+You cast ward.
+The goblin grunt's strike breaks against your ward.
+The goblin grunt wounds you for 1 damage.
+-- corridor --------------------------------------------------------------------
+ Exits    east, south, up
+ Objects  key
+ Enemy    goblin grunt  HP: 4/8
+ You      HP: 10/12  Stun: ready  Ward: 2
+You strike the goblin grunt for 4 damage.
+The goblin grunt falls. It drops the fire grimoire.
+-- corridor --------------------------------------------------------------------
+ Exits    east, south, up
+ Objects  key, fire grimoire
+ You      HP: 10/12
+You study the fire grimoire and learn to cast fire.
+-- corridor --------------------------------------------------------------------
+ Exits    east, south, up
+ Objects  key, fire grimoire
+ You      HP: 10/12
+You study the fire grimoire, but you already know fire.
+-- corridor --------------------------------------------------------------------
+ Exits    east, south, up
+ Objects  key, fire grimoire
+ You      HP: 10/12
+A bare stone cell.
+Exits: down, north.
+You see: wand.
+-- cell ------------------------------------------------------------------------
+ Exits    down, north
+ Objects  wand
+ You      HP: 10/12
+)GOLDEN";
+
+// The pre-examine golden session (spec AI-Validation item 17, REQ-EXAMINE-23).
+// A fixed script over the widest fixture, run through the TEMPLATE path with AI
+// disabled, with every turn's output concatenated and compared to one literal.
+// Captured on unchanged engine code BEFORE the examine verb existed, so it is
+// the byte-identity baseline for the other eleven verbs: if adding examine
+// disturbs any of them, this literal stops matching.
+//
+// Re-capture (only when a verb's template output changes ON PURPOSE):
+//   TW_DUMP_GOLDEN=1 ./build/tests
+// and paste the printed block back into kExamineGoldenSession.
+static void testExamineGoldenSession() {
+    const TempDbFile worldPath("textworld_examine_golden_tests.db");
+    Db db = openWorld(worldPath.string(), "tests/combat_fixture.sql").db;
+
+    // Every pre-existing verb at least once, plus the tier-a renderError path.
+    // `quit` is deliberately absent: it produces no output.
+    const char* script[] = {
+        "look",           // looked, NULL detail  → room block
+        "inventory",      // looked, 'inventory'  → carrying line
+        "take wand",      // took
+        "inventory",      // carrying line, non-empty
+        "read wand",      // failed: nothing to read there
+        "drop wand",      // dropped
+        "wait",           // waited
+        "spells",         // no-tick reference output
+        "frobnicate it",  // tier a: renderError, no tick
+        "take key",       // failed: not in this room
+        "go north",       // moved, into the goblin's corridor
+        "attack",         // attacked + the enemy's turn
+        "cast ward",      // cast + warded/chip
+        "attack",         // attacked again → defeated, drops the grimoire
+        "read fire grimoire",  // learned
+        "read fire grimoire",  // reread
+        "go south",       // moved, back through a realized exit
+    };
+
+    std::string actual;
+    for (const char* line : script) actual += runTurn(db, line).output;
+
+    if (std::getenv("TW_DUMP_GOLDEN") != nullptr) {
+        std::printf("--- examine golden session ---\n%s--- end ---\n",
+                    actual.c_str());
+        return;
+    }
+
+    CHECK(actual == kExamineGoldenSession);
+}
+
 // --- facts builder (REQ-PROSE-6, REQ-PROSE-7): pure (db, turn) → TurnFacts,
 // payload parseable JSON with exactly the REQ-PROSE-7 keys, name-resolved,
 // id-free, with validation anchors. No network anywhere. ---
@@ -13266,6 +13414,7 @@ int main() {
     testRender();
     testExitDisplayInvariant();
     testLoop();
+    testExamineGoldenSession();
     testProseFacts();
     testNlResolveContext();
     testNlResolvePrompt();
