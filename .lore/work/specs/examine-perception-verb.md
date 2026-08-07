@@ -1,7 +1,7 @@
 ---
 title: "examine — the perception verb: requirements"
 date: 2026-08-06
-status: draft
+status: implemented
 tags: [examine, isa, perception, canon-description, scope, render, narration, resolver, requirements]
 modules: [parser, systems, render, prose, nlresolve, action]
 related: [.lore/work/design/examine-perception-verb.md, .lore/work/brainstorm/npcs.md, .lore/work/specs/bard-architect-integration.md, .lore/work/specs/ai-resolver.md, .lore/vision.md]

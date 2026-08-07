@@ -1,7 +1,7 @@
 ---
 title: "Implementation plan: bard-catalog-selection"
 date: 2026-08-03
-status: approved
+status: executed
 tags: [plan, bard, dungeon-master, eligibility, tool-use, validation-gate, wire-format, degradation, determinism]
 modules: [bard, combat, mutations, architect]
 related: [.lore/work/specs/bard-catalog-selection.md, .lore/work/design/bard-catalog-selection.md, .lore/work/specs/bard-fact-store.md, .lore/work/plans/bard-fact-store.md, .lore/work/specs/bard-overture-and-scheduling.md, .lore/work/specs/bard-architect-integration.md]

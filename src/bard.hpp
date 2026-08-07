@@ -81,14 +81,21 @@ int64_t catalogForHandle(Db& db, int64_t room, const std::string& handle);
 int64_t catalogIdForHandle(Db& db, const std::string& handle);
 
 // Pure function of the database (REQ-BARD-SEL-9): SELECTs only, no network, no
-// globals. The overture's user message, carrying EXACTLY two things —
-// meta.setting, and the motive vocabulary as key + blurb from motive_catalog,
-// ordered by key. Nothing else about world state; at overture time none exists
+// globals. The overture's user message, carrying EXACTLY three things —
+// meta.setting; the motive vocabulary as key + blurb from motive_catalog,
+// ordered by key; and the hand-authored major cast as name + profile, ordered
+// by catalog.id. Nothing else about world state; at overture time none exists
 // to describe. An empty setting still yields a well-formed object.
 //
 // The motive BLURBS are not optional. The tool schema constrains `motive` to
 // eight bare keys, so without their meanings the model is selecting between
 // opaque tokens.
+//
+// The CAST is the third thing (REQ-NPCSTORE-35), and it is OMITTED — not
+// present-and-empty — when there are no majors, so a world without one produces
+// exactly the payload this function produced before the cast existed. The
+// overture still cannot place anyone; the map does not exist yet. It reads the
+// cast so the story is authored around them.
 std::string buildOvertureContext(Db& db);
 
 // The most recent N events a wake may see. meta.bard_last_wake_turn advances

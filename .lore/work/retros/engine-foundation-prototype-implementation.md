@@ -1,7 +1,7 @@
 ---
 title: "Engine foundation prototype implementation"
 date: 2026-07-06
-status: open
+status: archived
 tags: [engine, prototype, cpp, sqlite, turn-loop, event-sourcing, orchestration, subagents, implement-skill, cmake, clangd, session-limit]
 modules: [engine]
 related: [.lore/work/plans/engine-foundation-prototype.md, .lore/work/specs/engine-foundation-prototype.md, .lore/work/notes/engine-foundation-prototype.md, .lore/work/notes/simplify-engine-foundation-prototype.md]

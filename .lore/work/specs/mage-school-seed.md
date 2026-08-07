@@ -1,7 +1,7 @@
 ---
 title: Mage-school seed world (Thornmere Hall)
 date: 2026-07-09
-status: draft
+status: implemented
 tags: [seed, setting, worldbuilding, tests, fixture, mage-school]
 modules: [seed, tests]
 related: [.lore/work/brainstorm/mage-school-setting.md, .lore/work/specs/engine-foundation-prototype.md, .lore/work/specs/story-seed-architect.md]

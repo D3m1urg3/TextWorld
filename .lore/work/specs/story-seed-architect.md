@@ -1,7 +1,7 @@
 ---
 title: Story-seed + architect — requirements
 date: 2026-07-09
-status: draft
+status: implemented
 tags: [ai-integration, story-seed, world-generation, architect, claude-api, tool-use, mutations, fallback, persistence, requirements]
 modules: [world-gen, architect, systems, mutations, world, loop]
 related: [.lore/work/design/story-seed-architect.md, .lore/work/brainstorm/story-seed-and-lod-world.md, .lore/work/specs/ai-resolver.md, .lore/work/specs/ai-prose-renderer.md, .lore/vision.md]

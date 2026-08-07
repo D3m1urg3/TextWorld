@@ -1,9 +1,14 @@
 // textworld: the game binary. Interface contract (spec): invoked with no
 // arguments, reads commands from stdin, writes to stdout, and uses the fixed
 // world file "world.db" in the current working directory.
+#include <algorithm>
 #include <cstdio>
+#include <filesystem>
+#include <fstream>
 #include <iostream>
+#include <sstream>
 #include <string>
+#include <vector>
 
 #include "aihttp.hpp"
 #include "architect.hpp"   // architectQueuePregen — the pre-generation scheduler
@@ -29,6 +34,41 @@ struct SessionLogGuard {
     }
 };
 
+// Read the hand-authored major-character files, as DATA for openWorld
+// (REQ-NPCSTORE-34): main() does the file I/O, world.cpp does none of its own
+// for these.
+//
+// An absent or unreadable directory yields an EMPTY vector, SILENTLY. No majors
+// is a valid world (REQ-NPCSTORE-32), and `seed/majors/` does not exist in the
+// shipped tree — the first authored major is content work, not this brick's.
+//
+// Sorted by filename, so catalog ids and the loader's duplicate-handle check
+// are deterministic across platforms: directory_iterator's order is not.
+//
+// This runs on EVERY launch, including resumed ones where initialize() never
+// runs and the vector is discarded. That is a few small file reads at startup,
+// and it buys a call site with no branch in it — noted rather than optimised.
+std::vector<MajorProfileFile> readMajorProfiles(const std::filesystem::path& dir) {
+    std::vector<MajorProfileFile> files;
+    std::error_code ec;
+    if (!std::filesystem::is_directory(dir, ec)) return files;
+
+    std::vector<std::filesystem::path> paths;
+    for (const auto& entry : std::filesystem::directory_iterator(dir, ec)) {
+        if (entry.is_regular_file(ec)) paths.push_back(entry.path());
+    }
+    std::sort(paths.begin(), paths.end());
+
+    for (const std::filesystem::path& p : paths) {
+        std::ifstream in(p, std::ios::binary);
+        if (!in) continue;  // unreadable: silent, same as an absent directory
+        std::ostringstream buf;
+        buf << in.rdbuf();
+        files.push_back({p.filename().string(), buf.str()});
+    }
+    return files;
+}
+
 }  // namespace
 
 int main() {
@@ -52,7 +92,8 @@ int main() {
         // quit, EOF, SchemaMismatch, and the generic catch.
         const AiHttpGuard httpGuard;
 
-        auto world = openWorld("world.db");
+        auto world = openWorld("world.db", "seed/base.sql", "seed/setting.txt",
+                               readMajorProfiles("seed/majors"));
         Db& db = world.db;
         logEmitf(LogLevel::Info, "world", "opened world.db (%s)",
                  world.created ? "created" : "resumed");

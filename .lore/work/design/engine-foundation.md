@@ -1,7 +1,7 @@
 ---
 title: "Engine foundation design: SQLite-as-world core for the two-room prototype"
 date: 2026-07-05
-status: draft
+status: implemented
 tags: [design, engine, sqlite, ecs, turn-loop, cpp]
 modules: [engine]
 related: [.lore/work/brainstorm/engine-foundation-cpp-sqlite.md, .lore/work/research/similar-projects-and-approaches.md, .lore/vision.md]

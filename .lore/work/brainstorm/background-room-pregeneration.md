@@ -1,7 +1,7 @@
 ---
 title: "Background room pregeneration: candidates for the latent exits"
 date: 2026-08-01
-status: open
+status: resolved
 tags: [performance, latency, pregeneration, prefetch, threading, architect, story-coherence]
 modules: [loop, architect, mutations, aihttp, nlresolve, prose]
 related: [.lore/work/brainstorm/performance-polish-action-latency.md, .lore/work/specs/turn-latency-polish.md, .lore/work/validation/turn-latency-polish/findings.md]

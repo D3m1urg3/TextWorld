@@ -7,6 +7,7 @@
 #include "architect.hpp"  // architectGenerate + aiNarrationEnabled (via prose.hpp)
 #include "combat.hpp"      // resolveAttack (the combat verb resolution)
 #include "mutations.hpp"
+#include "npc.hpp"         // resolveSay (the conversation verb's resolution)
 #include "pregen.hpp"      // the candidate store — the tick's one call into it
 #include "profile.hpp"     // PregenRecord — the per-walk outcome
 
@@ -242,6 +243,15 @@ void resolveImpl(Db& db, const Action& action, int64_t player,
             break;
         case Verb::Examine:
             resolveExamine(db, action, player);
+            break;
+        case Verb::Say:
+            // The spoken text rides action.text, which the ENGINE set — the
+            // parser from the remainder of the line, the resolver from the
+            // whole raw line. No model response is ever read into it
+            // (REQ-NPCTALK-6).
+            transport != nullptr
+                ? resolveSay(db, player, action.text, *transport)
+                : resolveSay(db, player, action.text);
             break;
         case Verb::Quit:
             // Quit is handled by the game loop BEFORE the tick transaction is

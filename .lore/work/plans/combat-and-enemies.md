@@ -1,7 +1,7 @@
 ---
 title: "Implementation plan: combat-and-enemies"
 date: 2026-07-10
-status: approved
+status: executed
 tags: [plan, combat, enemies, spells, cooldowns, determinism, architect, bestiary, grimoires]
 modules: [systems, mutations, action, architect, render, prose, seed, combat]
 related: [.lore/work/specs/combat-and-enemies.md, .lore/work/brainstorm/combat-and-enemies.md, .lore/vision.md, .lore/work/plans/ai-resolver.md]

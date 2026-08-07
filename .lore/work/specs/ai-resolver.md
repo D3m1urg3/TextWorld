@@ -1,7 +1,7 @@
 ---
 title: AI resolver — requirements
 date: 2026-07-08
-status: draft
+status: implemented
 tags: [ai-integration, nl-resolver, claude-api, tool-use, action-isa, parser, fallback, requirements]
 modules: [parser, action, loop, resolve]
 related: [.lore/work/brainstorm/ai-resolver.md, .lore/work/brainstorm/ai-integration-points.md, .lore/work/specs/ai-prose-renderer.md, .lore/work/specs/engine-foundation-prototype.md]

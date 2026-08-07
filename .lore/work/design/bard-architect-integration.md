@@ -1,7 +1,7 @@
 ---
 title: "Architect integration: how story reaches the world"
 date: 2026-08-03
-status: approved
+status: implemented
 tags: [bard, dungeon-master, architect, materialization, world-gen, nouns-must-exist, catalog, integration, amendments]
 modules: [architect, bard, mutations, combat]
 related: [.lore/work/design/bard-fact-store.md, .lore/work/design/bard-catalog-selection.md, .lore/work/design/bard-overture-and-scheduling.md, .lore/work/design/story-seed-architect.md, .lore/work/specs/ai-prose-renderer.md]

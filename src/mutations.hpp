@@ -7,7 +7,9 @@
 //   - These helpers never begin/commit/rollback. The caller owns the
 //     transaction boundary (typically one transaction per turn).
 //   - `appendEvent` alone (no component write) is legal ONLY for the
-//     no-write verbs: 'looked', 'waited', 'failed', 'examined'.
+//     no-write verbs: 'looked', 'waited', 'failed', 'examined', 'said',
+//     'spoke'. Speech is a no-write verb because a conversation line is a
+//     thing that HAPPENED, with no component to change (REQ-NPCSTORE-2).
 //   - ALL other world mutation goes through these helpers; systems code
 //     never runs raw SQL writes against component tables or `events`. The
 //     'generated' verb is helper-issued too: it is written ONLY by
@@ -17,6 +19,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <string>
+#include <vector>
 
 #include "db.hpp"
 
@@ -271,3 +274,112 @@ void writeBardFocus(Db& db, const std::string& text);
 //
 // REQ-BARD-STORE-18: this file is the ONLY unit that may write this row.
 void writeBardWakeTurn(Db& db, int64_t turn);
+
+// --- The NPC memory store (specs/npc-memory-store.md) ------------------------
+//
+// Two stores with OPPOSITE rules. A character's profile is written once and
+// never edited, so identity cannot drift. Its memory is rewritten freely and
+// capped, because memory is a reconstruction and a character misremembering
+// costs nothing mechanical.
+//
+// The three `npc*` reads below are this file's FIRST read helpers. They are
+// SELECT-only, deterministic functions of the database (REQ-NPCSTORE-22), and
+// they live here rather than in a new translation unit because the spec's
+// `modules:` line names mutations/world/bard/main and no `npc` unit. The
+// conversation brick may hoist them; nothing depends on their staying put.
+// They do not weaken the file's contract: nothing above this line reads, and
+// nothing below this line writes.
+
+// The cap on catalog_profile.profile, in CODE POINTS (REQ-NPCSTORE-17).
+// Generous for a hand-written character (~700 words is well under) and a hard
+// stop on a model-written one that runs away. This string is re-sent IN FULL on
+// every conversation call, which is what the ceiling is protecting.
+inline constexpr size_t kProfileCap = 4000;
+
+// The cap on npc_memory.summary, in CODE POINTS (REQ-NPCSTORE-17). Short enough
+// that it cannot hold a personality essay. A BRAKE, NOT A GUARANTEE
+// (REQ-NPCSTORE-18): the rule that matters — the summary carries facts, never
+// voice — is a prompt rule and cannot be enforced on free text. The cap stops
+// erosion compounding; it does not prevent it. Do not read it as enforcement.
+inline constexpr size_t kSummaryCap = 800;
+
+// The cap on rows returned by one raw-line read (REQ-NPCSTORE-17). The bounded
+// read is what stops the recurring conversation prompt growing across a
+// session — see the design's decision 4 and the persona-drift finding behind it.
+inline constexpr int64_t kLineCap = 40;
+
+// Write a character's authored profile. WRITE-ONCE: guarded in SQL, so a second
+// call for the same catalog entry changes nothing and returns false — the
+// learnSpell / materializeCatalogEntry idempotence shape. There is deliberately
+// NO helper that edits an existing profile: a character's identity cannot drift
+// because no code path exists to drift it (REQ-NPCSTORE-12), and the suite
+// asserts that against the SOURCE TEXT rather than trusting it
+// (REQ-NPCSTORE-36).
+//
+// A profile for a catalog id that does not exist is refused and returns false
+// (REQ-NPCSTORE-14) — the EXISTS clause is in the same statement as the latch,
+// so neither guard is a prior read.
+//
+// Truncated to kProfileCap code points. Event-free — an authored profile has not
+// happened; the character's arrival in the world is what produces an event.
+// Never begins/commits.
+bool writeCatalogProfile(Db& db, int64_t catalog, const std::string& profile);
+
+// Upsert a character's memory summary and stamp summary_turn with the turn
+// BEFORE the current one, both inside the caller's ambient transaction. Free
+// rewrite: memory is a reconstruction, and a character misremembering costs
+// nothing mechanical. No latch, no append semantics — a second call REPLACES
+// the summary outright.
+//
+// The stamp is turn - 1, not the current turn (REQ-NPCTALK-29a), and that is
+// load-bearing: a summary is composed by the model from the lines it was
+// handed, in the same call that produces this turn's reply, so it can never
+// cover this turn's own exchange. Stamping the current turn would hide that
+// exchange from every future npcLinesSince read, which filters on
+// turn > summary_turn — an off-by-one that silently loses a conversation
+// instead of failing. Clamped at 0 so a turn-0 write cannot stamp -1. Still
+// read here rather than passed in (REQ-NPCSTORE-8): no caller chooses the stamp.
+//
+// The row is not pre-created at materialisation (REQ-NPCSTORE-9): this upserts,
+// so there is no row to branch on. Truncated to kSummaryCap code points. See
+// the design's decision 4: that cap is a brake on personality erosion, not a
+// proof against it. Event-free. Never begins/commits.
+void writeNpcMemory(Db& db, int64_t entity, const std::string& summary);
+
+// A character's memory summary and the turn it covers to.
+struct NpcMemory {
+    std::string summary;
+    int64_t summaryTurn = 0;
+};
+
+// One speech event, as it was appended.
+struct SpeechLine {
+    std::string verb;    // "said" or "spoke"
+    std::string detail;  // the line, byte-exact as appended
+};
+
+// The profile the character `entity` is, via its catalog row. Empty if the
+// entity is not a catalog character or has no profile yet — which is the
+// NORMAL, COMMON state of a minor character before its first conversation
+// (REQ-NPCSTORE-19). Never an error, never a throw, never a log line.
+std::string npcProfile(Db& db, int64_t entity);
+
+// The character's memory summary and the turn it covers to. An entity with no
+// npc_memory row yields {"", 0}, which is not an error (REQ-NPCSTORE-20).
+NpcMemory npcMemory(Db& db, int64_t entity);
+
+// The speech events this character took part in since its summary was written,
+// OLDEST FIRST, capped at kLineCap (REQ-NPCSTORE-21). When more qualify, the
+// MOST RECENT kLineCap are returned — a character forgets the middle of a long
+// conversation, never the end of it.
+//
+// The cap never hands back a reply without its question (REQ-NPCSTORE-21a): a
+// leading `spoke` whose paired `said` the cap CUT is dropped, yielding
+// kLineCap - 1 rows. A leading `spoke` whose `said` merely predates
+// summary_turn is legitimate and is kept — the two cases are told apart by
+// probing one row past the cap, not guessed at from the row count. A TRAILING
+// `said` with no `spoke` is kept untouched: that is what a failed reply looks
+// like, and hiding it would make the character unaware it was spoken to.
+//
+// `detail` is returned verbatim — no trimming, no normalisation, no shielding.
+std::vector<SpeechLine> npcLinesSince(Db& db, int64_t entity);

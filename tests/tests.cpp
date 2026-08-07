@@ -9,6 +9,7 @@
 #include <future>
 #include <map>
 #include <mutex>
+#include <set>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -29,6 +30,7 @@
 #include "loop.hpp"
 #include "mutations.hpp"
 #include "nlresolve.hpp"
+#include "npc.hpp"
 #include "bardworker.hpp"
 #include "pregen.hpp"
 #include "profile.hpp"
@@ -487,6 +489,76 @@ static void testParser() {
             CHECK(a->subject == 0);
         }
     }
+}
+
+// --- the speech clause (REQ-NPCTALK-8, -9, -10) -----------------------------
+// `say <text>` takes the remainder of the line VERBATIM. The casing case is the
+// one that matters: the parser splits `lowered` to find the verb word but must
+// slice `trim(line)` to produce the text, or the player's own words reach the
+// `said` row lowercased.
+static void testParseSay() {
+    const TempDbFile worldPath("textworld_parse_say_tests.db");
+    Db db = openWorld(worldPath.string(), "tests/fixture.sql").db;
+
+    // The plain case: Say, no subject (resolution finds the character — the
+    // shape `attack` already uses), text = the remainder.
+    {
+        auto a = parse(db, "say hello");
+        CHECK(a.has_value());
+        CHECK(a->verb == Verb::Say);
+        CHECK(a->subject == 0);
+        CHECK(a->text == "hello");
+        CHECK(a->direction.empty());
+        CHECK(a->spell.empty());
+    }
+
+    // THE CASING GUARD. This is what fails if the lowered copy is sliced.
+    {
+        auto a = parse(db, "say Hello There, Warden!");
+        CHECK(a.has_value());
+        CHECK(a->text == "Hello There, Warden!");
+    }
+
+    // Outer whitespace is trimmed; INTERIOR spacing is the player's and is
+    // preserved byte for byte.
+    {
+        auto a = parse(db, "say   spaced   out  ");
+        CHECK(a.has_value());
+        CHECK(a->text == "spaced   out");
+    }
+
+    // Leading whitespace before the verb word shifts both copies identically,
+    // so the offset still lands in the right place.
+    {
+        auto a = parse(db, "   say  Mind The Gap ");
+        CHECK(a.has_value());
+        CHECK(a->text == "Mind The Gap");
+    }
+
+    // Bare verb → nullopt (REQ-PROTO-6a), whitespace-only argument included.
+    CHECK(!parse(db, "say"));
+    CHECK(!parse(db, "say   "));
+
+    // A word that merely STARTS with "say" is not the verb — and specifically
+    // must not become a Say carrying an empty text.
+    CHECK(!parse(db, "sayonara"));
+
+    // Verb recognition is case-insensitive like every other verb, and the text
+    // that follows still is not.
+    {
+        auto a = parse(db, "SAY Yes");
+        CHECK(a.has_value());
+        CHECK(a->verb == Verb::Say);
+        CHECK(a->text == "Yes");
+    }
+
+    // REQ-NPCTALK-10: the parser never branches on AI availability — a `say`
+    // parses identically with or without a key, and resolution decides what a
+    // say with no reachable model produces. Asserted as source text because
+    // parse() has no env-dependent branch to drive; the behavioural half is
+    // validation item 22's AI-disabled case, in testSayConversation.
+    CHECK(readFileBytes("src/parser.cpp").find("aiNarrationEnabled") ==
+          std::string::npos);
 }
 
 static void testMutations() {
@@ -3693,6 +3765,11 @@ static void testAiRoleModel() {
     // from a pregen room job in a profile log, which is the whole reason it is
     // not a reuse of Generate.
     CHECK(std::string(roleName(AiRole::Bard)) == "bard");
+    // The fifth role (REQ-NPCTALK-16): a talk turn issues NO narrate request,
+    // so the dialogue call occupies the slot narration would have used — and a
+    // profile log that could not tell them apart would show a talk turn as an
+    // ordinary narrated one.
+    CHECK(std::string(roleName(AiRole::Speak)) == "speak");
 
     // Level 2 — per-role defaults: resolve is the cheap one, prose stays Opus.
     unsetenv("TEXTWORLD_MODEL");
@@ -3700,6 +3777,9 @@ static void testAiRoleModel() {
     CHECK(modelForRole(AiRole::Narrate) == "claude-opus-4-8");
     CHECK(modelForRole(AiRole::Generate) == "claude-opus-4-8");
     CHECK(modelForRole(AiRole::Bard) == "claude-opus-4-8");
+    // Speech is prose: the reply is the turn's one AI output and prints
+    // verbatim, so Speak takes the prose default, not the resolver's cheap one.
+    CHECK(modelForRole(AiRole::Speak) == "claude-opus-4-8");
 
     // Level 1 — the global override wins for EVERY role (REQ-LAT-13), so
     // anyone relying on TEXTWORLD_MODEL today is unaffected by the tiering.
@@ -3708,6 +3788,7 @@ static void testAiRoleModel() {
     CHECK(modelForRole(AiRole::Narrate) == "claude-sonnet-5");
     CHECK(modelForRole(AiRole::Generate) == "claude-sonnet-5");
     CHECK(modelForRole(AiRole::Bard) == "claude-sonnet-5");
+    CHECK(modelForRole(AiRole::Speak) == "claude-sonnet-5");
 
     // Set-but-EMPTY is not an override — back to the per-role defaults.
     setenv("TEXTWORLD_MODEL", "", 1);
@@ -3715,6 +3796,58 @@ static void testAiRoleModel() {
     CHECK(modelForRole(AiRole::Narrate) == "claude-opus-4-8");
     CHECK(modelForRole(AiRole::Generate) == "claude-opus-4-8");
     CHECK(modelForRole(AiRole::Bard) == "claude-opus-4-8");
+    CHECK(modelForRole(AiRole::Speak) == "claude-opus-4-8");
+}
+
+// --- the ISA shape (REQ-NPCTALK-5) ------------------------------------------
+// The verb set is THIRTEEN. The switch below has no `default:` arm, so a
+// fourteenth verb added later fails to COMPILE here rather than silently
+// slipping past a runtime count — which is the only kind of guard that survives
+// someone widening the enum in a hurry.
+static void testSayIsaShape() {
+    const auto arity = [](Verb v) -> int {
+        switch (v) {
+            // Argument-free verbs.
+            case Verb::Look:
+            case Verb::Inventory:
+            case Verb::Wait:
+            case Verb::Quit:
+            case Verb::Attack:
+            case Verb::Spells:
+                return 0;
+            // Verbs carrying a subject entity.
+            case Verb::Take:
+            case Verb::Drop:
+            case Verb::Read:
+            case Verb::Examine:
+                return 1;
+            // Verbs carrying their own string field.
+            case Verb::Go:
+            case Verb::Cast:
+                return 2;
+            // Say carries `text`, which the ENGINE sets and no model ever does
+            // (REQ-NPCTALK-6); `subject` stays 0 and resolution finds the
+            // character in the room (REQ-NPCTALK-9).
+            case Verb::Say:
+                return 3;
+        }
+        return -1;
+    };
+
+    // Every member of the enum, named once, so the count is asserted rather
+    // than assumed. Verb has no reflection; this list IS the count.
+    const std::vector<Verb> all = {
+        Verb::Look, Verb::Go,     Verb::Take,    Verb::Drop,    Verb::Inventory,
+        Verb::Wait, Verb::Quit,   Verb::Attack,  Verb::Cast,    Verb::Read,
+        Verb::Spells, Verb::Examine, Verb::Say};
+    CHECK(all.size() == 13);
+    for (const Verb v : all) CHECK(arity(v) >= 0);
+    CHECK(arity(Verb::Say) == 3);
+
+    // The new field defaults empty for every other verb, so nothing that
+    // constructs an Action today gains a stray payload.
+    CHECK(Action{Verb::Look}.text.empty());
+    CHECK(Action{Verb::Say}.subject == 0);
 }
 
 // --- the threading contract, as written down (REQ-BARD-WAKE-17) -------------
@@ -3922,11 +4055,11 @@ static void testNlResolveRequestBody() {
         // ('spells' added by the status band, REQ-UI-37: the model-facing list
         // must carry it too, or inspection would work only via the fixed-verb
         // parser word — a silent half-wiring. 'examine' joins it for the same
-        // reason, REQ-EXAMINE-18.)
+        // reason, REQ-EXAMINE-18, and 'say' for REQ-NPCTALK-11.)
         CHECK(verb["enum"] ==
               json::array({"look", "go", "take", "drop", "inventory", "wait",
                            "quit", "attack", "cast", "read", "spells",
-                           "examine"}));
+                           "examine", "say"}));
 
         // subject and direction present; verb is the ONLY required field.
         CHECK(schema["properties"].contains("subject"));
@@ -4798,6 +4931,11 @@ static void testProseLiveSmoke() {
 // resolves it must lower to the expected verb/subject; a nullopt is a correct
 // clean fallback, never a failure. This is deliberately NOT a prompt-tuning
 // loop — never assert on model wording or that a phrasing MUST resolve.
+// Defined with the conversation tests further down. Forward-declared here
+// because main() runs the live smokes FIRST, before the hermetic env unset.
+static int64_t placeCharacterIn(Db& db, int64_t room, const char* handle,
+                                const char* name, const char* kind = "character");
+
 static void testNlResolveLiveSmoke() {
     const char* live = std::getenv("TEXTWORLD_AI_LIVE_TEST");
     if (live == nullptr || std::string(live) != "1") {
@@ -4849,6 +4987,101 @@ static void testNlResolveLiveSmoke() {
         const TurnResult r = runTurn(db, "smell the flowers");
         CHECK(r.outcome == TurnOutcome::NoTick);
         CHECK(!r.output.empty());
+    }
+
+    // --- THE NAMED REGRESSION SET (spec validation item 6, REQ-NPCTALK-15).
+    //
+    // REQ-NPCTALK-14 makes the resolver's absolute "make no tool call" rule
+    // CONDITIONAL, and that is the highest-risk change the conversation brick
+    // contains. Its failure is QUIET: `take the key` classified as speech reads
+    // as the character ignoring you. So the regression that matters is the
+    // twelve prior verbs re-run WITH a character present.
+    //
+    // This eight-phrasing set is the CONTRACT REQ-NPCTALK-15a names. Everything
+    // outside it is tuned against real play and is not specified. If one of
+    // these resolves to Say, tune the prompt's ordering sentence and re-run —
+    // bounded to this fixed set, never opened into a tuning session against
+    // invented phrasings.
+    //
+    // The two standing rules of this smoke still hold: mechanical invariants
+    // only, and a nullopt is a clean fallback rather than a failure.
+    {
+        // combat_fixture, not fixture: this set needs a hostile to attack, a
+        // catalogued spell to cast, and the motive vocabulary a catalog
+        // character is admitted against. A candle and a grimoire are added by
+        // hand, because two of the eight phrasings name nouns no fixture
+        // carries — and a phrasing whose noun does not exist is rejected by the
+        // gate for the WRONG reason, which would make it pass vacuously.
+        const TempDbFile talkPath("textworld_resolve_live_say.db");
+        Db talk = openWorld(talkPath.string(), "tests/combat_fixture.sql").db;
+        const int64_t room =
+            queryInt(talk, "SELECT container FROM location WHERE entity = "
+                           "(SELECT entity FROM player LIMIT 1)");
+        talk.exec("INSERT INTO entities(id) VALUES (401), (402)");
+        talk.exec("INSERT INTO name(entity, value) VALUES "
+                  "(401, 'candle'), (402, 'grimoire')");
+        talk.exec("INSERT INTO description(entity, prose) VALUES "
+                  "(401, 'A guttering candle.'), (402, 'A plain grimoire.')");
+        talk.exec(("INSERT INTO location(entity, container) VALUES "
+                   "(401, " + std::to_string(room) + "), (402, " +
+                   std::to_string(room) + ")").c_str());
+        talk.exec("INSERT INTO portable(entity) VALUES (402)");
+        placeCharacterIn(talk, room, "gate_warden", "gate warden", "character");
+
+        // Every noun the set names really is recognised, so a nullopt below is
+        // the model declining rather than the gate rejecting an absent noun.
+        for (const char* noun : {"key", "candle", "grimoire"}) {
+            CHECK(lookupNoun(talk, noun) != 0);
+        }
+        CHECK(!lookupSpell(talk, "ward").empty());
+
+        // The payload really does supply present_character now — otherwise
+        // every assertion below would pass vacuously, testing the OLD rule.
+        {
+            const nlohmann::json p = nlohmann::json::parse(
+                buildResolveContext(talk, "hello").payload, nullptr, false);
+            CHECK(p.contains("present_character"));
+        }
+
+        std::fprintf(stderr,
+                     "RESOLVER LIVE SMOKE: the eight-phrasing say/action "
+                     "regression set (REQ-NPCTALK-15)...\n");
+
+        struct Phrasing {
+            const char* line;
+            Verb expected;
+        };
+        const std::vector<Phrasing> actions = {
+            {"take the key", Verb::Take},   {"go north", Verb::Go},
+            {"attack", Verb::Attack},       {"cast ward", Verb::Cast},
+            {"read grimoire", Verb::Read},  {"examine candle", Verb::Examine},
+            {"look", Verb::Look},           {"inventory", Verb::Inventory},
+        };
+        for (const Phrasing& p : actions) {
+            const std::optional<Action> a = aiResolve(talk, p.line);
+            if (!a) continue;  // clean decline: a correct fallback, not a failure
+            // The one that matters: an ACTION must never become speech.
+            CHECK(a->verb != Verb::Say);
+            CHECK(a->verb == p.expected);
+        }
+
+        // The positive direction: a greeting and a question are speech — or a
+        // clean decline, which is still not a wrong action.
+        for (const char* line : {"hello there", "who are you"}) {
+            const std::optional<Action> a = aiResolve(talk, line);
+            if (!a) continue;
+            CHECK(a->verb == Verb::Say);
+            // The player's own words, from the engine's copy (REQ-NPCTALK-6).
+            CHECK(a->text == line);
+        }
+
+        // Item 7, live: with NO character present the same question still
+        // produces no tool call, so behaviour is unchanged from before this
+        // brick. A resolved action would be the regression; Say is impossible.
+        {
+            const std::optional<Action> a = aiResolve(db, "who are you");
+            if (a) CHECK(a->verb != Verb::Say);
+        }
     }
 }
 
@@ -9870,8 +10103,8 @@ static void testSpellsVerb() {
     // the two cannot drift.
     {
         const std::vector<std::string> words = {
-            "look", "go",   "take", "drop",   "inventory", "wait",
-            "quit", "attack", "cast", "read", "spells",    "examine"};
+            "look", "go",     "take", "drop", "inventory", "wait",  "quit",
+            "attack", "cast", "read", "spells", "examine", "say"};
         // Both lists live in nlresolve.cpp; compare them at the source level,
         // since a word present in one and absent from the other is a silent
         // half-wiring rather than a compile error. (The schema's runtime shape
@@ -9885,19 +10118,27 @@ static void testSpellsVerb() {
             CHECK(contains(src, "word == \"" + w + "\""));  // verbFromWord
             CHECK(contains(enumBlock, "\"" + w + "\""));    // the tool enum
         }
-        // Nothing beyond the twelve: verbFromWord has exactly this many arms.
+        // Nothing beyond the thirteen: verbFromWord has exactly this many arms.
         size_t arms = 0;
         for (size_t i = src.find("word == \""); i != std::string::npos;
              i = src.find("word == \"", i + 1)) {
             ++arms;
         }
         CHECK(arms == words.size());
-        // And the prompt describes all twelve, so the schema can never accept a
-        // value the prompt never mentions.
+        // And the prompt describes all thirteen, so the schema can never accept
+        // a value the prompt never mentions.
         const std::string p = kResolveSystemPrompt;
-        CHECK(contains(p, "exactly twelve verbs"));
+        CHECK(contains(p, "exactly thirteen verbs"));
+        // The STALE-NUMERAL GUARD (REQ-NPCTALK-11). The count at the top of the
+        // prompt is a sentence the MODEL READS, not a comment — a stale one is
+        // a wrong instruction, not a stale note. "seven single actions" was
+        // exactly that: a leftover from when the ISA had seven verbs, which the
+        // conversation brick's rewrite drops rather than corrects, so the
+        // numeral cannot go stale again.
+        CHECK(!contains(p, "exactly twelve verbs"));
         CHECK(!contains(p, "exactly eleven verbs"));
         CHECK(!contains(p, "exactly ten verbs"));
+        CHECK(!contains(p, "seven single actions"));
         for (const std::string& w : words) CHECK(contains(p, "\n- " + w + ":"));
     }
 }
@@ -9930,12 +10171,16 @@ static void testBandResistance() {
         // this is what makes that requirement falsifiable. `catalog` and
         // `motive_catalog` are the bard fact store's (REQ-BARD-STORE-2, -4) —
         // not group G's, and asserted in full by testBardStoreSchema.
+        // `catalog_profile` and `npc_memory` are the NPC memory store's
+        // (REQ-NPCSTORE-6, -7), asserted in full by testNpcStoreSchema. This
+        // list is also what keeps REQ-NPCSTORE-3 falsifiable: a table created
+        // to hold conversation lines would show up here.
         const std::vector<std::string> expected = {
-            "barrier", "bestiary", "catalog", "cooldowns", "description",
-            "drop_table", "entities", "events", "exits", "grimoire", "health",
-            "hostile", "known_spells", "location", "meta", "motive_catalog",
-            "name", "pending_strike", "player", "portable", "resistance", "room",
-            "spell_catalog", "status_effects"};
+            "barrier", "bestiary", "catalog", "catalog_profile", "cooldowns",
+            "description", "drop_table", "entities", "events", "exits",
+            "grimoire", "health", "hostile", "known_spells", "location", "meta",
+            "motive_catalog", "name", "npc_memory", "pending_strike", "player",
+            "portable", "resistance", "room", "spell_catalog", "status_effects"};
         CHECK(tables == expected);
         // And no DDL was added to the band or the mutation helper.
         CHECK(!contains(readFileBytes("src/band.cpp"), "CREATE TABLE"));
@@ -10204,14 +10449,21 @@ static void testBardStoreShippedSeedMotives() {
                        "('bard_journal','bard_focus','bard_last_wake_turn')") == 3);
 }
 
-// REQ-BARD-STORE-1 (mechanical check 4): a world file written at the PREVIOUS
+// REQ-BARD-STORE-1 (mechanical check 4): a world file written at an OLDER
 // version is refused, and the refusal writes nothing. Same shape as testWorld's
-// 999999 case, with the real predecessor value.
+// 999999 case, with a real predecessor value.
+//
+// The fresh-world assertion tracks SCHEMA_VERSION rather than a literal: this
+// is a bard test, and every later brick that bumps the schema would otherwise
+// have to edit it (REQ-NPCSTORE-10's bump did). The literal 5 below stays a
+// literal on purpose — it is "some version that is not this one", which is
+// what the refusal path is about, and what testNpcStoreSchema pins with 6.
 static void testBardStoreVersionGate() {
     const TempDbFile worldPath("textworld_bard_version_tests.db");
     {
         Db db = openWorld(worldPath.string(), "tests/combat_fixture.sql").db;
-        CHECK(queryInt(db, "SELECT value FROM meta WHERE key='schema_version'") == 6);
+        CHECK(queryInt(db, "SELECT value FROM meta WHERE key='schema_version'") ==
+              SCHEMA_VERSION);
     }
     {
         Db db(worldPath.string());
@@ -10716,6 +10968,2250 @@ static void testBardStoreAppendOnly() {
     CHECK(queryText(db, "SELECT value FROM meta WHERE key = 'bard_focus'").empty());
 }
 
+// --- The NPC memory store (specs/npc-memory-store.md). Schema, write helpers,
+// read helpers, and the hand-authored profile loader: no AI call, no network,
+// no fixture beyond seed SQL. Every test here opens tests/combat_fixture.sql,
+// the one fixture carrying the combat constants writeCatalogEntry's truth gate
+// reads — the same rule the bard fact store's tests follow. ---
+
+// Step 1: the two new tables (shapes AND defaults), the version gate, and the
+// two new verbs documented rather than merely used. Modeled on
+// testBardStoreSchema.
+static void testNpcStoreSchema() {
+    const TempDbFile worldPath("textworld_npc_schema_tests.db");
+    {
+        Db db = openWorld(worldPath.string(), "tests/combat_fixture.sql").db;
+
+        // REQ-NPCSTORE-6: catalog_profile, exactly two columns, exactly these
+        // names. Spec check 1.
+        CHECK(queryInt(db, "SELECT COUNT(*) FROM sqlite_master "
+                           "WHERE type='table' AND name='catalog_profile'") == 1);
+        CHECK(queryInt(db, "SELECT COUNT(*) FROM pragma_table_info('catalog_profile')") == 2);
+        CHECK(queryInt(db, "SELECT COUNT(*) FROM pragma_table_info('catalog_profile') "
+                           "WHERE name IN ('catalog','profile')") == 2);
+
+        // REQ-NPCSTORE-7: npc_memory, exactly three columns — and the DEFAULTS,
+        // not just the names. The upsert (REQ-NPCSTORE-9) never supplies them,
+        // so a missing default is a NOT NULL failure at the first write.
+        CHECK(queryInt(db, "SELECT COUNT(*) FROM pragma_table_info('npc_memory')") == 3);
+        CHECK(queryInt(db, "SELECT COUNT(*) FROM pragma_table_info('npc_memory') "
+                           "WHERE name IN ('entity','summary','summary_turn')") == 3);
+        CHECK(queryText(db, "SELECT dflt_value FROM pragma_table_info('npc_memory') "
+                            "WHERE name = 'summary'") == "''");
+        CHECK(queryText(db, "SELECT dflt_value FROM pragma_table_info('npc_memory') "
+                            "WHERE name = 'summary_turn'") == "0");
+
+        // REQ-NPCSTORE-10: the bump landed.
+        CHECK(queryInt(db, "SELECT value FROM meta WHERE key='schema_version'") == 7);
+    }
+
+    // Spec check 2: a world file at the PREVIOUS version is refused, and the
+    // refusal writes nothing. Same shape as testBardStoreVersionGate's.
+    {
+        Db db(worldPath.string());
+        db.exec("UPDATE meta SET value = 6 WHERE key = 'schema_version'");
+    }
+    const std::string bytesBefore = readFileBytes(worldPath);
+    CHECK(!bytesBefore.empty());
+    bool refused = false;
+    try {
+        Db db = openWorld(worldPath.string(), "tests/combat_fixture.sql").db;
+    } catch (const SchemaMismatch&) {
+        refused = true;
+    }
+    CHECK(refused);
+    CHECK(readFileBytes(worldPath) == bytesBefore);
+
+    // REQ-NPCSTORE-1, -2: the two new verbs are DOCUMENTED, not merely used —
+    // asserted the way testBardStoreSchema already asserts 'materialized'. The
+    // no-write-verb line is the thing a future reader checks a new verb
+    // against, so all six names are pinned (spec check 31a).
+    const std::string world = readFileBytes("src/world.cpp");
+    CHECK(contains(world, "'said'"));
+    CHECK(contains(world, "'spoke'"));
+    const std::string mut = readFileBytes("src/mutations.hpp");
+    for (const char* verb : {"'looked'", "'waited'", "'failed'", "'examined'",
+                             "'said'", "'spoke'"}) {
+        CHECK(contains(mut, verb));
+    }
+}
+
+// A string of `n` code points built from MULTI-BYTE characters, so a
+// byte-truncating cap implementation fails the length assertions below and a
+// code-point one passes (spec checks 7, 12, 27). 'é' is 2 bytes, '—' is 3.
+static std::string multiByteOfLength(size_t n) {
+    static const char* const cycle[] = {"é", "—", "ñ", "☾"};
+    std::string out;
+    for (size_t i = 0; i < n; ++i) out += cycle[i % 4];
+    return out;
+}
+
+// Steps 2 + 4: writeCatalogProfile's write-once latch, its orphan refusal, its
+// cap, and npcProfile's read half. Spec checks 4-9 and 13.
+static void testNpcStoreProfile() {
+    const TempDbFile worldPath("textworld_npc_profile_tests.db");
+    Db db = openWorld(worldPath.string(), "tests/combat_fixture.sql").db;
+
+    const int64_t warden = writeCatalogEntry(db, "character", "gate_warden",
+                                             "gate warden", "a warden at a gate",
+                                             "obligation", 0);
+    const int64_t eventsBefore = queryInt(db, "SELECT COUNT(*) FROM events");
+
+    // Check 4: a first call on a fresh catalog entry returns true and stores.
+    CHECK(writeCatalogProfile(db, warden, "She counts everyone who passes."));
+    CHECK(queryText(db, "SELECT profile FROM catalog_profile") ==
+          "She counts everyone who passes.");
+
+    // Check 5: a second call with DIFFERENT text returns false and the stored
+    // value is byte-identical to the first. Assert the value, not just the
+    // return — a latch that returned false while writing anyway would pass a
+    // return-only check (REQ-NPCSTORE-11).
+    CHECK(!writeCatalogProfile(db, warden, "She waves everyone through."));
+    CHECK(queryText(db, "SELECT profile FROM catalog_profile") ==
+          "She counts everyone who passes.");
+    CHECK(queryInt(db, "SELECT COUNT(*) FROM catalog_profile") == 1);
+
+    // Check 6: a catalog id that does not exist is refused, and adds NO row
+    // (REQ-NPCSTORE-14) — no orphan.
+    CHECK(!writeCatalogProfile(db, 9999, "nobody's profile"));
+    CHECK(queryInt(db, "SELECT COUNT(*) FROM catalog_profile") == 1);
+
+    // Check 7: the cap counts CODE POINTS. SQL length() counts characters on a
+    // TEXT column, which is the right unit; a byte-truncating implementation
+    // stores ~2000 characters here and fails.
+    const int64_t runner = writeCatalogEntry(db, "character", "ash_runner",
+                                             "ash runner", "a runner in ash",
+                                             "grief", 0);
+    CHECK(writeCatalogProfile(db, runner, multiByteOfLength(5000)));
+    CHECK(queryInt(db, ("SELECT length(profile) FROM catalog_profile "
+                        "WHERE catalog = " + std::to_string(runner)).c_str()) ==
+          static_cast<int64_t>(kProfileCap));
+    // And it is still valid UTF-8: the byte count is an exact multiple of the
+    // cycle's character widths, never a character short of one.
+    CHECK(queryText(db, ("SELECT profile FROM catalog_profile WHERE catalog = " +
+                         std::to_string(runner)).c_str()) ==
+          multiByteOfLength(kProfileCap));
+
+    // Check 8: event-free (REQ-NPCSTORE-13). None of the above appended a row.
+    CHECK(queryInt(db, "SELECT COUNT(*) FROM events") == eventsBefore);
+
+    // Check 9: the caller owns the transaction boundary (REQ-NPCSTORE-16) —
+    // rolled back, nothing persists, and the helper began nothing of its own.
+    const int64_t bell = writeCatalogEntry(db, "character", "bell_ringer",
+                                           "bell ringer", "a ringer of bells",
+                                           "pride", 0);
+    db.begin();
+    CHECK(writeCatalogProfile(db, bell, "He rings at the wrong hours."));
+    db.rollback();
+    CHECK(queryInt(db, ("SELECT COUNT(*) FROM catalog_profile WHERE catalog = " +
+                        std::to_string(bell)).c_str()) == 0);
+
+    // --- Step 4: npcProfile, the catalog-keyed read (check 13) ---
+    //
+    // The profile above was written BEFORE the entry materialized, which is the
+    // whole point of keying by catalog id: it still reads back through the
+    // entity once one exists.
+    db.begin();
+    const int64_t wardenEntity =
+        placeCatalogEntry(db, warden, 1, "A warden at the gate.", 3);
+    db.commit();
+    CHECK(wardenEntity != 0);
+    CHECK(npcProfile(db, wardenEntity) == "She counts everyone who passes.");
+
+    // An entity that is not a catalog character at all: empty, not an error.
+    CHECK(npcProfile(db, 3).empty());   // the player
+    CHECK(npcProfile(db, 999).empty());  // no such entity
+
+    // A catalog character with NO profile row: also empty. This is the normal,
+    // common state of a minor character before its first conversation
+    // (REQ-NPCSTORE-19), and it must not be distinguishable from an error.
+    const int64_t mute = writeCatalogEntry(db, "character", "mute_sexton",
+                                           "mute sexton", "a sexton who says little",
+                                           "secrecy", 0);
+    db.begin();
+    const int64_t muteEntity =
+        placeCatalogEntry(db, mute, 1, "A sexton, silent.", 3);
+    db.commit();
+    CHECK(muteEntity != 0);
+    CHECK(npcProfile(db, muteEntity).empty());
+}
+
+// Steps 3 + 4: writeNpcMemory's free rewrite, its turn stamp, its cap, and
+// npcMemory's read half. Spec checks 10-13.
+static void testNpcStoreMemory() {
+    const TempDbFile worldPath("textworld_npc_memory_tests.db");
+    Db db = openWorld(worldPath.string(), "tests/combat_fixture.sql").db;
+
+    const int64_t eventsBefore = queryInt(db, "SELECT COUNT(*) FROM events");
+
+    // Check 13 FIRST, before any row exists: no row is not an error, and it is
+    // observed on a world where nothing has ever written one (REQ-NPCSTORE-20).
+    {
+        const NpcMemory none = npcMemory(db, 7);
+        CHECK(none.summary.empty());
+        CHECK(none.summaryTurn == 0);
+    }
+
+    // Check 10: a first call on an entity with no row CREATES one — the row is
+    // not pre-created at materialisation (REQ-NPCSTORE-9).
+    db.exec("UPDATE meta SET value = 4 WHERE key = 'turn'");
+    writeNpcMemory(db, 7, "The player asked about the vault.");
+    CHECK(queryInt(db, "SELECT COUNT(*) FROM npc_memory WHERE entity = 7") == 1);
+    CHECK(queryText(db, "SELECT summary FROM npc_memory WHERE entity = 7") ==
+          "The player asked about the vault.");
+    // The stamp is the turn the summary COVERS TO — the turn BEFORE this one
+    // (REQ-NPCTALK-29a), because the summary was composed from lines handed
+    // over before this turn's own exchange existed.
+    CHECK(queryInt(db, "SELECT summary_turn FROM npc_memory WHERE entity = 7") == 3);
+
+    // Check 10 (second half) + 11: the second call REPLACES outright — exact
+    // equality, never a concatenation — and the stamp moves with meta.turn.
+    // The turn is advanced BETWEEN the two writes, so a stamp that was computed
+    // once and cached, or passed in by the caller, fails here.
+    db.exec("UPDATE meta SET value = 9 WHERE key = 'turn'");
+    writeNpcMemory(db, 7, "The player left without answering.");
+    CHECK(queryInt(db, "SELECT COUNT(*) FROM npc_memory WHERE entity = 7") == 1);
+    CHECK(queryText(db, "SELECT summary FROM npc_memory WHERE entity = 7") ==
+          "The player left without answering.");
+    CHECK(queryInt(db, "SELECT summary_turn FROM npc_memory WHERE entity = 7") == 8);
+
+    // The read helper agrees with the raw SQL above (REQ-NPCSTORE-20).
+    {
+        const NpcMemory m = npcMemory(db, 7);
+        CHECK(m.summary == "The player left without answering.");
+        CHECK(m.summaryTurn == 8);
+    }
+
+    // Check 12: 900 code points of multi-byte text store at exactly 800.
+    writeNpcMemory(db, 8, multiByteOfLength(900));
+    CHECK(queryInt(db, "SELECT length(summary) FROM npc_memory WHERE entity = 8") ==
+          static_cast<int64_t>(kSummaryCap));
+    CHECK(npcMemory(db, 8).summary == multiByteOfLength(kSummaryCap));
+
+    // Event-free, like the profile writer.
+    CHECK(queryInt(db, "SELECT COUNT(*) FROM events") == eventsBefore);
+
+    // Ambient transaction only (REQ-NPCSTORE-16).
+    db.begin();
+    writeNpcMemory(db, 10, "a memory that never was");
+    db.rollback();
+    CHECK(queryInt(db, "SELECT COUNT(*) FROM npc_memory WHERE entity = 10") == 0);
+}
+
+// --- the off-by-one that silently loses a conversation ----------------------
+// REQ-NPCTALK-29a, at the helper level (spec validation item 19a's lower half;
+// its end-to-end form lives in testSayConversation). A summary is composed by
+// the model from the lines it was HANDED, in the same call that produces this
+// turn's reply — so it cannot cover this turn's own exchange. Stamping the
+// current turn would hide that exchange from every future npcLinesSince read,
+// forever, with nothing failing.
+//
+// This test is written to FAIL under the old behaviour on purpose, and it was
+// observed failing before the one-line fix landed (see the implementation
+// notes). A guard never seen to fail is not a guard.
+static void testNpcMemoryStampCoversPrevious() {
+    const TempDbFile worldPath("textworld_npc_stamp_tests.db");
+    Db db = openWorld(worldPath.string(), "tests/combat_fixture.sql").db;
+
+    const int64_t player = 3;
+    const int64_t npc = 7;
+
+    db.exec("UPDATE meta SET value = 7 WHERE key = 'turn'");
+    appendEvent(db, player, "said", npc, 0, "what is behind the gate");
+    appendEvent(db, npc, "spoke", player, 0, "nothing you would want");
+    writeNpcMemory(db, npc, "the player asked about the gate");
+
+    // The stamp is turn - 1…
+    CHECK(npcMemory(db, npc).summaryTurn == 6);
+    // …so THIS turn's exchange is still visible to the next conversation. Under
+    // a summary_turn of 7 the filter `turn > summary_turn` would drop both rows
+    // and the character would have no memory of what was just said to it.
+    {
+        const std::vector<SpeechLine> lines = npcLinesSince(db, npc);
+        CHECK(lines.size() == 2);
+        if (lines.size() == 2) {
+            CHECK(lines[0].verb == "said");
+            CHECK(lines[0].detail == "what is behind the gate");
+            CHECK(lines[1].verb == "spoke");
+            CHECK(lines[1].detail == "nothing you would want");
+        }
+    }
+
+    // The NEXT fold consumes them: written a turn later, it stamps 7 and the
+    // pair falls out of the read. Visible until then, never longer.
+    db.exec("UPDATE meta SET value = 8 WHERE key = 'turn'");
+    writeNpcMemory(db, npc, "the player asked about the gate; I refused");
+    CHECK(npcMemory(db, npc).summaryTurn == 7);
+    CHECK(npcLinesSince(db, npc).empty());
+
+    // Clamped at 0: a write on turn 0 cannot stamp -1, which no turn column can
+    // ever be less than and which would make the filter meaningless.
+    db.exec("UPDATE meta SET value = 0 WHERE key = 'turn'");
+    writeNpcMemory(db, 8, "a memory written before the first turn");
+    CHECK(npcMemory(db, 8).summaryTurn == 0);
+}
+
+// Step 5: npcLinesSince — the bounded, pair-safe raw-line read. Spec checks
+// 14-18c. Driven with appendEvent and meta.turn advanced between pairs, so the
+// events are exactly the shape the conversation brick will write.
+static void testNpcStoreLines() {
+    const TempDbFile worldPath("textworld_npc_lines_tests.db");
+    Db db = openWorld(worldPath.string(), "tests/combat_fixture.sql").db;
+
+    const int64_t player = 3;
+    const int64_t npc = 7;
+    const int64_t other = 8;
+    int64_t turn = 0;
+    // One exchange: the player's line (actor = player, subject = npc) and the
+    // character's reply (actor = npc, subject = player), in ONE turn — the pair
+    // REQ-NPCSTORE-21a is about.
+    const auto exchange = [&](int64_t who, const char* said, const char* spoke) {
+        ++turn;
+        db.exec(("UPDATE meta SET value = " + std::to_string(turn) +
+                 " WHERE key = 'turn'").c_str());
+        appendEvent(db, player, "said", who, 0, said);
+        if (spoke) appendEvent(db, who, "spoke", player, 0, spoke);
+    };
+    const auto verbs = [](const std::vector<SpeechLine>& lines) {
+        std::vector<std::string> out;
+        for (const SpeechLine& l : lines) out.push_back(l.verb);
+        return out;
+    };
+    const auto details = [](const std::vector<SpeechLine>& lines) {
+        std::vector<std::string> out;
+        for (const SpeechLine& l : lines) out.push_back(l.detail);
+        return out;
+    };
+
+    // Check 14: six rows, a summary written after the third, exactly the last
+    // three back, OLDEST FIRST.
+    exchange(npc, "who are you", "the warden");
+    turn = 2;
+    db.exec("UPDATE meta SET value = 2 WHERE key = 'turn'");
+    appendEvent(db, player, "said", npc, 0, "what is behind the gate");
+    // The summary is written a turn LATER than the last line it covers, which
+    // is the real shape: a fold stamps turn - 1 (REQ-NPCTALK-29a), so covering
+    // "everything up to and including the third line" means writing it at
+    // meta.turn 3. The fixture's INTENT is unchanged; only the turn the write
+    // happens on moves, because the stamp is now derived rather than equal.
+    db.exec("UPDATE meta SET value = 3 WHERE key = 'turn'");
+    writeNpcMemory(db, npc, "asked who I am, and what is behind the gate");
+    CHECK(npcMemory(db, npc).summaryTurn == 2);
+    exchange(npc, "will you open it", "no");
+    CHECK(details(npcLinesSince(db, npc)) ==
+          (std::vector<std::string>{"will you open it", "no"}));
+
+    // Check 18a: every returned detail is BYTE-EQUAL to what was appended.
+    // Filtering and ordering are worthless if the content is not what was
+    // stored (REQ-NPCSTORE-1, -5).
+    CHECK(verbs(npcLinesSince(db, npc)) ==
+          (std::vector<std::string>{"said", "spoke"}));
+
+    // Check 16: a conversation with a DIFFERENT character is excluded, even in
+    // the same turn range.
+    exchange(other, "and you", "a different voice entirely");
+    {
+        const std::vector<std::string> d = details(npcLinesSince(db, npc));
+        CHECK(std::find(d.begin(), d.end(), "and you") == d.end());
+        CHECK(std::find(d.begin(), d.end(), "a different voice entirely") == d.end());
+        CHECK(details(npcLinesSince(db, other)) ==
+              (std::vector<std::string>{"and you", "a different voice entirely"}));
+    }
+
+    // Check 18: other verbs in the same turn range are excluded — including
+    // 'looked' and 'failed', which are no-write verbs like speech, and 'moved',
+    // which carries the character as its subject.
+    ++turn;
+    db.exec(("UPDATE meta SET value = " + std::to_string(turn) +
+             " WHERE key = 'turn'").c_str());
+    appendEvent(db, player, "looked", npc, 0, "looked at the warden");
+    appendEvent(db, player, "failed", npc, 0, "could not reach the warden");
+    appendEvent(db, npc, "moved", npc, 2, nullptr);
+    {
+        const std::vector<std::string> d = details(npcLinesSince(db, npc));
+        CHECK(d == (std::vector<std::string>{"will you open it", "no"}));
+    }
+
+    // Check 17: a `said` where the character is the SUBJECT (every exchange
+    // above) and a `spoke` where it is the ACTOR are both included — asserted
+    // by the pair coming back together, which the checks above already show.
+    // Here the reverse orientation: the character as `actor` on a `said` and as
+    // `subject` on a `spoke`, which the OR in the predicate must also admit.
+    ++turn;
+    db.exec(("UPDATE meta SET value = " + std::to_string(turn) +
+             " WHERE key = 'turn'").c_str());
+    appendEvent(db, npc, "said", player, 0, "orientation reversed");
+    CHECK(details(npcLinesSince(db, npc)).back() == "orientation reversed");
+
+    // Check 18c: a TRAILING `said` with no `spoke` — a failed reply — is
+    // PRESENT. That is what the character being spoken to and not answering
+    // looks like, and hiding it would make it unaware it was addressed.
+    CHECK(npcLinesSince(db, npc).back().verb == "said");
+
+    // --- The cap. A fresh character, so the counts above do not interfere. ---
+    const int64_t capped = 12;
+
+    // Check 15: kLineCap + 10 qualifying rows return exactly kLineCap, and the
+    // first returned row is NOT the oldest qualifying row — the recent TAIL.
+    for (int64_t i = 0; i < kLineCap + 10; ++i) {
+        ++turn;
+        db.exec(("UPDATE meta SET value = " + std::to_string(turn) +
+                 " WHERE key = 'turn'").c_str());
+        appendEvent(db, player, "said", capped, 0,
+                    ("line " + std::to_string(i)).c_str());
+    }
+    {
+        const std::vector<SpeechLine> lines = npcLinesSince(db, capped);
+        CHECK(static_cast<int64_t>(lines.size()) == kLineCap);
+        CHECK(lines.front().detail != "line 0");
+        CHECK(lines.front().detail == "line 10");   // the recent tail
+        CHECK(lines.back().detail == "line " + std::to_string(kLineCap + 9));
+    }
+
+    // Check 18b: exactly kLineCap + 1 qualifying rows whose oldest SURVIVOR
+    // would be a `spoke` — the cap cut that reply's question. kLineCap - 1 rows
+    // return, and the first is a `said` (REQ-NPCSTORE-21a).
+    const int64_t orphan = 13;
+    {
+        ++turn;
+        db.exec(("UPDATE meta SET value = " + std::to_string(turn) +
+                 " WHERE key = 'turn'").c_str());
+        // Row 1 is the `said` the cap will cut; row 2 is its orphaned `spoke`.
+        appendEvent(db, player, "said", orphan, 0, "the cut question");
+        appendEvent(db, orphan, "spoke", player, 0, "the orphaned reply");
+        for (int64_t i = 0; i < kLineCap - 1; ++i) {
+            ++turn;
+            db.exec(("UPDATE meta SET value = " + std::to_string(turn) +
+                     " WHERE key = 'turn'").c_str());
+            appendEvent(db, player, "said", orphan, 0,
+                        ("filler " + std::to_string(i)).c_str());
+        }
+        const std::vector<SpeechLine> lines = npcLinesSince(db, orphan);
+        CHECK(static_cast<int64_t>(lines.size()) == kLineCap - 1);
+        CHECK(lines.front().verb == "said");
+        CHECK(lines.front().detail == "filler 0");
+    }
+
+    // The case micro-decision 4 exists for: FEWER than kLineCap qualifying rows
+    // beginning with a `spoke` KEEPS that `spoke`. Its paired `said` predates
+    // summary_turn rather than having been cut, which is legitimate — and a cap
+    // that guessed from the row count alone would wrongly drop it.
+    const int64_t legit = 14;
+    {
+        ++turn;
+        db.exec(("UPDATE meta SET value = " + std::to_string(turn) +
+                 " WHERE key = 'turn'").c_str());
+        appendEvent(db, player, "said", legit, 0, "before the summary");
+        // Written a turn LATER than the line it covers, because the stamp is
+        // turn - 1 (REQ-NPCTALK-29a). The fixture still means "the summary
+        // covers the first `said` and nothing after it"; only the turn the
+        // write happens on moves.
+        ++turn;
+        db.exec(("UPDATE meta SET value = " + std::to_string(turn) +
+                 " WHERE key = 'turn'").c_str());
+        writeNpcMemory(db, legit, "we had begun talking");
+        ++turn;
+        db.exec(("UPDATE meta SET value = " + std::to_string(turn) +
+                 " WHERE key = 'turn'").c_str());
+        appendEvent(db, legit, "spoke", player, 0, "a legitimate leading reply");
+        appendEvent(db, player, "said", legit, 0, "and then");
+        const std::vector<SpeechLine> lines = npcLinesSince(db, legit);
+        CHECK(lines.size() == 2);
+        CHECK(lines.front().verb == "spoke");
+        CHECK(lines.front().detail == "a legitimate leading reply");
+    }
+}
+
+// A well-formed overture entry, for the NPC store's admission tests. A local
+// copy of bardProposal, which is defined further down the file with the Brick 2
+// tests; duplicating five assignments is cheaper than hoisting it and reordering
+// a block that is not this brick's.
+static CatalogEntryProposal npcProposal(const std::string& handle) {
+    CatalogEntryProposal e;
+    e.kind = "character";
+    e.handle = handle;
+    e.name = "cloistered scribe";
+    e.blurb = "a scribe who has not left the annex in years";
+    e.motive = "curiosity";
+    e.tier = 1;
+    return e;
+}
+
+// Step 6: the helper admits kind = 'major', the model-facing check still does
+// not, and a handle a major already owns drops one entry rather than the batch.
+// Spec checks 3, 22, 30b.
+static void testNpcStoreMajorKind() {
+    const TempDbFile worldPath("textworld_npc_major_kind_tests.db");
+    Db db = openWorld(worldPath.string(), "tests/combat_fixture.sql").db;
+
+    // Check 3: the ENGINE's write path takes it (REQ-NPCSTORE-23)…
+    const int64_t major =
+        writeCatalogEntry(db, "major", "thornmere_abbot", "abbot",
+                          "the abbot, who has not left the abbey", "obligation", 0);
+    CHECK(major > 0);
+    CHECK(queryText(db, "SELECT kind FROM catalog WHERE handle = 'thornmere_abbot'") ==
+          "major");
+
+    // …and a fourth kind is still refused, so the guard was widened by exactly
+    // one value rather than removed.
+    CHECK(threwRuntimeError([&] {
+        writeCatalogEntry(db, "wanderer", "stray", "stray", "a stray", "grief", 0);
+    }));
+
+    // Check 22: the MODEL-FACING check diverges on purpose (REQ-NPCSTORE-24).
+    // The wording is asserted as a substring, so a reworded refusal is caught —
+    // this refusal is what a model reads when it guesses at a third kind.
+    {
+        CatalogEntryProposal e = npcProposal("model_major");
+        e.kind = "major";
+        const std::string refusal = catalogEntryRefusal(db, e, {});
+        CHECK(contains(refusal, "kind must be 'character' or 'beat'"));
+    }
+
+    // And its SIBLINGS in the same batch still admit — one entry drops, not the
+    // response.
+    {
+        OvertureProposal proposal;
+        proposal.entries.push_back(npcProposal("sibling_before"));
+        CatalogEntryProposal bad = npcProposal("model_major");
+        bad.kind = "major";
+        proposal.entries.push_back(bad);
+        proposal.entries.push_back(npcProposal("sibling_after"));
+        int admitted = -1;
+        CHECK(!threwRuntimeError([&] {
+            admitted = admitOvertureProposal(db, proposal);
+        }));
+        CHECK(admitted == 2);
+        CHECK(queryInt(db, "SELECT COUNT(*) FROM catalog WHERE handle = 'model_major'") == 0);
+        CHECK(queryInt(db, "SELECT COUNT(*) FROM catalog WHERE handle IN "
+                           "('sibling_before','sibling_after')") == 2);
+    }
+
+    // Check 30b (REQ-NPCSTORE-31b): the overture proposes a handle the
+    // hand-authored major already owns. catalog.handle is UNIQUE, so an
+    // unguarded insert would throw and roll the whole batch back —
+    // catalogEntryRefusal's existing pre-existing-handle check is what makes
+    // this one dropped entry instead. This needs no new code; the test is what
+    // keeps it true.
+    {
+        OvertureProposal proposal;
+        proposal.entries.push_back(npcProposal("collide_before"));
+        proposal.entries.push_back(npcProposal("thornmere_abbot"));  // the major's
+        proposal.entries.push_back(npcProposal("collide_after"));
+        int admitted = -1;
+        CHECK(!threwRuntimeError([&] {
+            admitted = admitOvertureProposal(db, proposal);
+        }));
+        CHECK(admitted == 2);
+        CHECK(queryInt(db, "SELECT COUNT(*) FROM catalog WHERE handle IN "
+                           "('collide_before','collide_after')") == 2);
+        // The major's own row is UNTOUCHED — still one row, still 'major',
+        // still its authored name, not the proposal's.
+        CHECK(queryInt(db, "SELECT COUNT(*) FROM catalog "
+                           "WHERE handle = 'thornmere_abbot'") == 1);
+        CHECK(queryText(db, "SELECT kind FROM catalog "
+                            "WHERE handle = 'thornmere_abbot'") == "major");
+        CHECK(queryText(db, "SELECT name FROM catalog "
+                            "WHERE handle = 'thornmere_abbot'") == "abbot");
+    }
+}
+
+// Step 7: THE REGRESSION THAT MATTERS. The room generator's menu is a stated
+// list, so a major character is invisible to it — while staying visible to the
+// bard, which is what decides when a major arrives. Spec checks 19 and 21.
+static void testNpcStoreGeneratorMenu() {
+    const TempDbFile worldPath("textworld_npc_menu_tests.db");
+    Db db = openWorld(worldPath.string(), "tests/combat_fixture.sql").db;
+
+    // Both at tier 0, so BOTH are eligible by every gate the menu applies —
+    // the major is excluded by its KIND and by nothing else. A tier that
+    // happened to exclude it would make this test pass for the wrong reason.
+    writeCatalogEntry(db, "major", "thornmere_abbot", "abbot",
+                      "the abbot, who has not left the abbey", "obligation", 0);
+    writeCatalogEntry(db, "character", "t0_scribe", "cloistered scribe",
+                      "a scribe who has not left the annex in years",
+                      "curiosity", 0);
+
+    // Check 19: the generator sees the character and NOT the major. Written to
+    // fail if REQ-NPCSTORE-25's explicit pair is ever reverted to an empty
+    // kind, which would silently readmit every kind including this one.
+    {
+        std::vector<std::string> handles;
+        for (const CatalogChoice& c : eligibleCatalogForNewRoom(db, 1)) {
+            handles.push_back(c.handle);
+        }
+        CHECK(handles == std::vector<std::string>{"t0_scribe"});
+    }
+
+    // The existing-room menu never spanned kinds, and still does not: asking
+    // for characters does not smuggle the major in under 'character'.
+    {
+        std::vector<std::string> handles;
+        for (const CatalogChoice& c : eligibleCatalog(db, 1, "character")) {
+            handles.push_back(c.handle);
+        }
+        CHECK(handles == std::vector<std::string>{"t0_scribe"});
+    }
+
+    // The major IS reachable through an explicit kind — which is what proves
+    // the exclusion above is the KIND FILTER doing the work and not some other
+    // gate quietly rejecting the entry. Nothing in the tree asks for this kind;
+    // the assertion exists so the previous one cannot pass vacuously.
+    {
+        const std::vector<CatalogChoice> majors = eligibleCatalog(db, 1, "major");
+        CHECK(majors.size() == 1);
+        CHECK(majors.front().handle == "thornmere_abbot");
+    }
+
+    // Check 21 (REQ-NPCSTORE-26): the bard's wake context carries the FULL
+    // catalog, so the major is visible to it. Invisible to the generator,
+    // visible to the bard — the two facts together are the design.
+    CHECK(contains(buildWakeContext(db), "thornmere_abbot"));
+
+    // And the all-kinds path is GONE from the source, not merely unused: a
+    // future caller cannot reuse a branch that no longer exists (plan
+    // micro-decision 6). The explicit pair is pinned by name.
+    const std::string bard = readFileBytes("src/bard.cpp");
+    CHECK(!contains(bard, "/*kind=*/\"\""));
+    CHECK(!contains(bard, "kind.empty()"));
+    CHECK(contains(bard, "{\"character\", \"beat\"}"));
+}
+
+// Step 8a: the profile-file parser, called DIRECTLY with no world at all. Four
+// of the six ways a file fails world creation are parser failures, and they
+// cost a string each here instead of a world creation in the loader test. Spec
+// check 24, and the syntax halves of 25 and 30a.
+static void testNpcStoreProfileParse() {
+    // A well-formed file: all four header values, and a body byte-exact from
+    // the character after the blank line to the last byte.
+    {
+        MajorProfile p;
+        CHECK(parseMajorProfile(
+                  "handle: thornmere_abbot\n"
+                  "name: abbot\n"
+                  "motive: obligation\n"
+                  "tier: 2\n"
+                  "\n"
+                  "He has not left the abbey in thirty years.\n"
+                  "He speaks in short sentences.\n",
+                  p)
+                  .empty());
+        CHECK(p.handle == "thornmere_abbot");
+        CHECK(p.name == "abbot");
+        CHECK(p.motive == "obligation");
+        CHECK(p.tier == 2);
+        CHECK(p.profile ==
+              "He has not left the abbey in thirty years.\n"
+              "He speaks in short sentences.\n");
+    }
+
+    // Check 24: the header ends at the first blank line and NEVER resumes. A
+    // `key: value` line AFTER it is body text — including one whose key the
+    // header would have recognised, which is the case that would silently
+    // reparse under a line-by-line header scanner.
+    {
+        MajorProfile p;
+        CHECK(parseMajorProfile(
+                  "handle: gate_warden\nname: warden\nmotive: obligation\ntier: 0\n"
+                  "\n"
+                  "She keeps a list.\n"
+                  "motive: she will not say\n"
+                  "goal: nor this\n",
+                  p)
+                  .empty());
+        CHECK(p.motive == "obligation");  // NOT "she will not say"
+        CHECK(p.profile ==
+              "She keeps a list.\n"
+              "motive: she will not say\n"
+              "goal: nor this\n");
+    }
+
+    // A body opening with its OWN blank line survives intact: the separator is
+    // the FIRST blank line, and everything after it is body, blank or not.
+    {
+        MajorProfile p;
+        CHECK(parseMajorProfile(
+                  "handle: h\nname: n\nmotive: grief\ntier: 0\n\n\nIndented after a gap.\n",
+                  p)
+                  .empty());
+        CHECK(p.profile == "\nIndented after a gap.\n");
+    }
+
+    // The five parser failures. Each returns a NON-EMPTY reason naming the
+    // offending key or line — and none of them contains a file name, which the
+    // caller owns (REQ-NPCSTORE-31).
+    {
+        const std::pair<const char*, const char*> cases[] = {
+            // no blank line at all
+            {"handle: h\nname: n\nmotive: grief\ntier: 0\nbody with no gap\n",
+             "blank line"},
+            // a missing required key
+            {"handle: h\nname: n\ntier: 0\n\nbody\n", "motive"},
+            // an UNRECOGNISED key — the concrete case REQ-NPCSTORE-31a exists
+            // for: `goal:` is a field this format deliberately does not carry
+            // (REQ-NPCSTORE-30), and a silent skip would give the author a
+            // world where the line quietly did nothing.
+            {"handle: h\nname: n\nmotive: grief\ntier: 0\ngoal: deeper\n\nbody\n",
+             "goal"},
+            // a non-integer tier
+            {"handle: h\nname: n\nmotive: grief\ntier: soon\n\nbody\n", "tier"},
+            // a header line that does not parse
+            {"handle: h\nname n\nmotive: grief\ntier: 0\n\nbody\n", "colon"},
+        };
+        for (const auto& [text, needle] : cases) {
+            MajorProfile p;
+            const std::string reason = parseMajorProfile(text, p);
+            CHECK(!reason.empty());
+            CHECK(contains(reason, needle));
+            // The caller prefixes the file name; the parser is pure and knows
+            // nothing about files.
+            CHECK(!contains(reason, ".txt"));
+        }
+    }
+
+    // A tier that parses as a PREFIX is not an integer: whole-string, so
+    // `tier: 2 or 3` is refused rather than quietly read as 2.
+    {
+        MajorProfile p;
+        CHECK(!parseMajorProfile(
+                   "handle: h\nname: n\nmotive: grief\ntier: 2 or 3\n\nbody\n", p)
+                   .empty());
+    }
+}
+
+// Steps 8b + 8c + 9: the loader, its six loud failures, and the shipped tree's
+// absent seed/majors/. Spec checks 23, 25, 26, 27, 28, 30, 30a.
+static void testNpcStoreMajorFiles() {
+    const auto file = [](const char* name, const std::string& text) {
+        MajorProfileFile f;
+        f.name = name;
+        f.text = text;
+        return f;
+    };
+    const std::string abbot =
+        "handle: thornmere_abbot\n"
+        "name: abbot\n"
+        "motive: obligation\n"
+        "tier: 2\n"
+        "\n"
+        "\n"                                    // the body opens with a blank line…
+        "He has not left the abbey in years.\n"  // …so THIS is the blurb
+        "He speaks in short sentences.\n";
+
+    // Check 23: one catalog row carrying the header, one profile row carrying
+    // the body byte-exact, and a blurb equal to the body's first NON-EMPTY line.
+    {
+        const TempDbFile worldPath("textworld_npc_majors_tests.db");
+        Db db = openWorld(worldPath.string(), "tests/combat_fixture.sql",
+                          "seed/setting.txt", {file("abbot.txt", abbot)})
+                    .db;
+        CHECK(queryInt(db, "SELECT COUNT(*) FROM catalog WHERE kind = 'major'") == 1);
+        CHECK(queryText(db, "SELECT handle FROM catalog WHERE kind = 'major'") ==
+              "thornmere_abbot");
+        CHECK(queryText(db, "SELECT name FROM catalog WHERE kind = 'major'") == "abbot");
+        CHECK(queryText(db, "SELECT motive FROM catalog WHERE kind = 'major'") ==
+              "obligation");
+        CHECK(queryInt(db, "SELECT tier FROM catalog WHERE kind = 'major'") == 2);
+        CHECK(queryText(db, "SELECT blurb FROM catalog WHERE kind = 'major'") ==
+              "He has not left the abbey in years.");
+        // REQ-NPCSTORE-28: byte-exact. Nothing the engine owns is injected into
+        // the stored text — the engine's rules live in the prompt, not here.
+        CHECK(queryInt(db, "SELECT COUNT(*) FROM catalog_profile") == 1);
+        CHECK(queryText(db, "SELECT profile FROM catalog_profile") ==
+              "\nHe has not left the abbey in years.\nHe speaks in short sentences.\n");
+
+        // Check 28: the rows exist the instant openWorld returns, which is
+        // before main() can reach bardOverture. The latent entry is unmaterialized.
+        CHECK(queryInt(db, "SELECT entity IS NULL FROM catalog WHERE kind = 'major'") == 1);
+    }
+
+    // Check 27: the cap applies to hand-authored files too (REQ-NPCSTORE-17).
+    {
+        const TempDbFile worldPath("textworld_npc_majors_cap_tests.db");
+        Db db = openWorld(worldPath.string(), "tests/combat_fixture.sql",
+                          "seed/setting.txt",
+                          {file("long.txt",
+                                "handle: h\nname: n\nmotive: grief\ntier: 0\n\n" +
+                                    multiByteOfLength(5000))})
+                    .db;
+        CHECK(queryInt(db, "SELECT length(profile) FROM catalog_profile") ==
+              static_cast<int64_t>(kProfileCap));
+    }
+
+    // Two majors in ONE call both land, in FILE ORDER, with ascending catalog
+    // ids — the order the loader is handed is the order the world records.
+    {
+        const TempDbFile worldPath("textworld_npc_majors_two_tests.db");
+        const std::string warden =
+            "handle: gate_warden\nname: warden\nmotive: secrecy\ntier: 1\n\nShe keeps a list.\n";
+        Db db = openWorld(worldPath.string(), "tests/combat_fixture.sql",
+                          "seed/setting.txt",
+                          {file("a_abbot.txt", abbot), file("b_warden.txt", warden)})
+                    .db;
+        CHECK(queryInt(db, "SELECT COUNT(*) FROM catalog WHERE kind = 'major'") == 2);
+        CHECK(queryInt(db, "SELECT COUNT(*) FROM catalog_profile") == 2);
+        CHECK(queryInt(db, "SELECT id FROM catalog WHERE handle = 'thornmere_abbot'") <
+              queryInt(db, "SELECT id FROM catalog WHERE handle = 'gate_warden'"));
+    }
+
+    // Check 26: ZERO files creates a world successfully with no major rows and
+    // NO DIAGNOSTIC AT ANY LEVEL. The absence of a cast is not a fault
+    // (REQ-NPCSTORE-32), so this is asserted against a captured log sink at
+    // debug — the level is raised so the assertion cannot pass vacuously by the
+    // entry simply being below the bar.
+    {
+        const ScopedEnvVar levelGuard("TEXTWORLD_LOG_LEVEL");
+        setenv("TEXTWORLD_LOG_LEVEL", "debug", 1);
+        logRefreshLevel();
+        CHECK(logEnabled(LogLevel::Debug));  // the capture is not vacuous
+
+        std::vector<std::string> entries;
+        logSetSink([&entries](const std::string& line) { entries.push_back(line); });
+        const TempDbFile worldPath("textworld_npc_majors_none_tests.db");
+        {
+            Db db = openWorld(worldPath.string(), "tests/combat_fixture.sql").db;
+            CHECK(queryInt(db, "SELECT COUNT(*) FROM catalog WHERE kind = 'major'") == 0);
+            CHECK(queryInt(db, "SELECT COUNT(*) FROM catalog_profile") == 0);
+        }
+        logSetSink({});
+        unsetenv("TEXTWORLD_LOG_LEVEL");
+        logRefreshLevel();
+        for (const std::string& line : entries) {
+            CHECK(!contains(line, "major"));
+            CHECK(!contains(line, "profile"));
+        }
+    }
+
+    // --- Step 8c: the SIX ways a profile file fails world creation loudly ---
+    //
+    // Each throws std::runtime_error out of initialize(), and each what()
+    // CONTAINS THE FILE NAME (REQ-NPCSTORE-31) — asserted as a substring, once
+    // per case, so a generic message fails. And after any of them the world
+    // file has no rows at all: the whole initialize() transaction rolled back
+    // rather than leaving a half-seeded world (spec check 30).
+    {
+        const std::pair<const char*, std::string> broken[] = {
+            // 1. a missing required header key
+            {"missing_key.txt", "handle: h\nname: n\ntier: 0\n\nbody\n"},
+            // 2. an UNRECOGNISED header key — `goal:` by name, since it is the
+            //    concrete reason REQ-NPCSTORE-31a exists.
+            {"goal_key.txt",
+             "handle: h\nname: n\nmotive: grief\ntier: 0\ngoal: deeper\n\nbody\n"},
+            // 3. a motive absent from motive_catalog — the loader's own case,
+            //    caught from writeCatalogEntry and re-thrown with the file name.
+            {"bad_motive.txt",
+             "handle: h\nname: n\nmotive: vengeance\ntier: 0\n\nbody\n"},
+            // 4. a non-integer tier
+            {"bad_tier.txt", "handle: h\nname: n\nmotive: grief\ntier: soon\n\nbody\n"},
+            // 5. a header line that does not parse
+            {"no_colon.txt", "handle: h\nname n\nmotive: grief\ntier: 0\n\nbody\n"},
+        };
+        for (const auto& [name, text] : broken) {
+            const TempDbFile worldPath("textworld_npc_majors_broken_tests.db");
+            std::string message;
+            bool threw = false;
+            try {
+                Db db = openWorld(worldPath.string(), "tests/combat_fixture.sql",
+                                  "seed/setting.txt", {file(name, text)})
+                            .db;
+            } catch (const std::runtime_error& e) {
+                threw = true;
+                message = e.what();
+            }
+            CHECK(threw);
+            CHECK(contains(message, name));
+
+            // Spec check 30: NO rows at all. Reopened raw with Db, so this
+            // reads the file itself rather than asking openWorld again — a
+            // half-seeded world would have a meta table here.
+            Db raw(worldPath.string());
+            CHECK(queryInt(raw, "SELECT COUNT(*) FROM sqlite_master "
+                                "WHERE type = 'table' AND name = 'meta'") == 0);
+            CHECK(queryInt(raw, "SELECT COUNT(*) FROM sqlite_master "
+                                "WHERE type = 'table'") == 0);
+        }
+
+        // 6. a handle duplicating ANOTHER PROFILE FILE's handle — scoped to the
+        //    files, because the catalog is empty when they are written
+        //    (REQ-NPCSTORE-31b). The SECOND file's name is the one named.
+        {
+            const TempDbFile worldPath("textworld_npc_majors_dup_tests.db");
+            const std::string one =
+                "handle: twin\nname: first\nmotive: grief\ntier: 0\n\nbody\n";
+            const std::string two =
+                "handle: twin\nname: second\nmotive: grief\ntier: 0\n\nbody\n";
+            std::string message;
+            bool threw = false;
+            try {
+                Db db = openWorld(worldPath.string(), "tests/combat_fixture.sql",
+                                  "seed/setting.txt",
+                                  {file("first.txt", one), file("second.txt", two)})
+                            .db;
+            } catch (const std::runtime_error& e) {
+                threw = true;
+                message = e.what();
+            }
+            CHECK(threw);
+            CHECK(contains(message, "second.txt"));
+            CHECK(contains(message, "twin"));
+            Db raw(worldPath.string());
+            CHECK(queryInt(raw, "SELECT COUNT(*) FROM sqlite_master "
+                                "WHERE type = 'table'") == 0);
+        }
+    }
+
+    // Step 9's half: the SHIPPED tree has no seed/majors/ directory
+    // (plan micro-decision 2 — zero profile files ship), so a default
+    // openWorld creates zero major rows. This is the assertion that keeps the
+    // "no cast is a valid world" path exercised by the game itself.
+    CHECK(!std::filesystem::exists("seed/majors"));
+    {
+        const TempDbFile worldPath("textworld_npc_majors_shipped_tests.db");
+        Db db = openWorld(worldPath.string(), "seed/base.sql").db;
+        CHECK(queryInt(db, "SELECT COUNT(*) FROM catalog WHERE kind = 'major'") == 0);
+    }
+}
+
+// Does any line of `code` contain BOTH `a` and `b`? The line is the unit
+// because a file legitimately holds an INSERT and, elsewhere, the name of a
+// table it never writes — REQ-NPCSTORE-37 is about the two meeting.
+static bool anyLineHasBoth(const std::string& code, const std::string& a,
+                           const std::string& b) {
+    std::istringstream in(code);
+    std::string line;
+    while (std::getline(in, line)) {
+        if (contains(line, a) && contains(line, b)) return true;
+    }
+    return false;
+}
+
+// Step 11: the invariants. The spec states these as greps; encoding them in the
+// binary is what makes them survive as regression guards rather than being run
+// once by hand (REQ-NPCSTORE-38, the testCombatFinalSweep precedent). Spec
+// checks 31, 31a, 32, and the behavioural half of 16-18.
+static void testNpcStoreInvariants() {
+    // (1) REQ-NPCSTORE-36: no line of any src/*.cpp contains
+    // "UPDATE catalog_profile". Write-once is a property of the SOURCE TEXT,
+    // not a convention — there is no helper to edit a profile, and this is what
+    // keeps it that way. writeCatalogProfile's single INSERT OR IGNORE makes it
+    // true by construction; this makes it stay true.
+    std::vector<std::filesystem::path> sources;
+    for (const auto& entry : std::filesystem::directory_iterator("src")) {
+        if (entry.path().extension() == ".cpp") sources.push_back(entry.path());
+    }
+    std::sort(sources.begin(), sources.end());
+    CHECK(sources.size() >= 15);  // the sweep is not vacuous
+    for (const std::filesystem::path& src : sources) {
+        CHECK(!contains(readFileBytes(src), "UPDATE catalog_profile"));
+    }
+
+    // (2) REQ-NPCSTORE-37: mutations.cpp is the ONLY writer of either table.
+    // Enumerated by directory walk rather than by hand, so a new translation
+    // unit is covered the day it lands. world.cpp needs NO exception: its DDL
+    // is CREATE TABLE, and the major-profile loader calls the mutation helpers
+    // rather than writing SQL. If an exception is ever needed here, the loader
+    // has been written wrong.
+    for (const std::filesystem::path& src : sources) {
+        if (src.filename() == "mutations.cpp") continue;
+        const std::string code = readFileBytes(src);
+        for (const char* verb : {"INSERT", "UPDATE", "DELETE"}) {
+            CHECK(!anyLineHasBoth(code, verb, "catalog_profile"));
+            CHECK(!anyLineHasBoth(code, verb, "npc_memory"));
+        }
+    }
+    // And the guard is not vacuous: mutations.cpp DOES write both.
+    {
+        const std::string mut = readFileBytes("src/mutations.cpp");
+        CHECK(anyLineHasBoth(mut, "INSERT", "catalog_profile"));
+        CHECK(anyLineHasBoth(mut, "INSERT", "npc_memory"));
+    }
+
+    // (3) REQ-NPCSTORE-4 / REQ-NPCTALK-37: speech does NOT wake the bard. The
+    // wake predicate still names exactly the four irreversible verbs, verbatim,
+    // and src/bard.cpp mentions neither speech verb. Asserted as source text
+    // because hasTriggeringEvent is file-local and the behavioural surface needs
+    // the bard enabled and a transport — the wrong price for a one-line
+    // guarantee.
+    //
+    // This guard was written by the memory-store brick, which added the two
+    // verbs to the schema; the CONVERSATION brick is what made them reachable,
+    // so this is the point at which it stops being hypothetical. A waking bard
+    // does see conversations in its recent-events context (REQ-NPCTALK-36) —
+    // but seeing them is not being woken by them, and nothing acts on that yet.
+    {
+        const std::string bard = readFileBytes("src/bard.cpp");
+        CHECK(contains(bard,
+                       "verb IN ('generated','defeated','learned','materialized')"));
+        CHECK(!contains(bard, "'said'"));
+        CHECK(!contains(bard, "'spoke'"));
+    }
+
+    // (4) REQ-NPCSTORE-22: the three read helpers write NOTHING. Behavioural,
+    // not textual, because they live in mutations.cpp and the grep above
+    // deliberately exempts that file. Every table's row count is snapshotted,
+    // each helper is called on a POPULATED entity and on one with no rows at
+    // all, and every count must be unchanged — `events` included.
+    {
+        const TempDbFile worldPath("textworld_npc_invariants_tests.db");
+        Db db = openWorld(worldPath.string(), "tests/combat_fixture.sql").db;
+
+        const int64_t id = writeCatalogEntry(db, "character", "gate_warden",
+                                             "gate warden", "a warden at a gate",
+                                             "obligation", 0);
+        writeCatalogProfile(db, id, "She counts everyone who passes.");
+        db.begin();
+        const int64_t entity = placeCatalogEntry(db, id, 1, "A warden.", 3);
+        db.commit();
+        appendEvent(db, 3, "said", entity, 0, "who are you");
+        appendEvent(db, entity, "spoke", 3, 0, "the warden");
+        writeNpcMemory(db, entity, "the player asked who I am");
+
+        std::vector<std::string> tables;
+        {
+            Stmt s = db.prepare("SELECT name FROM sqlite_master "
+                                "WHERE type = 'table' ORDER BY name");
+            while (s.step()) tables.push_back(s.colText(0));
+        }
+        CHECK(tables.size() >= 26);  // the snapshot is not vacuous
+        const auto counts = [&db, &tables] {
+            std::vector<int64_t> out;
+            for (const std::string& t : tables) {
+                out.push_back(queryInt(db, ("SELECT COUNT(*) FROM \"" + t + "\"").c_str()));
+            }
+            return out;
+        };
+        const std::vector<int64_t> before = counts();
+
+        // The populated character…
+        CHECK(!npcProfile(db, entity).empty());
+        CHECK(!npcMemory(db, entity).summary.empty());
+        CHECK(npcLinesSince(db, entity).empty());  // the summary covers them
+        // …and an entity with no rows of any of these kinds at all.
+        CHECK(npcProfile(db, 5).empty());
+        CHECK(npcMemory(db, 5).summary.empty());
+        CHECK(npcLinesSince(db, 5).empty());
+
+        CHECK(counts() == before);
+    }
+}
+
+// --- NPC conversation (specs/npc-conversation.md) ---------------------------
+
+// Place a talkable (or, with kind = "beat", a NON-talkable) catalog entity in
+// `room` and return its entity id. The shared fixture every say test builds on:
+// combat_fixture.sql carries no catalog entities, so each test mints its own.
+static int64_t placeCharacterIn(Db& db, int64_t room, const char* handle,
+                                const char* name, const char* kind) {
+    const int64_t catalog =
+        writeCatalogEntry(db, kind, handle, name,
+                          "someone standing where the light does not reach",
+                          "obligation", 0);
+    db.begin();
+    const int64_t entity =
+        placeCatalogEntry(db, catalog, room, "A still figure.", /*actor=*/3);
+    db.commit();
+    return entity;
+}
+
+// The two refusals and the shape of a reachable talk turn, driven through
+// runTurn against a real world — spec validation items 1, 2, 3, 3a, 3b, 30.
+// The suite is AI-disabled, so a reachable conversation takes REQ-NPCTALK-31's
+// no-reply shape here; that is exactly what an AI-off session does permanently.
+static void testSayRefusals() {
+    // (a) Item 1: no character in the room → the exact no-one-here line, plus
+    // the status band composed as on any other turn (item 30), and meta.turn
+    // advanced by one. The turn is CONSUMED, as it is for every refusal the
+    // world understands (REQ-NPCTALK-3).
+    {
+        const TempDbFile worldPath("textworld_say_nobody_tests.db");
+        Db db = openWorld(worldPath.string(), "tests/combat_fixture.sql").db;
+
+        const int64_t before =
+            queryInt(db, "SELECT value FROM meta WHERE key = 'turn'");
+        const TurnResult r = runTurn(db, "say hello");
+        CHECK(r.outcome == TurnOutcome::Ticked);
+        CHECK(queryInt(db, "SELECT value FROM meta WHERE key = 'turn'") ==
+              before + 1);
+        CHECK(r.output == std::string(kNoOneToTalkTo) + "\n" + composeBand(db, 80));
+        // Nothing was said: there is nobody to have said it to.
+        CHECK(queryInt(db, "SELECT COUNT(*) FROM events WHERE verb = 'said'") == 0);
+    }
+
+    // (b) Item 2: a character AND a hostile → the exact hostile-present line,
+    // the turn advanced. The goblin's chip lands in the same tick, so the
+    // refusal is asserted on the event row rather than on the whole output.
+    {
+        const TempDbFile worldPath("textworld_say_hostile_tests.db");
+        Db db = openWorld(worldPath.string(), "tests/combat_fixture.sql").db;
+        placeCharacterIn(db, 2, "gate_warden", "gate warden");
+        db.exec("UPDATE location SET container = 2 WHERE entity = 3");
+
+        const int64_t before =
+            queryInt(db, "SELECT value FROM meta WHERE key = 'turn'");
+        const TurnResult r = runTurn(db, "say hello");
+        CHECK(r.outcome == TurnOutcome::Ticked);
+        const int64_t turn =
+            queryInt(db, "SELECT value FROM meta WHERE key = 'turn'");
+        CHECK(turn == before + 1);
+        CHECK(queryText(db, ("SELECT detail FROM events WHERE verb = 'failed' "
+                             "AND turn = " + std::to_string(turn))
+                                .c_str()) == kNoTalkingInCombat);
+        CHECK(contains(r.output, kNoTalkingInCombat));
+        // Refused before any exchange: no line was spoken into a fight.
+        CHECK(queryInt(db, "SELECT COUNT(*) FROM events WHERE verb = 'said'") == 0);
+        CHECK(queryInt(db, "SELECT COUNT(*) FROM events WHERE verb = 'spoke'") == 0);
+    }
+
+    // (c) Item 3: a room holding only a `beat` catalog entity → the no-one-here
+    // line. Beats are objects: a scorched lectern is examinable, not talkable
+    // (REQ-NPCTALK-2).
+    {
+        const TempDbFile worldPath("textworld_say_beat_tests.db");
+        Db db = openWorld(worldPath.string(), "tests/combat_fixture.sql").db;
+        const int64_t lectern =
+            placeCharacterIn(db, 1, "scorched_lectern", "lectern", "beat");
+        CHECK(lectern != 0);  // the beat really is present and really is placed
+        CHECK(characterInRoom(db, 1) == 0);
+
+        const TurnResult r = runTurn(db, "say hello");
+        CHECK(r.output == std::string(kNoOneToTalkTo) + "\n" + composeBand(db, 80));
+    }
+
+    // (d) Item 3a / REQ-NPCTALK-4a: no character but a hostile present → the
+    // NO-ONE-HERE line, not the hostile one. With nobody present, "no time for
+    // talk in a fight" would imply there was someone to talk to.
+    {
+        const TempDbFile worldPath("textworld_say_order_tests.db");
+        Db db = openWorld(worldPath.string(), "tests/combat_fixture.sql").db;
+        db.exec("UPDATE location SET container = 2 WHERE entity = 3");
+        CHECK(hostileInRoom(db, 2) == 7);  // the goblin really is there
+
+        const TurnResult r = runTurn(db, "say hello");
+        const int64_t turn =
+            queryInt(db, "SELECT value FROM meta WHERE key = 'turn'");
+        CHECK(queryText(db, ("SELECT detail FROM events WHERE verb = 'failed' "
+                             "AND turn = " + std::to_string(turn))
+                                .c_str()) == kNoOneToTalkTo);
+        CHECK(contains(r.output, kNoOneToTalkTo));
+        CHECK(!contains(r.output, kNoTalkingInCombat));
+    }
+
+    // (e) Item 3b: the reachable shape. The `said` row's `turn` column equals
+    // the INCREMENTED meta.turn — which is what makes REQ-NPCTALK-7's ordering
+    // claim observable rather than a statement about code structure.
+    {
+        const TempDbFile worldPath("textworld_say_reachable_tests.db");
+        Db db = openWorld(worldPath.string(), "tests/combat_fixture.sql").db;
+        const int64_t warden = placeCharacterIn(db, 1, "gate_warden", "gate warden");
+
+        const int64_t before =
+            queryInt(db, "SELECT value FROM meta WHERE key = 'turn'");
+        const TurnResult r = runTurn(db, "say who are you");
+        const int64_t turn =
+            queryInt(db, "SELECT value FROM meta WHERE key = 'turn'");
+        CHECK(turn == before + 1);
+        CHECK(queryInt(db, "SELECT turn FROM events WHERE verb = 'said'") == turn);
+        CHECK(queryInt(db, "SELECT subject FROM events WHERE verb = 'said'") ==
+              warden);
+        CHECK(queryText(db, "SELECT detail FROM events WHERE verb = 'said'") ==
+              "who are you");
+        // AI disabled: the authored no-reply line, never fabricated dialogue.
+        CHECK(r.output == std::string(kNoReply) + "\n" + composeBand(db, 80));
+    }
+}
+
+// Items 27 and 28's template half (REQ-NPCTALK-26): `spoke` prints its detail
+// byte-exact; `said` prints NOTHING, because the player already saw what they
+// typed. Driven on hand-written event rows so the renderer is the only thing
+// under test.
+static void testSayRenderBranches() {
+    const TempDbFile worldPath("textworld_say_render_tests.db");
+    Db db = openWorld(worldPath.string(), "tests/combat_fixture.sql").db;
+    const int64_t warden = placeCharacterIn(db, 1, "gate_warden", "gate warden");
+
+    db.exec("UPDATE meta SET value = 5 WHERE key = 'turn'");
+    const char* reply =
+        "I am the warden.\n\"And you?\" — she does not look up.\n\nAsk again.";
+    appendEvent(db, 3, "said", warden, 0, "who are you");
+    appendEvent(db, warden, "spoke", 3, 0, reply);
+
+    // Exactly the reply, exactly once, with its internal newlines and
+    // punctuation intact — and not one byte of the player's own line.
+    CHECK(render(db, 5) == std::string(reply) + "\n");
+
+    // A `said` alone renders nothing at all, rather than falling through to
+    // some default.
+    db.exec("UPDATE meta SET value = 6 WHERE key = 'turn'");
+    appendEvent(db, 3, "said", warden, 0, "hello?");
+    CHECK(render(db, 6).empty());
+}
+
+// The prompt halves (REQ-NPCTALK-20..-24), driven directly with no transport.
+// Spec validation items 11, 12, 13, 14.
+static void testSpeakPrompt() {
+    const TempDbFile worldPath("textworld_speak_prompt_tests.db");
+    Db db = openWorld(worldPath.string(), "tests/combat_fixture.sql").db;
+    db.exec("INSERT INTO meta(key, value) VALUES ('setting', "
+            "'A drowned school, still half-lit.') "
+            "ON CONFLICT(key) DO UPDATE SET value = excluded.value");
+
+    const int64_t warden = placeCharacterIn(db, 1, "gate_warden", "gate warden");
+    const int64_t catalog =
+        queryInt(db, ("SELECT id FROM catalog WHERE entity = " +
+                      std::to_string(warden)).c_str());
+    writeCatalogProfile(db, catalog, "She counts everyone who passes the gate.");
+
+    // --- Item 11: the system block is BYTE-IDENTICAL across two conversations
+    // with the same character whose memory differs. This is the cache prefix,
+    // asserted as a property rather than intended as one. ---
+    const std::string first = buildSpeakSystem(db, warden);
+    db.exec("UPDATE meta SET value = 4 WHERE key = 'turn'");
+    appendEvent(db, 3, "said", warden, 0, "what is behind the gate");
+    appendEvent(db, warden, "spoke", 3, 0, "nothing you would want");
+    writeNpcMemory(db, warden, "the player asked about the gate");
+    const std::string second = buildSpeakSystem(db, warden);
+    CHECK(first == second);
+
+    // --- Item 12: content lands on the right side of the cache boundary. ---
+    const std::string user =
+        buildSpeakUser(db, warden, "will you open it", SpeakAsks{false, false});
+
+    // System: the engine rules, this character's profile, the setting — and
+    // (the documented departure from REQ-NPCTALK-20's table) who the character
+    // is, so a first contact writes a profile matching the figure on screen.
+    CHECK(contains(first, kSpeakRulesPrompt));
+    CHECK(contains(first, "She counts everyone who passes the gate."));
+    CHECK(contains(first, "A drowned school, still half-lit."));
+    CHECK(contains(first, "gate warden"));
+
+    // User: the summary, the lines, and the input line.
+    CHECK(contains(user, "the player asked about the gate"));
+    CHECK(contains(user, "what is behind the gate"));
+    CHECK(contains(user, "nothing you would want"));
+    CHECK(contains(user, "will you open it"));
+
+    // …and NONE of those three volatile strings is in the system block, which
+    // is what makes item 11 hold rather than happen to hold.
+    CHECK(!contains(first, "the player asked about the gate"));
+    CHECK(!contains(first, "what is behind the gate"));
+    CHECK(!contains(first, "will you open it"));
+
+    // The user message is well-formed JSON carrying the ask bits, so the field
+    // the engine reads and the field it asked for are the same bit.
+    {
+        const nlohmann::json j =
+            nlohmann::json::parse(user, nullptr, /*allow_exceptions=*/false);
+        CHECK(!j.is_discarded());
+        CHECK(j["input"] == "will you open it");
+        CHECK(j["write_profile"] == false);
+        CHECK(j["write_summary"] == false);
+        // Speaker labels, not ids or names: the model IS the character.
+        CHECK(j["recent"][0]["speaker"] == "player");
+        CHECK(j["recent"][1]["speaker"] == "you");
+    }
+
+    // --- Item 14: each of REQ-NPCTALK-23's three prohibitions is
+    // spot-checkable by substring in the git-versioned constant. ---
+    CHECK(contains(kSpeakRulesPrompt, "Never explain a mechanic"));
+    CHECK(contains(kSpeakRulesPrompt, "Never volunteer background unprompted"));
+    CHECK(contains(kSpeakRulesPrompt,
+                   "Never name a place, a person, or an object that has not "
+                   "already been established"));
+
+    // --- Item 13: the id shield (REQ-NPCTALK-24). A world whose character
+    // carries deliberately distinctive machine values, swept over BOTH
+    // builders. Entity id is the first thing REQ-NPCTALK-24 names and the
+    // easiest to leak, since every helper in this unit takes one as an
+    // argument; the ids are in the hundreds so the probes cannot collide with
+    // the fixture's prose. ---
+    {
+        const TempDbFile sweepPath("textworld_speak_shield_tests.db");
+        Db s = openWorld(sweepPath.string(), "tests/combat_fixture.sql").db;
+
+        // Force the catalog row to id 317 and the entity to 419.
+        s.exec("INSERT INTO entities(id) VALUES (419)");
+        s.exec("INSERT INTO catalog(id, kind, handle, name, blurb, motive, "
+               "tier, seeded, entity) VALUES (317, 'character', "
+               "'scorched_lectern', 'lectern keeper', 'a keeper of a burnt "
+               "lectern', 'obligation', 3, 1, 419)");
+        s.exec("INSERT INTO name(entity, value) VALUES (419, 'lectern keeper')");
+        s.exec("INSERT INTO description(entity, prose) VALUES "
+               "(419, 'A keeper beside a burnt lectern.')");
+        s.exec("INSERT INTO location(entity, container) VALUES (419, 1)");
+        writeCatalogProfile(s, 317, "She keeps what the fire left.");
+        s.exec("UPDATE meta SET value = 2 WHERE key = 'turn'");
+        appendEvent(s, 3, "said", 419, 0, "what burned here");
+        appendEvent(s, 419, "spoke", 3, 0, "the lectern, and the rest");
+
+        const std::string sweep =
+            buildSpeakSystem(s, 419) +
+            buildSpeakUser(s, 419, "who are you", SpeakAsks{true, true});
+
+        CHECK(!contains(sweep, "317"));              // catalog id
+        CHECK(!contains(sweep, "419"));              // ENTITY id
+        CHECK(!contains(sweep, "tier"));             // the placement gate
+        CHECK(!contains(sweep, "seeded"));           // the hinted flag
+        CHECK(!contains(sweep, "scorched_lectern")); // the model-facing handle
+        CHECK(!contains(sweep, "catalog"));          // no table name either
+        // …and the sweep is not vacuous: the world's own words DID travel.
+        CHECK(contains(sweep, "She keeps what the fire left."));
+        CHECK(contains(sweep, "what burned here"));
+        CHECK(contains(sweep, "who are you"));
+    }
+}
+
+// The request body and the emit_reply tool (REQ-NPCTALK-18, -18a, -19).
+// Spec validation items 19 and 19b, plus the body's exact shape.
+static void testSpeakRequestBody() {
+    const TempDbFile worldPath("textworld_speak_body_tests.db");
+    Db db = openWorld(worldPath.string(), "tests/combat_fixture.sql").db;
+
+    // --- the body shape, the same way testNlResolveRequestBody pins the
+    // resolver's: an EXACT top-level key set, so a stray thinking / stream /
+    // cache_control key cannot appear unnoticed. ---
+    {
+        const std::string raw = buildSpeakRequestBody("SYSTEM", "USER");
+        const nlohmann::json b =
+            nlohmann::json::parse(raw, nullptr, /*allow_exceptions=*/false);
+        CHECK(!b.is_discarded());
+
+        std::vector<std::string> keys;
+        for (auto it = b.begin(); it != b.end(); ++it) keys.push_back(it.key());
+        std::sort(keys.begin(), keys.end());
+        CHECK(keys == (std::vector<std::string>{"max_tokens", "messages", "model",
+                                                "system", "tool_choice", "tools"}));
+        CHECK(b["system"] == "SYSTEM");
+        CHECK(b["messages"].size() == 1);
+        CHECK(b["messages"][0]["role"] == "user");
+        CHECK(b["messages"][0]["content"] == "USER");
+
+        // No caching, no streaming, no extended thinking — anywhere.
+        CHECK(!contains(raw, "cache_control"));
+        CHECK(!contains(raw, "thinking"));
+        CHECK(!contains(raw, "stream"));
+
+        // One tool, named for the house pattern, with exactly three properties
+        // and only `reply` required. profile and summary are NEVER clauses:
+        // a bad part must not cost the whole turn (REQ-NPCTALK-32).
+        CHECK(b["tools"].size() == 1);
+        const nlohmann::json& tool = b["tools"][0];
+        CHECK(tool["name"] == "emit_reply");
+        const nlohmann::json& props = tool["input_schema"]["properties"];
+        CHECK(props.size() == 3);
+        CHECK(props.contains("reply"));
+        CHECK(props.contains("profile"));
+        CHECK(props.contains("summary"));
+        CHECK(tool["input_schema"]["required"] ==
+              nlohmann::json::array({"reply"}));
+
+        // FORCED, unlike the resolver's "auto": a talk turn always wants a
+        // reply, so "no tool call" is a failure, not a designed path.
+        CHECK(b["tool_choice"]["type"] == "tool");
+        CHECK(b["tool_choice"]["name"] == "emit_reply");
+
+        // The Speak role's model, under the unchanged TEXTWORLD_MODEL
+        // precedence (REQ-NPCTALK-16).
+        CHECK(b["model"] == "claude-opus-4-8");
+    }
+    {
+        const ScopedModelEnv guard;
+        setenv("TEXTWORLD_MODEL", "claude-sonnet-5", 1);
+        const nlohmann::json b = nlohmann::json::parse(
+            buildSpeakRequestBody("S", "U"), nullptr, false);
+        CHECK(b["model"] == "claude-sonnet-5");
+    }
+
+    // --- Item 19: the fold threshold is 20 unsummarised lines. At 19 the
+    // summary is not asked for; at 20 it is. ---
+    {
+        const int64_t warden = placeCharacterIn(db, 1, "gate_warden", "gate warden");
+        db.exec("UPDATE meta SET value = 2 WHERE key = 'turn'");
+        for (size_t i = 0; i < kFoldThreshold - 1; ++i) {
+            appendEvent(db, 3, "said", warden, 0, "a line");
+        }
+        CHECK(npcLinesSince(db, warden).size() == kFoldThreshold - 1);
+        CHECK(!speakAsksFor(db, warden).summary);
+        {
+            const nlohmann::json u = nlohmann::json::parse(
+                buildSpeakUser(db, warden, "x", speakAsksFor(db, warden)),
+                nullptr, false);
+            CHECK(u["write_summary"] == false);
+        }
+
+        appendEvent(db, 3, "said", warden, 0, "the twentieth line");
+        CHECK(npcLinesSince(db, warden).size() == kFoldThreshold);
+        CHECK(speakAsksFor(db, warden).summary);
+        {
+            const nlohmann::json u = nlohmann::json::parse(
+                buildSpeakUser(db, warden, "x", speakAsksFor(db, warden)),
+                nullptr, false);
+            CHECK(u["write_summary"] == true);
+        }
+    }
+
+    // --- Item 19b: the profile condition is over the ROW, not over `kind`
+    // (REQ-NPCTALK-18a). A major with a profile is not asked; the SAME major
+    // with its catalog_profile row deleted IS asked, through the same branch.
+    // Asserted by driving the real condition, never by reading `kind`. ---
+    {
+        const TempDbFile majorPath("textworld_speak_major_tests.db");
+        Db m = openWorld(majorPath.string(), "tests/combat_fixture.sql").db;
+        const int64_t major =
+            placeCharacterIn(m, 1, "the_archivist", "archivist", "major");
+        const int64_t catalog =
+            queryInt(m, ("SELECT id FROM catalog WHERE entity = " +
+                         std::to_string(major)).c_str());
+        CHECK(queryText(m, ("SELECT kind FROM catalog WHERE id = " +
+                            std::to_string(catalog)).c_str()) == "major");
+
+        // With a profile row — as a major has from world creation — no ask.
+        writeCatalogProfile(m, catalog, "He has read everything and says little.");
+        CHECK(!speakAsksFor(m, major).profile);
+        {
+            const nlohmann::json u = nlohmann::json::parse(
+                buildSpeakUser(m, major, "x", speakAsksFor(m, major)), nullptr,
+                false);
+            CHECK(u["write_profile"] == false);
+        }
+
+        // Row gone: the same major takes the SAME branch a minor character on
+        // first contact takes, rather than a special case of its own.
+        m.exec(("DELETE FROM catalog_profile WHERE catalog = " +
+                std::to_string(catalog)).c_str());
+        CHECK(speakAsksFor(m, major).profile);
+        {
+            const nlohmann::json u = nlohmann::json::parse(
+                buildSpeakUser(m, major, "x", speakAsksFor(m, major)), nullptr,
+                false);
+            CHECK(u["write_profile"] == true);
+        }
+    }
+}
+
+// A canned 200 response carrying one emit_reply tool_use block whose `input` is
+// exactly `input`. The Anthropic content[] shape, built rather than pasted so a
+// test can vary one field at a time.
+static HttpResponse speakResponse(const nlohmann::json& input) {
+    nlohmann::json block;
+    block["type"] = "tool_use";
+    block["id"] = "toolu_test";
+    block["name"] = "emit_reply";
+    block["input"] = input;
+
+    nlohmann::json body;
+    body["id"] = "msg_test";
+    body["type"] = "message";
+    body["role"] = "assistant";
+    body["stop_reason"] = "tool_use";
+    body["content"] = nlohmann::json::array({block});
+
+    HttpResponse r;
+    r.status = 200;
+    r.body = body.dump();
+    return r;
+}
+
+// validateSpeech: one gate, its four clauses, and the leniency that is
+// deliberately NOT a clause (REQ-NPCTALK-31, -32). Pure — no db, no network.
+static void testValidateSpeech() {
+    // --- the happy path, so every rejection below is a real rejection. ---
+    {
+        const auto got = validateSpeech(speakResponse({{"reply", "I am here."}}));
+        CHECK(got.has_value());
+        if (got) {
+            CHECK(got->reply == "I am here.");
+            CHECK(got->profile.empty());
+            CHECK(got->summary.empty());
+        }
+    }
+
+    // --- clause a: HTTP. Status 500 and a transport error (status 0) leave by
+    // the same door, which is what makes them two of the eight cases rather
+    // than two code paths. ---
+    {
+        HttpResponse r = speakResponse({{"reply", "unreachable"}});
+        r.status = 500;
+        CHECK(!validateSpeech(r));
+    }
+    {
+        HttpResponse r;
+        r.transportError = true;  // status stays 0
+        CHECK(!validateSpeech(r));
+    }
+    // A timeout arrives as exactly this shape, by different code.
+    {
+        HttpResponse r;
+        r.transportError = true;
+        r.status = 0;
+        r.body = "";
+        CHECK(!validateSpeech(r));
+    }
+
+    // --- clause b: the body is not a JSON object, or has no content array. ---
+    {
+        HttpResponse r;
+        r.status = 200;
+        r.body = "not json at all {{{";
+        CHECK(!validateSpeech(r));
+    }
+    {
+        HttpResponse r;
+        r.status = 200;
+        r.body = R"({"id":"msg","role":"assistant"})";
+        CHECK(!validateSpeech(r));
+    }
+
+    // --- clause c: the tool call. ZERO blocks is a FAILURE here, unlike the
+    // resolver where zero is the designed no-action path. ---
+    {
+        HttpResponse r;
+        r.status = 200;
+        r.body =
+            R"({"content":[{"type":"text","text":"I would rather just talk."}]})";
+        CHECK(!validateSpeech(r));
+    }
+    {
+        // Two blocks: one opcode per line, here as there.
+        nlohmann::json block;
+        block["type"] = "tool_use";
+        block["name"] = "emit_reply";
+        block["input"] = {{"reply", "twice"}};
+        nlohmann::json body;
+        body["content"] = nlohmann::json::array({block, block});
+        HttpResponse r;
+        r.status = 200;
+        r.body = body.dump();
+        CHECK(!validateSpeech(r));
+    }
+
+    // --- clause d: reply missing, empty, whitespace-only, or not a string. ---
+    CHECK(!validateSpeech(speakResponse({{"profile", "no reply here"}})));
+    CHECK(!validateSpeech(speakResponse({{"reply", ""}})));
+    CHECK(!validateSpeech(speakResponse({{"reply", "   \n\t "}})));
+    CHECK(!validateSpeech(speakResponse({{"reply", 42}})));
+    CHECK(!validateSpeech(speakResponse({{"reply", nlohmann::json::array()}})));
+
+    // --- the leniency half (items 20 and 21). A malformed profile or summary
+    // is DROPPED to "" and the reply still lands: a bad part never costs the
+    // whole turn. ---
+    {
+        const auto got = validateSpeech(
+            speakResponse({{"reply", "She looks up."}, {"profile", 42}}));
+        CHECK(got.has_value());
+        if (got) {
+            CHECK(got->reply == "She looks up.");
+            CHECK(got->profile.empty());
+        }
+    }
+    {
+        const auto got = validateSpeech(speakResponse(
+            {{"reply", "She looks up."}, {"summary", nlohmann::json::object()}}));
+        CHECK(got.has_value());
+        if (got) {
+            CHECK(got->reply == "She looks up.");
+            CHECK(got->summary.empty());
+        }
+    }
+    // Both fields well-formed: both come through untouched.
+    {
+        const auto got = validateSpeech(speakResponse({{"reply", "Yes."},
+                                                       {"profile", "A warden."},
+                                                       {"summary", "We spoke."}}));
+        CHECK(got.has_value());
+        if (got) {
+            CHECK(got->profile == "A warden.");
+            CHECK(got->summary == "We spoke.");
+        }
+    }
+
+    // --- never throws. A deliberately hostile body: deeply nested, wrong types
+    // throughout, and a `content` array full of things that are not blocks. ---
+    {
+        nlohmann::json hostile;
+        hostile["content"] = nlohmann::json::array(
+            {1, "two", nlohmann::json::array({3}), nullptr,
+             {{"type", 7}, {"name", nlohmann::json::object()}},
+             {{"type", "tool_use"}, {"name", "emit_reply"}, {"input", "a string"}}});
+        nlohmann::json deep = hostile;
+        for (int i = 0; i < 50; ++i) deep = nlohmann::json::array({deep});
+        hostile["nested"] = deep;
+
+        HttpResponse r;
+        r.status = 200;
+        r.body = hostile.dump();
+        bool threw = false;
+        try {
+            CHECK(!validateSpeech(r));
+        } catch (...) {
+            threw = true;
+        }
+        CHECK(!threw);
+    }
+}
+
+// One tick with an INJECTED transport, run exactly the way loop.cpp runs one:
+// begin, increment meta.turn, resolve, the enemy turn, commit — and roll back
+// on any throw. runTurn binds production transports itself and has no injectable
+// overload, so this is how a talk turn is driven offline with a fake. Returns
+// false iff the tick rolled back (the tier-c engine-error path).
+static bool sayTick(Db& db, const std::string& text,
+                    const HttpTransport& transport) {
+    const int64_t player = 3;
+    db.begin();
+    try {
+        const int64_t startRoom = queryInt(
+            db, "SELECT container FROM location WHERE entity = 3");
+        db.exec("UPDATE meta SET value = value + 1 WHERE key = 'turn'");
+        Action a{Verb::Say};
+        a.text = text;
+        resolve(db, a, player, transport);
+        resolveCombat(db, player, startRoom);
+        db.commit();
+    } catch (const std::exception&) {
+        db.rollback();
+        return false;
+    }
+    return true;
+}
+
+// The rendered output of the current turn, the way runTurnCore's template path
+// composes it. No band: the band is composed by runTurn, and testSayRefusals
+// already pins it (item 30).
+static std::string sayOutput(Db& db) {
+    return render(db, queryInt(db, "SELECT value FROM meta WHERE key = 'turn'"));
+}
+
+// A transport that counts calls and records the last body it was handed.
+struct CountingTransport {
+    int calls = 0;
+    std::string lastBody;
+    HttpResponse canned;
+
+    HttpTransport fn() {
+        return [this](const std::string& body) {
+            ++calls;
+            lastBody = body;
+            return canned;
+        };
+    }
+};
+
+// The orchestration end to end (REQ-NPCTALK-6, -17, -25, -29, -29a, -30, -31,
+// -33, -34, -35). Spec validation items 4, 15, 17, 18, 19a, 22, 23, 24, 26, 28.
+static void testSayConversation() {
+    // AI on for this whole test: the eight-case sweep below needs seven of its
+    // eight cases to actually reach the transport.
+    const ScopedEnvVar keyGuard("ANTHROPIC_API_KEY");
+    const ScopedEnvVar aiGuard("TEXTWORLD_AI");
+
+    // --- Items 4, 15, 28: a character present → ONE request is issued, and the
+    // reply reaches the rendered turn byte for byte, punctuation and internal
+    // newlines included. ---
+    {
+        setenv("ANTHROPIC_API_KEY", "test-key", 1);
+        unsetenv("TEXTWORLD_AI");
+
+        const TempDbFile worldPath("textworld_say_reply_tests.db");
+        Db db = openWorld(worldPath.string(), "tests/combat_fixture.sql").db;
+        const int64_t warden = placeCharacterIn(db, 1, "gate_warden", "gate warden");
+
+        const char* reply =
+            "\"Behind it?\"  She does not look up.\n\nNothing you would want.\n"
+            "  — and nothing I will open.";
+        CountingTransport t;
+        t.canned = speakResponse({{"reply", reply}});
+
+        const int64_t before =
+            queryInt(db, "SELECT value FROM meta WHERE key = 'turn'");
+        CHECK(sayTick(db, "what is behind the gate", t.fn()));
+        const int64_t turn =
+            queryInt(db, "SELECT value FROM meta WHERE key = 'turn'");
+        CHECK(turn == before + 1);
+
+        // EXACTLY ONE request, no retry, and it went out as the Speak role.
+        CHECK(t.calls == 1);
+        {
+            const nlohmann::json b =
+                nlohmann::json::parse(t.lastBody, nullptr, false);
+            CHECK(!b.is_discarded());
+            CHECK(b["model"] == modelForRole(AiRole::Speak));
+            CHECK(b["tools"][0]["name"] == "emit_reply");
+        }
+
+        // Byte for byte, exactly as returned (REQ-NPCTALK-25). `said` prints
+        // nothing, so the reply is the whole of the turn's output.
+        CHECK(sayOutput(db) == std::string(reply) + "\n");
+
+        // `said` before `spoke`, in that order, in one transaction
+        // (REQ-NPCTALK-29) — a reply preceding its question would be read back
+        // by npcLinesSince as one.
+        {
+            std::vector<std::string> verbs;
+            Stmt s = db.prepare(
+                "SELECT verb FROM events WHERE verb IN ('said','spoke') ORDER BY id");
+            while (s.step()) verbs.push_back(s.colText(0));
+            CHECK(verbs == (std::vector<std::string>{"said", "spoke"}));
+        }
+        // The player's words came from the ENGINE, never from the response.
+        CHECK(queryText(db, "SELECT detail FROM events WHERE verb = 'said'") ==
+              "what is behind the gate");
+        CHECK(queryInt(db, "SELECT actor FROM events WHERE verb = 'spoke'") ==
+              warden);
+    }
+
+    // --- Item 2, the half testSayRefusals cannot assert: with a hostile
+    // present, NO MODEL CALL IS ISSUED. That test runs AI-disabled, where no
+    // call happens on any path, so the claim is only real here — AI on, a
+    // character present, a counting transport, and zero calls. ---
+    {
+        setenv("ANTHROPIC_API_KEY", "test-key", 1);
+        unsetenv("TEXTWORLD_AI");
+
+        const TempDbFile worldPath("textworld_say_nocall_tests.db");
+        Db db = openWorld(worldPath.string(), "tests/combat_fixture.sql").db;
+        placeCharacterIn(db, 2, "gate_warden", "gate warden");
+        db.exec("UPDATE location SET container = 2 WHERE entity = 3");
+        CHECK(hostileInRoom(db, 2) == 7);
+        CHECK(characterInRoom(db, 2) != 0);  // both present: the refused shape
+
+        CountingTransport t;
+        t.canned = speakResponse({{"reply", "never asked for"}});
+        CHECK(sayTick(db, "hello", t.fn()));
+        CHECK(t.calls == 0);
+        // The control: the SAME world without the hostile does spend the call,
+        // so the zero above is the refusal and not a broken fixture.
+        db.exec("DELETE FROM hostile WHERE entity = 7");
+        CHECK(sayTick(db, "hello", t.fn()));
+        CHECK(t.calls == 1);
+    }
+
+    // --- Item 22: all EIGHT of REQ-NPCTALK-31's cases produce `said` +
+    // `failed`, meta.turn advanced, and BYTE-IDENTICAL output — asserted as a
+    // set of one. Item 23: that fallback detail is the engine constant, so no
+    // failure path can surface as fabricated dialogue. ---
+    {
+        // Each case is (label, how the transport behaves, whether AI is on).
+        struct Case {
+            const char* label;
+            bool aiOn;
+            HttpResponse response;
+        };
+
+        HttpResponse status500 = speakResponse({{"reply", "unreachable"}});
+        status500.status = 500;
+
+        HttpResponse transportErr;
+        transportErr.transportError = true;
+
+        HttpResponse timeout;  // arrives by different code, same shape
+        timeout.transportError = true;
+        timeout.status = 0;
+
+        HttpResponse unparseable;
+        unparseable.status = 200;
+        unparseable.body = "<html>gateway</html>";
+
+        HttpResponse noToolCall;
+        noToolCall.status = 200;
+        noToolCall.body = R"({"content":[{"type":"text","text":"hello"}]})";
+
+        const std::vector<Case> cases = {
+            {"ai disabled", false, speakResponse({{"reply", "never asked"}})},
+            {"transport error", true, transportErr},
+            {"timeout", true, timeout},
+            {"status 500", true, status500},
+            {"unparseable body", true, unparseable},
+            {"no tool call", true, noToolCall},
+            {"missing reply", true, speakResponse({{"profile", "no reply"}})},
+            {"empty reply", true, speakResponse({{"reply", ""}})},
+        };
+        CHECK(cases.size() == 8);
+
+        std::set<std::string> outputs;
+        for (const Case& c : cases) {
+            if (c.aiOn) {
+                setenv("ANTHROPIC_API_KEY", "test-key", 1);
+                unsetenv("TEXTWORLD_AI");
+            } else {
+                unsetenv("ANTHROPIC_API_KEY");
+            }
+
+            const TempDbFile worldPath("textworld_say_failure_tests.db");
+            Db db = openWorld(worldPath.string(), "tests/combat_fixture.sql").db;
+            placeCharacterIn(db, 1, "gate_warden", "gate warden");
+
+            CountingTransport t;
+            t.canned = c.response;
+            const int64_t before =
+                queryInt(db, "SELECT value FROM meta WHERE key = 'turn'");
+            CHECK(sayTick(db, "what is behind the gate", t.fn()));
+            const int64_t turn =
+                queryInt(db, "SELECT value FROM meta WHERE key = 'turn'");
+
+            // The turn still ticks. It always ticks.
+            CHECK(turn == before + 1);
+            // With AI off nothing is even built; otherwise exactly one attempt.
+            CHECK(t.calls == (c.aiOn ? 1 : 0));
+
+            const std::string sql =
+                "SELECT COUNT(*) FROM events WHERE turn = " + std::to_string(turn);
+            CHECK(queryInt(db, (sql + " AND verb = 'said'").c_str()) == 1);
+            CHECK(queryInt(db, (sql + " AND verb = 'spoke'").c_str()) == 0);
+            // Item 23: the ENGINE's line, the constant — never model text.
+            CHECK(queryText(db, ("SELECT detail FROM events WHERE verb = 'failed' "
+                                 "AND turn = " + std::to_string(turn))
+                                    .c_str()) == kNoReply);
+            // Nothing permanent was written on the way past.
+            CHECK(queryInt(db, "SELECT COUNT(*) FROM catalog_profile") == 0);
+            CHECK(queryInt(db, "SELECT COUNT(*) FROM npc_memory") == 0);
+
+            outputs.insert(sayOutput(db));
+        }
+        // Byte-identical across all eight: the player cannot tell a timeout
+        // from a malformed field, which is the point.
+        CHECK(outputs.size() == 1);
+        CHECK(*outputs.begin() == std::string(kNoReply) + "\n");
+    }
+
+    setenv("ANTHROPIC_API_KEY", "test-key", 1);
+    unsetenv("TEXTWORLD_AI");
+
+    // --- Items 17, 18, 35: first contact stores the profile and still prints
+    // the reply; the second conversation does not ask, and a profile supplied
+    // anyway leaves the stored text unchanged (the write-once latch). ---
+    {
+        const TempDbFile worldPath("textworld_say_profile_tests.db");
+        Db db = openWorld(worldPath.string(), "tests/combat_fixture.sql").db;
+        const int64_t warden = placeCharacterIn(db, 1, "gate_warden", "gate warden");
+        const int64_t catalog =
+            queryInt(db, ("SELECT id FROM catalog WHERE entity = " +
+                          std::to_string(warden)).c_str());
+
+        CountingTransport first;
+        first.canned = speakResponse(
+            {{"reply", "I am the warden."}, {"profile", "She counts everyone."}});
+        CHECK(sayTick(db, "who are you", first.fn()));
+
+        // The prompt DID ask, the profile WAS stored, and the reply still
+        // printed — three things one call had to do at once.
+        CHECK(contains(first.lastBody, "\\\"write_profile\\\":true"));
+        CHECK(queryText(db, "SELECT profile FROM catalog_profile") ==
+              "She counts everyone.");
+        CHECK(sayOutput(db) == "I am the warden.\n");
+
+        // The second conversation does not ask…
+        CountingTransport second;
+        second.canned = speakResponse({{"reply", "Still here."},
+                                       {"profile", "A COMPLETELY DIFFERENT PERSON"}});
+        CHECK(sayTick(db, "still here", second.fn()));
+        CHECK(contains(second.lastBody, "\\\"write_profile\\\":false"));
+        // …and a profile supplied anyway changes NOTHING, silently
+        // (REQ-NPCTALK-35): writeCatalogProfile is a one-way latch and the
+        // engine does not re-check.
+        CHECK(queryText(db, "SELECT profile FROM catalog_profile") ==
+              "She counts everyone.");
+        // One row, still — the latch did not append a second.
+        CHECK(queryInt(db, ("SELECT COUNT(*) FROM catalog_profile WHERE catalog = " +
+                            std::to_string(catalog)).c_str()) == 1);
+    }
+
+    // --- Item 26 / REQ-NPCTALK-34: a FAILED first contact writes no profile,
+    // and the next conversation asks for one again. Nothing permanent is lost
+    // by a failure. ---
+    {
+        const TempDbFile worldPath("textworld_say_failed_first_tests.db");
+        Db db = openWorld(worldPath.string(), "tests/combat_fixture.sql").db;
+        placeCharacterIn(db, 1, "gate_warden", "gate warden");
+
+        CountingTransport failed;
+        failed.canned.status = 500;
+        CHECK(sayTick(db, "who are you", failed.fn()));
+        CHECK(contains(failed.lastBody, "\\\"write_profile\\\":true"));
+        CHECK(queryInt(db, "SELECT COUNT(*) FROM catalog_profile") == 0);
+
+        CountingTransport retry;
+        retry.canned = speakResponse(
+            {{"reply", "I am the warden."}, {"profile", "She counts everyone."}});
+        CHECK(sayTick(db, "who are you", retry.fn()));
+        CHECK(contains(retry.lastBody, "\\\"write_profile\\\":true"));  // asked AGAIN
+        CHECK(queryText(db, "SELECT profile FROM catalog_profile") ==
+              "She counts everyone.");
+    }
+
+    // --- Item 19a, end to end: after a turn that WRITES a summary,
+    // npcLinesSince still returns that turn's `said` and `spoke`. This is the
+    // off-by-one that would otherwise lose the last exchange of every
+    // conversation, forever, with nothing failing (REQ-NPCTALK-29a). ---
+    {
+        const TempDbFile worldPath("textworld_say_fold_tests.db");
+        Db db = openWorld(worldPath.string(), "tests/combat_fixture.sql").db;
+        const int64_t warden = placeCharacterIn(db, 1, "gate_warden", "gate warden");
+        writeCatalogProfile(
+            db, queryInt(db, ("SELECT id FROM catalog WHERE entity = " +
+                              std::to_string(warden)).c_str()),
+            "She counts everyone.");
+
+        // Push past the fold threshold so the engine asks for a summary.
+        db.exec("UPDATE meta SET value = 2 WHERE key = 'turn'");
+        for (size_t i = 0; i < kFoldThreshold; ++i) {
+            appendEvent(db, 3, "said", warden, 0, "an earlier line");
+        }
+        CHECK(speakAsksFor(db, warden).summary);
+
+        CountingTransport t;
+        t.canned = speakResponse({{"reply", "Enough of that."},
+                                  {"summary", "the player asked many things"}});
+        CHECK(sayTick(db, "and one more thing", t.fn()));
+        CHECK(contains(t.lastBody, "\\\"write_summary\\\":true"));
+
+        const int64_t turn =
+            queryInt(db, "SELECT value FROM meta WHERE key = 'turn'");
+        CHECK(npcMemory(db, warden).summary == "the player asked many things");
+        CHECK(npcMemory(db, warden).summaryTurn == turn - 1);
+
+        // THE ASSERTION THIS TEST EXISTS FOR: this turn's exchange survives the
+        // fold that was written in the same transaction.
+        const std::vector<SpeechLine> lines = npcLinesSince(db, warden);
+        CHECK(lines.size() == 2);
+        if (lines.size() == 2) {
+            CHECK(lines[0].detail == "and one more thing");
+            CHECK(lines[1].detail == "Enough of that.");
+        }
+    }
+
+    // --- Item 24: FAULT INJECTION. A database error writing npc_memory rolls
+    // the TURN back — no `said`, no `spoke`, meta.turn unchanged — rather than
+    // degrading to the no-reply line. That distinction is where the try block
+    // ends, and nothing but this test can see it. ---
+    {
+        const TempDbFile worldPath("textworld_say_fault_tests.db");
+        Db db = openWorld(worldPath.string(), "tests/combat_fixture.sql").db;
+        const int64_t warden = placeCharacterIn(db, 1, "gate_warden", "gate warden");
+        writeCatalogProfile(
+            db, queryInt(db, ("SELECT id FROM catalog WHERE entity = " +
+                              std::to_string(warden)).c_str()),
+            "She counts everyone.");
+        db.exec("UPDATE meta SET value = 2 WHERE key = 'turn'");
+        for (size_t i = 0; i < kFoldThreshold; ++i) {
+            appendEvent(db, 3, "said", warden, 0, "an earlier line");
+        }
+        db.exec("CREATE TRIGGER npc_memory_fault BEFORE INSERT ON npc_memory "
+                "BEGIN SELECT RAISE(ABORT, 'injected npc_memory fault'); END");
+
+        const int64_t turnBefore =
+            queryInt(db, "SELECT value FROM meta WHERE key = 'turn'");
+        const int64_t eventsBefore = queryInt(db, "SELECT COUNT(*) FROM events");
+
+        CountingTransport t;
+        t.canned = speakResponse({{"reply", "Enough of that."},
+                                  {"summary", "the player asked many things"}});
+        CHECK(!sayTick(db, "and one more thing", t.fn()));  // rolled back
+
+        // The world is as if the prompt never happened.
+        CHECK(queryInt(db, "SELECT value FROM meta WHERE key = 'turn'") ==
+              turnBefore);
+        CHECK(queryInt(db, "SELECT COUNT(*) FROM events") == eventsBefore);
+        CHECK(queryInt(db, "SELECT COUNT(*) FROM events WHERE verb = 'spoke'") == 0);
+        CHECK(queryInt(db, "SELECT COUNT(*) FROM npc_memory") == 0);
+        // Emphatically NOT the no-reply line: that would report a world which
+        // did not change as one that did.
+        {
+            Stmt s = db.prepare("SELECT COUNT(*) FROM events WHERE detail = ?");
+            s.bind(1, std::string(kNoReply));
+            CHECK(s.step());
+            CHECK(s.colInt(0) == 0);
+        }
+
+        // THE CONTROL ARM: the injection is still installed, but this turn
+        // writes no memory — so it commits normally. That is what proves the
+        // trigger touches nothing else, and that the rollback above was caused
+        // by the memory write rather than by the injection's mere presence.
+        db.exec("UPDATE meta SET value = 2 WHERE key = 'turn'");
+        db.exec("DELETE FROM events WHERE verb = 'said'");  // back under the fold
+        CHECK(!speakAsksFor(db, warden).summary);
+
+        CountingTransport control;
+        control.canned = speakResponse({{"reply", "Enough of that."}});
+        CHECK(sayTick(db, "and one more thing", control.fn()));
+        CHECK(queryInt(db, "SELECT COUNT(*) FROM events WHERE verb = 'spoke'") == 1);
+        CHECK(sayOutput(db) == "Enough of that.\n");
+    }
+}
+
+// The resolver's half of the conversation brick (REQ-NPCTALK-11, -12, -13,
+// -14, -15a). Spec validation items 9, 10, 7 and 8's offline halves — the
+// BEHAVIOURAL halves of 6/7/8 need a live model and live in
+// testNlResolveLiveSmoke, behind TEXTWORLD_AI_LIVE_TEST=1.
+static void testSayResolver() {
+    // --- Item 9: `present_character` is ABSENT in a room with no character —
+    // not present-and-empty, so the prompt's conditional rule turns on the
+    // key's existence rather than on a sentinel value. ---
+    {
+        const TempDbFile worldPath("textworld_say_scope_tests.db");
+        Db db = openWorld(worldPath.string(), "tests/combat_fixture.sql").db;
+
+        {
+            const nlohmann::json p = nlohmann::json::parse(
+                buildResolveContext(db, "hello").payload, nullptr, false);
+            CHECK(!p.is_discarded());
+            CHECK(!p.contains("present_character"));
+        }
+
+        // With one present the key holds that character's NOUN and no id.
+        const int64_t warden = placeCharacterIn(db, 1, "gate_warden", "gate warden");
+        {
+            const std::string raw = buildResolveContext(db, "hello").payload;
+            const nlohmann::json p = nlohmann::json::parse(raw, nullptr, false);
+            CHECK(p.contains("present_character"));
+            CHECK(p["present_character"] == "gate warden");
+            CHECK(!contains(raw, std::to_string(warden)));
+            CHECK(!contains(raw, "gate_warden"));  // the handle stays home
+        }
+
+        // A `beat` is not a character: the key stays absent (REQ-NPCTALK-2).
+        {
+            const TempDbFile beatPath("textworld_say_scope_beat_tests.db");
+            Db b = openWorld(beatPath.string(), "tests/combat_fixture.sql").db;
+            placeCharacterIn(b, 1, "scorched_lectern", "lectern", "beat");
+            const nlohmann::json p = nlohmann::json::parse(
+                buildResolveContext(b, "hello").payload, nullptr, false);
+            CHECK(!p.contains("present_character"));
+        }
+    }
+
+    // --- Item 10: a `say` tool call carrying a subject AND a text argument is
+    // ACCEPTED, and both arguments are IGNORED — the spoken text in the
+    // resulting `said` row is the player's raw line, byte-equal. The model's
+    // `text` reaching that row is the failure this asserts against. ---
+    {
+        const TempDbFile worldPath("textworld_say_lower_tests.db");
+        Db db = openWorld(worldPath.string(), "tests/combat_fixture.sql").db;
+        const int64_t warden = placeCharacterIn(db, 1, "gate_warden", "gate warden");
+
+        HttpResponse canned;
+        {
+            nlohmann::json block;
+            block["type"] = "tool_use";
+            block["name"] = "emit_action";
+            block["input"] = {{"verb", "say"},
+                              {"subject", "gate warden"},
+                              {"text", "PARAPHRASED BY THE MODEL"}};
+            nlohmann::json body;
+            body["content"] = nlohmann::json::array({block});
+            canned.status = 200;
+            canned.body = body.dump();
+        }
+
+        // The gate accepts it and drops the arguments (clause e).
+        {
+            const auto lowered = validateAndLower(canned, db);
+            CHECK(lowered.has_value());
+            if (lowered) {
+                CHECK(lowered->verb == Verb::Say);
+                CHECK(lowered->subject == 0);   // resolution finds the character
+                CHECK(lowered->text.empty());   // validateAndLower never sets it
+            }
+        }
+
+        // aiResolve then fills `text` from the ENGINE's copy of the raw line.
+        const char* raw = "Warden, What Is Behind The Gate?";
+        const auto action = aiResolve(db, raw, [&canned](const std::string&) {
+            return canned;
+        });
+        CHECK(action.has_value());
+        if (action) {
+            CHECK(action->verb == Verb::Say);
+            CHECK(action->text == raw);  // byte-equal, casing intact
+        }
+
+        // …and it is the raw line, not the model's paraphrase, that lands in
+        // the `said` row.
+        {
+            const ScopedEnvVar keyGuard("ANTHROPIC_API_KEY");
+            unsetenv("ANTHROPIC_API_KEY");  // AI off: the no-reply shape
+            db.begin();
+            db.exec("UPDATE meta SET value = value + 1 WHERE key = 'turn'");
+            resolve(db, *action, 3);
+            db.commit();
+        }
+        CHECK(queryText(db, "SELECT detail FROM events WHERE verb = 'said'") == raw);
+        CHECK(!contains(queryText(db, "SELECT detail FROM events WHERE verb = 'said'"),
+                        "PARAPHRASED"));
+        CHECK(queryInt(db, "SELECT subject FROM events WHERE verb = 'said'") ==
+              warden);
+    }
+
+    // --- Items 7 and 8, offline halves. The resolver prompt is the only input
+    // that changed, so what offline can decide is what the prompt SAYS: it
+    // still carries the unconditional no-call sentence for the absent case, and
+    // it carries the conditional rule and its ordering for the present one.
+    // The behavioural halves are item 6's job, live-gated. ---
+    {
+        const std::string p = kResolveSystemPrompt;
+        // The unconditional rule, unchanged for the absent case (item 7).
+        CHECK(contains(p, "make no tool call at all"));
+        CHECK(contains(p, "When in doubt, make no call."));
+        // The rule becomes conditional, and states the ORDERING (item 8).
+        CHECK(contains(p, "This rule changes when \"present_character\" is supplied."));
+        CHECK(contains(p, "if the line clearly means one of the other twelve "
+                          "actions, emit that action; only if it does not, emit say"));
+        CHECK(contains(p, "A question, a greeting, or chatter is speech."));
+        CHECK(contains(p, "A line naming an item, a direction, or a spell is an "
+                          "action, not speech, even when it is phrased politely."));
+        // The scope-facts paragraph names the new key, so the model is told
+        // when it exists rather than having to infer it.
+        CHECK(contains(p, "\"present_character\""));
+
+        // REQ-NPCTALK-15a is recorded IN THE CODE, not only in the spec — a
+        // later reader must not mistake a passing suite for a settled rule.
+        const std::string src = readFileBytes("src/nlresolve.cpp");
+        CHECK(contains(src, "PROMPT-TUNING TERRITORY"));
+        CHECK(contains(src, "REQ-NPCTALK-15a"));
+    }
+
+    // --- REQ-NPCTALK-6, structurally: the emit_action schema has NO text
+    // property, so a paraphrase has no wire to travel on in the first place. ---
+    {
+        const nlohmann::json b = nlohmann::json::parse(
+            buildResolveRequestBody("{}"), nullptr, false);
+        const nlohmann::json& props = b["tools"][0]["input_schema"]["properties"];
+        CHECK(!props.contains("text"));
+        CHECK(props.size() == 3);  // verb, subject, direction — and nothing else
+    }
+}
+
+// The whole-spec gates, encoded (REQ-NPCTALK-24, -27, -33, -36, -37).
+// Spec validation items 31 and 32, plus the structural half of item 15.
+// Follows testNpcStoreInvariants: properties of the SOURCE TEXT where a
+// behavioural surface would cost more than the guarantee is worth.
+static void testSayInvariants() {
+    // --- Item 31: every write goes through mutations.cpp. The conversation
+    // translation unit contains no raw write statement of any kind — the
+    // discipline architect.cpp and bard.cpp already live under, and the reason
+    // "a conversation cannot write to the world" is structural rather than a
+    // rule someone has to remember. ---
+    {
+        const std::string npc = readFileBytes("src/npc.cpp");
+        CHECK(npc.size() > 1000);  // the sweep is not vacuous: the file is real
+        CHECK(contains(npc, "appendEvent"));  // …and it really does write
+        for (const char* verb : {"INSERT", "UPDATE", "DELETE"}) {
+            CHECK(!contains(npc, verb));
+        }
+    }
+
+    // --- The structural half of item 15 (REQ-NPCTALK-27): NO narrate request
+    // is issued on a talk turn. runTurn binds production transports itself and
+    // has no injectable overload, so nothing offline can count what it sent —
+    // this is asserted as a source-text invariant instead, the
+    // testBardOvertureContract / testNpcStoreInvariants precedent.
+    //
+    // It is SUFFICIENT, not best-effort: aiRender is the only AiRole::Narrate
+    // call site in the binary and it is called exactly once, immediately inside
+    // the guard pinned below. Gating that one call site gates every narrate
+    // request there is. ---
+    {
+        const std::string loop = readFileBytes("src/loop.cpp");
+        CHECK(contains(loop, "action->verb != Verb::Say && aiNarrationEnabled()"));
+        CHECK(contains(loop, "aiRender"));  // not vacuous: the call is still there
+
+        // And it really is the only one, on both halves of the claim: exactly
+        // one place in the binary BINDS a narrate transport, and exactly one
+        // place CALLS aiRender — the guarded line above. (AiRole::Narrate
+        // itself appears in aihttp.cpp's two role switches, which is the
+        // routing table, not a call site.)
+        int binds = 0;
+        int callers = 0;
+        for (const auto& entry : std::filesystem::directory_iterator("src")) {
+            if (entry.path().extension() != ".cpp") continue;
+            const std::string code = readFileBytes(entry.path());
+            for (size_t i = code.find("makeAnthropicTransport(AiRole::Narrate)");
+                 i != std::string::npos;
+                 i = code.find("makeAnthropicTransport(AiRole::Narrate)", i + 1)) {
+                ++binds;
+            }
+            if (entry.path().filename() == "prose.cpp") continue;  // its own def
+            for (size_t i = code.find("aiRender("); i != std::string::npos;
+                 i = code.find("aiRender(", i + 1)) {
+                ++callers;
+            }
+        }
+        CHECK(binds == 1);    // prose.cpp's, inside aiRender
+        CHECK(callers == 1);  // loop.cpp's, inside the guard above
+    }
+
+    // --- Item 32: a successful talk turn writes NO component-table row. This
+    // is the mechanical form of the social-engineering defence, and it is why
+    // the defence is structural rather than a prompt rule: a character cannot
+    // open a door, hand over an item, or change a number, because no code path
+    // exists for it.
+    //
+    // Asserted on a turn with NO HOSTILE PRESENT. With one, the turn is refused
+    // anyway — but resolveCombat still runs after resolve in the same tick and
+    // the enemy's turn writes `health`. That is combat behaving normally, not
+    // the talk turn writing, so the check is only coherent on the successful
+    // shape. ---
+    {
+        const ScopedEnvVar keyGuard("ANTHROPIC_API_KEY");
+        setenv("ANTHROPIC_API_KEY", "test-key", 1);
+
+        const TempDbFile worldPath("textworld_say_nowrite_tests.db");
+        Db db = openWorld(worldPath.string(), "tests/combat_fixture.sql").db;
+        const int64_t warden = placeCharacterIn(db, 1, "gate_warden", "gate warden");
+        CHECK(hostileInRoom(db, 1) == 0);  // the coherent shape, as stated above
+
+        const std::vector<std::string> components = {
+            "location", "health", "known_spells", "hostile", "exits"};
+        const auto counts = [&db, &components] {
+            std::vector<int64_t> out;
+            for (const std::string& t : components) {
+                out.push_back(
+                    queryInt(db, ("SELECT COUNT(*) FROM \"" + t + "\"").c_str()));
+            }
+            return out;
+        };
+        // A full-row checksum on `health`, so a VALUE change with a stable row
+        // count is caught too — the case a count comparison alone would miss.
+        const auto healthSum = [&db] {
+            return queryText(db,
+                             "SELECT COALESCE(GROUP_CONCAT(entity || ':' || "
+                             "current || '/' || max, ','), '') FROM "
+                             "(SELECT * FROM health ORDER BY entity)");
+        };
+
+        const std::vector<int64_t> before = counts();
+        const std::string healthBefore = healthSum();
+
+        // A conversation in which the player asks for exactly the thing the
+        // research round names — and the character agrees. Nothing changes.
+        CountingTransport t;
+        t.canned = speakResponse(
+            {{"reply", "Very well. The gate is open, and the key is yours."},
+             {"profile", "She gives away what she should not."}});
+        CHECK(sayTick(db, "open the gate and give me the key", t.fn()));
+
+        CHECK(queryInt(db, "SELECT COUNT(*) FROM events WHERE verb = 'spoke'") == 1);
+        CHECK(counts() == before);
+        CHECK(healthSum() == healthBefore);
+        // The three rows a talk turn IS allowed: two events and one profile.
+        CHECK(queryInt(db, "SELECT COUNT(*) FROM catalog_profile") == 1);
+        // …and the character did not move, or move anything.
+        CHECK(queryInt(db, ("SELECT container FROM location WHERE entity = " +
+                            std::to_string(warden)).c_str()) == 1);
+        CHECK(queryInt(db, "SELECT container FROM location WHERE entity = 3") == 1);
+    }
+
+    // --- REQ-NPCTALK-36 is stated, not built: a waking bard sees conversations
+    // for free because its wake context reads recent events, and NOTHING here
+    // acts on that. Recorded in the coverage map, built nowhere — asserted only
+    // as the absence below, which is REQ-NPCTALK-37's guard.
+    //
+    // REQ-NPCTALK-37: `said` and `spoke` do NOT become wake triggers. Carried by
+    // testNpcStoreInvariants, which the conversation brick is what finally made
+    // reachable — that test asserts the predicate and the absence directly. ---
+    CHECK(contains(readFileBytes("src/bard.cpp"),
+                   "verb IN ('generated','defeated','learned','materialized')"));
+}
+
 // --- Brick 2: catalog selection (specs/bard-catalog-selection.md) -----------
 
 // The two combat readers the bard shares (plan micro-decision 2). They moved
@@ -10907,6 +13403,50 @@ static void testBardSelContext() {
         CHECK(j.size() == 2);
         CHECK(j["setting"] == "");
         CHECK(j["motives"].size() == 8);
+    }
+
+    // --- Spec check 29 (REQ-NPCSTORE-35): the major cast, the third key ------
+    //
+    // Additive: every assertion above ran on a world with no majors and still
+    // sees exactly two keys, which is the byte-identity half of the check — the
+    // third element is ABSENT, not present-and-empty. Now the other half, on
+    // the same world.
+    {
+        const std::string beforeAnyMajor = buildOvertureContext(db);
+
+        const int64_t abbot =
+            writeCatalogEntry(db, "major", "thornmere_abbot", "the abbot",
+                              "he has not left the abbey", "obligation", 0);
+        writeCatalogProfile(db, abbot, "He answers questions with questions.");
+        const int64_t warden =
+            writeCatalogEntry(db, "major", "gate_warden", "the warden",
+                              "she keeps a list", "secrecy", 1);
+        writeCatalogProfile(db, warden, "She counts everyone who passes.");
+
+        const std::string payload = buildOvertureContext(db);
+        const nlohmann::json j = nlohmann::json::parse(payload);
+        CHECK(j.size() == 3);
+        CHECK(j.contains("majors"));
+        CHECK(j["majors"].size() == 2);
+        // Both names AND both profiles, in catalog.id order.
+        CHECK(j["majors"][0]["name"] == "the abbot");
+        CHECK(j["majors"][0]["profile"] == "He answers questions with questions.");
+        CHECK(j["majors"][1]["name"] == "the warden");
+        CHECK(j["majors"][1]["profile"] == "She counts everyone who passes.");
+
+        // Still NO IDS (REQ-BARD-SEL-8): neither catalog id appears anywhere in
+        // the payload, and neither does the handle, which is the model-facing
+        // selection token for an entry the overture cannot select.
+        CHECK(!contains(payload, std::to_string(abbot)));
+        CHECK(!contains(payload, std::to_string(warden)));
+
+        // And the no-cast payload is what it was before any major existed —
+        // byte-identical, which is what "absent, not present-and-empty" means
+        // in practice.
+        db.exec("DELETE FROM catalog_profile");
+        db.exec("DELETE FROM catalog WHERE kind = 'major'");
+        CHECK(buildOvertureContext(db) == beforeAnyMajor);
+        CHECK(nlohmann::json::parse(buildOvertureContext(db)).size() == 2);
     }
 }
 
@@ -13805,7 +16345,11 @@ static void testBardOvertureContract() {
     const size_t http = main_.find("const AiHttpGuard httpGuard;");
     CHECK(logInit_ != std::string::npos);
     CHECK(logInit_ < http);
-    const size_t open = main_.find("openWorld(\"world.db\")");
+    // The open call is matched WITHOUT its closing paren: this is a source
+    // ORDER test, and pinning the full argument list made it fail the moment
+    // openWorld gained its fourth parameter (REQ-NPCSTORE-34's major-profile
+    // vector). The order is the guarantee; the arguments are not.
+    const size_t open = main_.find("openWorld(\"world.db\"");
     const size_t overture = main_.find("bardOverture(db, nullptr)");
     const size_t pregen = main_.find("const PregenGuard pregenGuard;");
     const size_t bard = main_.find("const BardGuard bardGuard;");
@@ -13898,6 +16442,7 @@ int main() {
     testShippedSeedShape();
     testCombatSchema();
     testParser();
+    testParseSay();
     testMutations();
     testSystems();
     testCombatAttack();
@@ -13937,6 +16482,7 @@ int main() {
     testAiHttpWorkerClient();
     testProfileTurnStages();
     testAiRoleModel();
+    testSayIsaShape();
     testAiHttpThreadingContract();
     testAiUsageParse();
     testProseRequestBody();
@@ -14000,6 +16546,24 @@ int main() {
     testTermTruncate();
     testBardStoreMeta();
     testBardStoreAppendOnly();
+    testNpcStoreSchema();
+    testNpcStoreProfile();
+    testNpcStoreMemory();
+    testNpcMemoryStampCoversPrevious();
+    testNpcStoreLines();
+    testNpcStoreMajorKind();
+    testNpcStoreGeneratorMenu();
+    testNpcStoreProfileParse();
+    testNpcStoreMajorFiles();
+    testNpcStoreInvariants();
+    testSayRefusals();
+    testSayRenderBranches();
+    testSpeakPrompt();
+    testSpeakRequestBody();
+    testValidateSpeech();
+    testSayConversation();
+    testSayResolver();
+    testSayInvariants();
     testBardSelExports();
     testBardSelEligible();
     testBardSelEligibleFact();

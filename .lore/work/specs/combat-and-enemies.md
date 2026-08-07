@@ -1,7 +1,7 @@
 ---
 title: Combat system and enemies
 date: 2026-07-10
-status: draft
+status: implemented
 tags: [combat, enemies, spells, cooldowns, determinism, architect, bestiary, grimoires]
 modules: [systems, mutations, action, architect, render, prose, seed]
 related: [.lore/work/brainstorm/combat-and-enemies.md, .lore/reference/vision.md, .lore/work/brainstorm/mage-school-setting.md]

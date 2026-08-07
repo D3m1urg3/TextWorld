@@ -20,6 +20,7 @@
 #include "json.hpp"
 #include "log.hpp"
 #include "lookup.hpp"
+#include "npc.hpp"     // characterInRoom — a SELECT, for the scope payload
 
 namespace {
 
@@ -105,7 +106,7 @@ std::nullopt_t failClause(char clause, const char* why) {
     return std::nullopt;
 }
 
-// The twelve ISA verbs, and nothing else (clause b). nullopt for any other
+// The thirteen ISA verbs, and nothing else (clause b). nullopt for any other
 // word. This list and the tool enum below MUST stay element-wise identical;
 // the suite asserts it, because a verb in one and not the other is a silent
 // half-wiring rather than a compile error.
@@ -122,6 +123,7 @@ std::optional<Verb> verbFromWord(const std::string& word) {
     if (word == "read") return Verb::Read;
     if (word == "spells") return Verb::Spells;
     if (word == "examine") return Verb::Examine;
+    if (word == "say") return Verb::Say;
     return std::nullopt;
 }
 
@@ -140,17 +142,31 @@ std::optional<Verb> verbFromWord(const std::string& word) {
 // --- ISA system prompt (REQ-RESOLVE-12) -------------------------------------
 
 // Stable constant, versioned by git — this prompt IS the instruction-set
-// contract: it names all seven verbs, describes each non-overlappingly, and
+// contract: it names all thirteen verbs, describes each non-overlappingly, and
 // states every lowering rule. Prompt QUALITY is verified live (Step 9 /
 // spec AI-Validation item 3); the unit test here only pins its STRUCTURE by
 // substring, so it can never become a live tune-retry loop. Reword with care:
 // tests spot-check its phrases.
+//
+// THE ACTION-VERSUS-SPEECH BOUNDARY IS PROMPT-TUNING TERRITORY, and is stated
+// as such (REQ-NPCTALK-15a). No wording makes it crisp for every input, and two
+// prompts could both pass validation while disagreeing on unlisted phrasings.
+// What is CONTRACTUAL is the named regression set in testNlResolveLiveSmoke —
+// `take the key`, `go north`, `attack`, `cast ward`, `read grimoire`,
+// `examine candle`, `look`, `inventory`, each asserted to lower to its own verb
+// with a character present. Wording outside that set is tuned against real
+// play, not specified, and a passing suite is NOT a settled rule.
+//
+// Why an imprecise boundary is acceptable here and would not be for a rule that
+// wrote to the world: both directions of misclassification are recoverable by
+// retyping. The quiet direction is the one to watch — `take the key` read as
+// speech looks like the character ignoring you.
 const char* const kResolveSystemPrompt =
     R"(You translate a player's raw input line for a text adventure into exactly one action from a fixed instruction set, by calling the emit_action tool. You never write prose, answer questions, or speak to the player - your only output is a tool call, or none.
 
-Each user message is a JSON object of scope facts: "input" (the raw line to translate), "room" (the name of the room the player stands in), "exits" (the direction words leading out of it), "items" (the noun words of items visible in the room), "inventory" (the noun words of items the player carries), and "things" (the noun words of everything present in the room, including what cannot be picked up).
+Each user message is a JSON object of scope facts: "input" (the raw line to translate), "room" (the name of the room the player stands in), "exits" (the direction words leading out of it), "items" (the noun words of items visible in the room), "inventory" (the noun words of items the player carries), "things" (the noun words of everything present in the room, including what cannot be picked up), and - only when someone is there to speak to - "present_character" (the noun word of the character standing in the room with the player).
 
-The instruction set has exactly twelve verbs. Each is distinct; pick the single one the input means:
+The instruction set has exactly thirteen verbs. Each is distinct; pick the single one the input means:
 - look: the player surveys their surroundings. No argument.
 - go: the player moves out of the room in a direction. Set "direction" to the movement or compass word (for example north, south, up, in).
 - take: the player picks an item up off the floor into hand. Set "subject" to the item's noun word.
@@ -163,11 +179,12 @@ The instruction set has exactly twelve verbs. Each is distinct; pick the single 
 - read: the player reads a book or grimoire to study it (for example "read the grimoire", "study the tome"). Set "subject" to the item's noun word.
 - spells: the player asks what their known spells do - the rules, not an action in the world (for example "what do my spells do", "spell list", "how does ward work"). No argument.
 - examine: the player looks closely at one thing that is present, to see what it is like (for example "examine the candle", "look at the goblin", "inspect the desk"). Set "subject" to that thing's noun word. Use look, not examine, when the player surveys the whole room.
+- say: the player speaks aloud to the character present in the room (for example "hello", "who are you", "ask her about the gate", "tell him I found the key", "what is behind that door"). No argument - the engine takes the player's own words and finds the character. Only available when "present_character" is supplied.
 
 Rules, absolute:
 - Translate the input to exactly one action and emit it with a single emit_action call. Never emit more than one action; if the line asks for several, make no call.
 - A "subject" must be one of the noun words supplied in "items", "inventory", or "things", copied verbatim. A "direction" for go must be a movement or compass word. Introduce no noun that is absent from the scope facts.
-- If the input is a question, chatter, an unknown verb, or anything that is not one of these seven single actions, make no tool call at all. When in doubt, make no call.
+- If the input is a question, chatter, an unknown verb, or anything that is not one of these single actions, make no tool call at all. When in doubt, make no call. This rule changes when "present_character" is supplied. Then the player can speak to that character, and the ordering is: first, if the line clearly means one of the other twelve actions, emit that action; only if it does not, emit say. A question, a greeting, or chatter is speech. A line naming an item, a direction, or a spell is an action, not speech, even when it is phrased politely.
 - Resolve no pronouns or references: "it", "them", "the one on the table" are not supported. The noun word must appear in the input line itself.
 - Judge recognition only, never applicability: whether an item is reachable or an exit is open is not your concern. Emit the action the words mean; the engine decides whether it applies.)";
 
@@ -190,6 +207,17 @@ ResolveContext buildResolveContext(Db& db, const std::string& line) {
     // the player, none of which are portable. Nouns only, no ids
     // (REQ-EXAMINE-22).
     payload["things"] = json(namedEntitiesIn(db, room));
+    // The seventh key (REQ-NPCTALK-12), present ONLY when there is someone to
+    // speak to — absent, never present-and-empty, so the prompt's conditional
+    // rule turns on the key's existence rather than on a sentinel value. Its
+    // presence is what makes `say` available at all; with no character the
+    // resolver behaves byte-identically to before this brick. This is the one
+    // place nlresolve reaches into npc.hpp, and it is a SELECT-only call, so
+    // the unit's read-only contract holds. The character's NOUN travels, never
+    // its id (REQ-RESOLVE-6).
+    if (const int64_t character = characterInRoom(db, room); character != 0) {
+        payload["present_character"] = nameOf(db, character);
+    }
 
     ResolveContext ctx;
     ctx.payload = payload.dump();
@@ -205,8 +233,12 @@ std::string buildResolveRequestBody(const std::string& contextPayload) {
     const std::string model = modelForRole(AiRole::Resolve);
 
     // The single emit_action tool (REQ-RESOLVE-8): a schema-enforced verb enum
-    // of exactly the ten ISA verbs, plus optional subject / direction. Only
-    // `verb` is required — bare verbs carry neither argument.
+    // of exactly the thirteen ISA verbs, plus optional subject / direction.
+    // Only `verb` is required — bare verbs carry neither argument. There is
+    // deliberately NO text property (REQ-NPCTALK-6): the player's words never
+    // travel on the wire in either direction, so the model cannot paraphrase,
+    // tidy, or translate what was typed and have the character answer something
+    // the player did not say. The engine uses the raw line it already holds.
     json emitAction;
     emitAction["name"] = "emit_action";
     emitAction["description"] =
@@ -218,7 +250,7 @@ std::string buildResolveRequestBody(const std::string& contextPayload) {
         {"type", "string"},
         {"enum", json::array({"look", "go", "take", "drop", "inventory",
                               "wait", "quit", "attack", "cast", "read",
-                              "spells", "examine"})},
+                              "spells", "examine", "say"})},
         {"description", "The single ISA verb the input means."}};
     properties["subject"] = {
         {"type", "string"},
@@ -360,7 +392,13 @@ std::optional<Action> validateAndLower(const HttpResponse& response, Db& db) {
         case Verb::Quit:
         case Verb::Attack:
         case Verb::Spells:
+        case Verb::Say:
             // Clause e: argument-free — any stray subject/direction is ignored.
+            // Say joins this group deliberately (REQ-NPCTALK-13): a `subject`
+            // or a text argument the model supplied anyway falls in here and is
+            // dropped. action.text is NOT set here — validateAndLower never
+            // receives the line, so aiResolve sets it below, from the engine's
+            // own copy.
             // Attack targets the hostile in the room (subject stays 0); the
             // model recognizes the intent, the engine finds the foe.
             break;
@@ -379,7 +417,14 @@ std::optional<Action> aiResolve(Db& db, const std::string& line,
         const HttpResponse resp = transport(buildResolveRequestBody(ctx.payload));
         // validateAndLower never throws and emits its own clause diagnostic on
         // rejection; a clean no-tool-call returns nullopt silently.
-        return validateAndLower(resp, db);
+        std::optional<Action> action = validateAndLower(resp, db);
+        // The spoken text is the WHOLE RAW LINE, taken from the engine's own
+        // copy of it (REQ-NPCTALK-6). It is set here rather than in
+        // validateAndLower because that function never receives the line — and
+        // it is never read out of a model response, so a model cannot
+        // paraphrase what the player said and have the character answer that.
+        if (action && action->verb == Verb::Say) action->text = line;
+        return action;
     } catch (const std::exception& e) {
         // WARN, not ERROR: the turn still resolves, just through the
         // deterministic parser. The exception message is a failure reason —

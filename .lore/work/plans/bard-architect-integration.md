@@ -1,7 +1,7 @@
 ---
 title: "Implementation plan: bard-architect-integration"
 date: 2026-08-04
-status: approved
+status: executed
 tags: [plan, bard, architect, materialization, world-gen, nouns-must-exist, catalog, pregen, non-regression]
 modules: [architect, bard, mutations, pregen]
 related: [.lore/work/specs/bard-architect-integration.md, .lore/work/design/bard-architect-integration.md, .lore/work/specs/bard-fact-store.md, .lore/work/specs/bard-catalog-selection.md, .lore/work/specs/bard-overture-and-scheduling.md, .lore/work/specs/background-room-pregeneration.md]

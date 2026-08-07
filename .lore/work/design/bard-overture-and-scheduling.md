@@ -1,7 +1,7 @@
 ---
 title: "The overture and wake scheduling"
 date: 2026-08-03
-status: approved
+status: implemented
 tags: [bard, dungeon-master, cadence, scheduling, threading, worker, coalescing, overture, degradation, shutdown-ordering]
 modules: [bard, pregen, main, loop, world]
 related: [.lore/work/design/bard-fact-store.md, .lore/work/design/bard-catalog-selection.md, .lore/work/brainstorm/dungeon-master.md, .lore/work/specs/background-room-pregeneration.md]

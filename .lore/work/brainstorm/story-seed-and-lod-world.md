@@ -1,7 +1,7 @@
 ---
 title: Story seed + LOD world generation — the fact-store model
 date: 2026-07-09
-status: open
+status: resolved
 tags: [ai-integration, story-seed, world-generation, level-of-detail, persistence, bounded-context, architect, bard, canon-facts]
 modules: [world-gen, story, render, mutations]
 related: [.lore/work/brainstorm/ai-integration-points.md, .lore/vision.md, .lore/work/specs/ai-prose-renderer.md, .lore/work/specs/ai-resolver.md]

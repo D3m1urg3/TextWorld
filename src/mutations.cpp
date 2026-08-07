@@ -574,8 +574,13 @@ int64_t writeCatalogEntry(Db& db, const std::string& kind,
     const auto refuse = [](const std::string& why) {
         throw std::runtime_error("writeCatalogEntry: " + why);
     };
-    if (kind != "character" && kind != "beat") {
-        refuse("kind must be 'character' or 'beat', got '" + kind + "'");
+    // 'major' is hand-authored and loaded at world creation; it never arrives
+    // from the model. The MODEL-FACING check in bard.cpp's catalogEntryRefusal
+    // deliberately does NOT admit it, and the divergence is the point
+    // (REQ-NPCSTORE-24) — this helper is the engine's write path, that one is
+    // the wire's admission gate.
+    if (kind != "character" && kind != "beat" && kind != "major") {
+        refuse("kind must be 'character', 'beat', or 'major', got '" + kind + "'");
     }
     // Trim first, then test: a whitespace-only handle is empty (REQ-BARD-STORE-9).
     const std::string trimmedHandle = trimAscii(handle);
@@ -751,4 +756,111 @@ void writeBardWakeTurn(Db& db, int64_t turn) {
         "ON CONFLICT(key) DO UPDATE SET value = excluded.value");
     s.bind(1, turn);
     s.step();
+}
+
+// --- The NPC memory store (specs/npc-memory-store.md) ------------------------
+
+bool writeCatalogProfile(Db& db, int64_t catalog, const std::string& profile) {
+    // ONE statement, BOTH guards in SQL. `OR IGNORE` is the write-once latch
+    // (REQ-NPCSTORE-11); the EXISTS clause is the orphan refusal
+    // (REQ-NPCSTORE-14). No prior read — the learnSpell / markCatalogSeeded
+    // idempotence shape — and, the point, no UPDATE against this table appears
+    // anywhere in the source, so REQ-NPCSTORE-36 holds by construction rather
+    // than by discipline.
+    Stmt ins = db.prepare(
+        "INSERT OR IGNORE INTO catalog_profile(catalog, profile) "
+        "SELECT ?, ? WHERE EXISTS(SELECT 1 FROM catalog WHERE id = ?)");
+    ins.bind(1, catalog);
+    // Cut by code point, never by byte: a half character here would store
+    // invalid UTF-8 into a string that is re-sent inside a JSON prompt on every
+    // conversation call (REQ-NPCSTORE-17, the writeBardFocus precedent).
+    ins.bind(2, utf8Truncate(profile, kProfileCap));
+    ins.bind(3, catalog);
+    ins.step();
+    return db.changes() != 0;  // false = already written, or no such entry
+}
+
+void writeNpcMemory(Db& db, int64_t entity, const std::string& summary) {
+    // Free rewrite, upsertMeta's shape: a second call REPLACES, never appends
+    // (REQ-NPCSTORE-15). Upsert rather than UPDATE because the row is NOT
+    // pre-created at materialisation (REQ-NPCSTORE-9) — there is deliberately
+    // no row to branch on.
+    Stmt s = db.prepare(
+        "INSERT INTO npc_memory(entity, summary, summary_turn) VALUES (?, ?, ?) "
+        "ON CONFLICT(entity) DO UPDATE SET "
+        "summary = excluded.summary, summary_turn = excluded.summary_turn");
+    s.bind(1, entity);
+    s.bind(2, utf8Truncate(summary, kSummaryCap));
+    // The stamp is the turn the summary COVERS TO, and that is always the turn
+    // BEFORE this one (REQ-NPCTALK-29a). The summary is written by the model
+    // from the lines it was handed, in the same call that produces this turn's
+    // reply — so it cannot cover this turn's own exchange, and stamping the
+    // current turn would make that exchange invisible to every future
+    // npcLinesSince read (it filters on turn > summary_turn). This is the one
+    // place where an off-by-one silently loses a conversation instead of
+    // failing. Still read here rather than passed in (REQ-NPCSTORE-8): no
+    // caller gets to choose the stamp.
+    const int64_t covers = currentTurn(db) - 1;
+    s.bind(3, covers < 0 ? 0 : covers);
+    s.step();
+}
+
+std::string npcProfile(Db& db, int64_t entity) {
+    // Through the entity's CATALOG row: the profile is keyed by catalog id, so
+    // a major character's profile written at world creation still reads back
+    // once its entity exists (REQ-NPCSTORE-19).
+    Stmt s = db.prepare(
+        "SELECT p.profile FROM catalog c "
+        "JOIN catalog_profile p ON p.catalog = c.id WHERE c.entity = ?");
+    s.bind(1, entity);
+    if (!s.step()) return "";  // normal and common, never an error
+    return s.colText(0);
+}
+
+NpcMemory npcMemory(Db& db, int64_t entity) {
+    Stmt s = db.prepare(
+        "SELECT summary, summary_turn FROM npc_memory WHERE entity = ?");
+    s.bind(1, entity);
+    if (!s.step()) return {};  // {"", 0} — no row is not an error
+    return {s.colText(0), s.colInt(1)};
+}
+
+std::vector<SpeechLine> npcLinesSince(Db& db, int64_t entity) {
+    const int64_t since = npcMemory(db, entity).summaryTurn;  // 0 when no row
+
+    // Newest-first with a LIMIT selects the recent TAIL, which is what
+    // REQ-NPCSTORE-21 asks for. The LIMIT is kLineCap + 1: that extra row is a
+    // PROBE, not content. Its presence is the proof that the cap actually cut
+    // something, which is what tells REQ-NPCSTORE-21a's orphaned `spoke` apart
+    // from a legitimate leading `spoke` whose paired `said` simply predates
+    // summary_turn. A guess based on "did we get exactly kLineCap rows" would
+    // wrongly drop the legitimate one.
+    std::vector<SpeechLine> newestFirst;
+    {
+        Stmt s = db.prepare(
+            "SELECT verb, detail FROM events "
+            " WHERE verb IN ('said','spoke') "
+            "   AND (actor = ? OR subject = ?) "
+            "   AND turn > ? "
+            " ORDER BY id DESC LIMIT ?");
+        s.bind(1, entity);
+        s.bind(2, entity);
+        s.bind(3, since);
+        s.bind(4, kLineCap + 1);
+        while (s.step()) newestFirst.push_back({s.colText(0), s.colText(1)});
+    }
+
+    const bool capBit = static_cast<int64_t>(newestFirst.size()) > kLineCap;
+    if (capBit) newestFirst.pop_back();  // discard the probe (the oldest row)
+
+    std::vector<SpeechLine> lines(newestFirst.rbegin(), newestFirst.rend());
+
+    // A reply without its question, handed back only because the cut landed
+    // between the pair. A trailing `said` with no `spoke` is NOT symmetric with
+    // this and is deliberately kept: that is a failed reply, and hiding it
+    // would make the character unaware it was spoken to.
+    if (capBit && !lines.empty() && lines.front().verb == "spoke") {
+        lines.erase(lines.begin());
+    }
+    return lines;
 }
