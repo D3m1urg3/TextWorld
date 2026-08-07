@@ -1,7 +1,7 @@
 ---
 title: Engine foundation — C++, from-scratch ECS-lite, SQLite as the world
 date: 2026-07-05
-status: open
+status: resolved
 tags: [architecture, ecs, sqlite, data-oriented, cpp, foundation, turn-loop]
 modules: [engine]
 related: [.lore/brainstorm/ai-driven-text-adventure.md, .lore/vision.md]

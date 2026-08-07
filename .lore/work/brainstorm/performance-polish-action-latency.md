@@ -1,7 +1,7 @@
 ---
 title: "Performance polish: profiling action latency before optimizing"
 date: 2026-07-26
-status: open
+status: resolved
 tags: [performance, latency, profiling, ai-calls, prompt-caching, cost]
 modules: [loop, nlresolve, prose, architect]
 ---

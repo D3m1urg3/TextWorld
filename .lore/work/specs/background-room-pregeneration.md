@@ -1,7 +1,7 @@
 ---
 title: "Background room pregeneration: candidates for the latent exits"
 date: 2026-08-01
-status: draft
+status: implemented
 tags: [performance, latency, pregeneration, prefetch, threading, architect, profiling]
 modules: [pregen, loop, architect, mutations, aihttp, profile]
 related: [.lore/work/brainstorm/background-room-pregeneration.md, .lore/work/specs/turn-latency-polish.md, .lore/work/validation/turn-latency-polish/findings.md]

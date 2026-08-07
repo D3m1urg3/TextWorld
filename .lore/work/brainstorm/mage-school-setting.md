@@ -1,7 +1,7 @@
 ---
 title: Mage-school setting and initial rooms
 date: 2026-07-09
-status: open
+status: resolved
 tags: [setting, seed, worldbuilding, mage-school, initial-rooms]
 modules: [seed, architect]
 related: [.lore/work/brainstorm/ai-integration-points.md]

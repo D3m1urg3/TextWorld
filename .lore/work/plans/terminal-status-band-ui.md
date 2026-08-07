@@ -1,7 +1,7 @@
 ---
 title: "Implementation plan: terminal-status-band-ui"
 date: 2026-08-02
-status: approved
+status: executed
 tags: [plan, ui, terminal, ansi-color, no-color, status-band, prose-wrapping, combat-legibility, resistance-discovery]
 modules: [term, band, render, loop, combat, main, mutations]
 related: [.lore/work/specs/terminal-status-band-ui.md, .lore/work/research/terminal-ui-status-band.md, .lore/work/brainstorm/ui-improvements.md]

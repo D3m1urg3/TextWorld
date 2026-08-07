@@ -1,7 +1,7 @@
 ---
 title: "examine — the perception verb"
 date: 2026-08-06
-status: approved
+status: implemented
 tags: [examine, isa, perception, canon-description, scope, narration, template-fallback]
 modules: [parser, systems, render, prose, nlresolve, mutations]
 related: [.lore/work/brainstorm/npcs.md, .lore/work/research/llm-npc-dialogue-and-memory.md, .lore/work/design/bard-architect-integration.md, .lore/vision.md]

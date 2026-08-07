@@ -1,7 +1,7 @@
 ---
 title: "Catalog selection and the model interface"
 date: 2026-08-03
-status: approved
+status: implemented
 tags: [bard, dungeon-master, catalog, eligibility, tool-use, validation-gate, wire-format, storylets, degradation]
 modules: [bard, combat, architect, mutations]
 related: [.lore/work/design/bard-fact-store.md, .lore/work/brainstorm/dungeon-master.md, .lore/work/research/drama-manager-prior-art.md, .lore/work/specs/combat-and-enemies.md, .lore/work/specs/ai-prose-renderer.md]

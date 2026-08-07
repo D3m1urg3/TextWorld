@@ -1,7 +1,7 @@
 ---
 title: Blocked directions + truthful exit display — requirements
 date: 2026-07-09
-status: draft
+status: implemented
 tags: [world-generation, exits, blocked-directions, exit-display, architect, latent-exits, render, mutations, requirements]
 modules: [world-gen, architect, systems, render, mutations, world]
 related: [.lore/work/brainstorm/blocked-directions-and-exit-display.md, .lore/work/research/procedural-room-feel.md, .lore/work/specs/story-seed-architect.md, .lore/work/brainstorm/story-seed-and-lod-world.md]

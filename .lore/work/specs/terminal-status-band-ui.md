@@ -1,7 +1,7 @@
 ---
 title: Terminal status band UI
 date: 2026-08-02
-status: approved
+status: implemented
 tags: [ui, terminal, ansi-color, no-color, status-band, prose-wrapping, combat-legibility, resistance-discovery]
 modules: [render, loop, combat, main, world]
 related: [.lore/work/brainstorm/ui-improvements.md, .lore/work/research/terminal-ui-status-band.md, .lore/work/specs/combat-and-enemies.md]

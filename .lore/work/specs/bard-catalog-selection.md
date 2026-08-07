@@ -1,7 +1,7 @@
 ---
 title: "Bard catalog selection: eligibility, wire format, and validation"
 date: 2026-08-03
-status: draft
+status: implemented
 tags: [bard, dungeon-master, eligibility, tool-use, validation-gate, wire-format, degradation, determinism]
 modules: [bard, combat, mutations]
 related: [.lore/work/design/bard-catalog-selection.md, .lore/work/specs/bard-fact-store.md, .lore/work/specs/combat-and-enemies.md]

@@ -1,7 +1,7 @@
 ---
 title: "The bard's fact store: lanes, catalog schema, and write rules"
 date: 2026-08-03
-status: approved
+status: implemented
 tags: [bard, dungeon-master, schema, fact-store, catalog, storylets, level-of-detail, placeholders, mutations, append-only, retcon]
 modules: [bard, mutations, world, architect, combat]
 related: [.lore/work/brainstorm/dungeon-master.md, .lore/work/design/story-seed-architect.md, .lore/work/research/drama-manager-prior-art.md, .lore/work/specs/combat-and-enemies.md, .lore/vision.md]

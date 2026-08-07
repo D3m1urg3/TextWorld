@@ -1,7 +1,7 @@
 ---
 title: Story seed + architect — interface and fact-store design
 date: 2026-07-09
-status: draft
+status: implemented
 tags: [ai-integration, story-seed, world-generation, architect, bard, fact-store, schema, level-of-detail, persistence, bounded-context]
 modules: [world-gen, architect, systems, mutations, world]
 related: [.lore/work/brainstorm/story-seed-and-lod-world.md, .lore/vision.md, .lore/work/specs/ai-prose-renderer.md, .lore/work/specs/ai-resolver.md, .lore/work/design/engine-foundation.md]

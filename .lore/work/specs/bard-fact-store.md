@@ -1,7 +1,7 @@
 ---
 title: "Bard fact store: schema, helpers, and write rules"
 date: 2026-08-03
-status: draft
+status: implemented
 tags: [bard, dungeon-master, schema, catalog, mutations, append-only, motive, truth-gate, migration]
 modules: [world, mutations, combat]
 related: [.lore/work/design/bard-fact-store.md, .lore/work/design/bard-architect-integration.md, .lore/work/brainstorm/dungeon-master.md]

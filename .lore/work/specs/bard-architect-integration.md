@@ -1,7 +1,7 @@
 ---
 title: "Bard architect integration: materializing story into rooms"
 date: 2026-08-03
-status: draft
+status: implemented
 tags: [bard, architect, materialization, world-gen, nouns-must-exist, catalog, pregen, context]
 modules: [architect, bard, mutations, pregen]
 related: [.lore/work/design/bard-architect-integration.md, .lore/work/specs/bard-fact-store.md, .lore/work/specs/bard-catalog-selection.md, .lore/work/specs/background-room-pregeneration.md, .lore/work/specs/ai-prose-renderer.md]
