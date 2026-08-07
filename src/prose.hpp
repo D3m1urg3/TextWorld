@@ -33,6 +33,13 @@ struct TurnFacts {
     // Detail texts of this turn's 'failed' events (REQ-PROSE-12b): each must
     // appear verbatim in AI output, checked by the later validation step.
     std::vector<std::string> failedDetails;
+    // Canon prose of an entity examined this turn (REQ-EXAMINE-25), verbatim
+    // from the description table. EMPTY means clause f DOES NOT APPLY — either
+    // no 'examined' event this turn, or the examined entity has no description
+    // row (REQ-EXAMINE-25a). It never means "the empty string was not found":
+    // requiring the template's fallback line verbatim would pin AI output to
+    // template wording, the opposite of what every other verb does.
+    std::string examinedText;
 };
 
 // Pure function of (db, turn): SELECTs only, no network, no globals. The room
@@ -68,10 +75,12 @@ std::string buildRequestBody(const std::string& factsPayload);
 //      text is non-empty;
 //   c. if facts.canonRequired: facts.canonText appears as an EXACT substring;
 //   d. EVERY facts.failedDetails entry appears as an EXACT substring;
-//   e. text length <= 1200 characters.
+//   e. text length <= 1200 characters;
+//   f. if facts.examinedText is NON-EMPTY: it appears as an EXACT substring.
+//      An empty examinedText means the clause does not apply (REQ-EXAMINE-25a).
 // Consumes ONLY the anchor fields of TurnFacts (payload is ignored). On
 // failure it emits one stderr diagnostic line naming the first failed clause
-// in a..e order; nothing is ever appended to the returned prose.
+// in a..f order; nothing is ever appended to the returned prose.
 std::optional<std::string> validateAiResponse(const HttpResponse& response,
                                               const TurnFacts& facts);
 

@@ -78,6 +78,22 @@ std::vector<std::string> portableNamesIn(Db& db, int64_t holder) {
     return items;
 }
 
+// Noun words of ALL named entities in a room, portable or not, in entity order
+// (REQ-EXAMINE-19). Wider than portableNamesIn deliberately: enemies,
+// characters, and fixed scenery are examinable and none of them are portable.
+// The player is included — their container is the room and no case excludes
+// them (REQ-EXAMINE-9), so the resolver can lower "look at myself".
+std::vector<std::string> namedEntitiesIn(Db& db, int64_t room) {
+    std::vector<std::string> names;
+    Stmt s = db.prepare(
+        "SELECT n.value FROM name n "
+        "JOIN location l ON l.entity = n.entity "
+        "WHERE l.container = ? ORDER BY n.entity");
+    s.bind(1, room);
+    while (s.step()) names.push_back(s.colText(0));
+    return names;
+}
+
 // --- validation gate helpers (REQ-RESOLVE-13) -------------------------------
 
 // One diagnostic line per rejected response, naming the first failed clause in
@@ -89,7 +105,7 @@ std::nullopt_t failClause(char clause, const char* why) {
     return std::nullopt;
 }
 
-// The eleven ISA verbs, and nothing else (clause b). nullopt for any other
+// The twelve ISA verbs, and nothing else (clause b). nullopt for any other
 // word. This list and the tool enum below MUST stay element-wise identical;
 // the suite asserts it, because a verb in one and not the other is a silent
 // half-wiring rather than a compile error.
@@ -105,6 +121,7 @@ std::optional<Verb> verbFromWord(const std::string& word) {
     if (word == "cast") return Verb::Cast;
     if (word == "read") return Verb::Read;
     if (word == "spells") return Verb::Spells;
+    if (word == "examine") return Verb::Examine;
     return std::nullopt;
 }
 
@@ -131,9 +148,9 @@ std::optional<Verb> verbFromWord(const std::string& word) {
 const char* const kResolveSystemPrompt =
     R"(You translate a player's raw input line for a text adventure into exactly one action from a fixed instruction set, by calling the emit_action tool. You never write prose, answer questions, or speak to the player - your only output is a tool call, or none.
 
-Each user message is a JSON object of scope facts: "input" (the raw line to translate), "room" (the name of the room the player stands in), "exits" (the direction words leading out of it), "items" (the noun words of items visible in the room), and "inventory" (the noun words of items the player carries).
+Each user message is a JSON object of scope facts: "input" (the raw line to translate), "room" (the name of the room the player stands in), "exits" (the direction words leading out of it), "items" (the noun words of items visible in the room), "inventory" (the noun words of items the player carries), and "things" (the noun words of everything present in the room, including what cannot be picked up).
 
-The instruction set has exactly eleven verbs. Each is distinct; pick the single one the input means:
+The instruction set has exactly twelve verbs. Each is distinct; pick the single one the input means:
 - look: the player surveys their surroundings. No argument.
 - go: the player moves out of the room in a direction. Set "direction" to the movement or compass word (for example north, south, up, in).
 - take: the player picks an item up off the floor into hand. Set "subject" to the item's noun word.
@@ -145,10 +162,11 @@ The instruction set has exactly eleven verbs. Each is distinct; pick the single 
 - cast: the player invokes a spell by name (for example "cast ward", "burn it", "freeze the thing", "shield"). Set "subject" to the spell's name word.
 - read: the player reads a book or grimoire to study it (for example "read the grimoire", "study the tome"). Set "subject" to the item's noun word.
 - spells: the player asks what their known spells do - the rules, not an action in the world (for example "what do my spells do", "spell list", "how does ward work"). No argument.
+- examine: the player looks closely at one thing that is present, to see what it is like (for example "examine the candle", "look at the goblin", "inspect the desk"). Set "subject" to that thing's noun word. Use look, not examine, when the player surveys the whole room.
 
 Rules, absolute:
 - Translate the input to exactly one action and emit it with a single emit_action call. Never emit more than one action; if the line asks for several, make no call.
-- A "subject" must be one of the noun words supplied in "items" or "inventory", copied verbatim. A "direction" for go must be a movement or compass word. Introduce no noun that is absent from the scope facts.
+- A "subject" must be one of the noun words supplied in "items", "inventory", or "things", copied verbatim. A "direction" for go must be a movement or compass word. Introduce no noun that is absent from the scope facts.
 - If the input is a question, chatter, an unknown verb, or anything that is not one of these seven single actions, make no tool call at all. When in doubt, make no call.
 - Resolve no pronouns or references: "it", "them", "the one on the table" are not supported. The noun word must appear in the input line itself.
 - Judge recognition only, never applicability: whether an item is reachable or an exit is open is not your concern. Emit the action the words mean; the engine decides whether it applies.)";
@@ -166,6 +184,12 @@ ResolveContext buildResolveContext(Db& db, const std::string& line) {
     payload["exits"] = json(exitsOf(db, room));
     payload["items"] = json(portableNamesIn(db, room));
     payload["inventory"] = json(portableNamesIn(db, actor));
+    // The sixth key (REQ-EXAMINE-19). `items` keeps its current meaning and
+    // contents exactly, so nothing that reads it changes behavior; `things` is
+    // the wider list examine needs — enemies, characters, fixed scenery, and
+    // the player, none of which are portable. Nouns only, no ids
+    // (REQ-EXAMINE-22).
+    payload["things"] = json(namedEntitiesIn(db, room));
 
     ResolveContext ctx;
     ctx.payload = payload.dump();
@@ -194,13 +218,15 @@ std::string buildResolveRequestBody(const std::string& contextPayload) {
         {"type", "string"},
         {"enum", json::array({"look", "go", "take", "drop", "inventory",
                               "wait", "quit", "attack", "cast", "read",
-                              "spells"})},
+                              "spells", "examine"})},
         {"description", "The single ISA verb the input means."}};
     properties["subject"] = {
         {"type", "string"},
         {"description",
          "For take/drop/read: the item's noun word, copied verbatim from the "
-         "supplied items or inventory. For cast: the spell's name word."}};
+         "supplied items or inventory. For examine: the noun word of the thing "
+         "being looked at, copied verbatim from items, inventory, or things. "
+         "For cast: the spell's name word."}};
     properties["direction"] = {
         {"type", "string"},
         {"description", "For go: the movement or compass word."}};
@@ -284,13 +310,16 @@ std::optional<Action> validateAndLower(const HttpResponse& response, Db& db) {
     switch (*verb) {
         case Verb::Take:
         case Verb::Drop:
-        case Verb::Read: {
+        case Verb::Read:
+        case Verb::Examine: {
             // Clause c: subject present, and recognized world-wide. The id is
             // assigned MECHANICALLY by lookupNoun, never read from the model.
             // Recognition only — whether the item is in scope is the engine's
-            // tier-b job, not this gate's.
+            // tier-b job, not this gate's. Examine takes the same treatment:
+            // its subject is a noun word copied out of items, inventory, or
+            // things, lowered to an id by the same first-match rule.
             if (!input.contains("subject") || !input["subject"].is_string()) {
-                return failClause('c', "take/drop/read has no subject");
+                return failClause('c', "take/drop/read/examine has no subject");
             }
             const int64_t entity =
                 lookupNoun(db, input["subject"].get<std::string>());

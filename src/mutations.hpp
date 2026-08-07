@@ -7,7 +7,7 @@
 //   - These helpers never begin/commit/rollback. The caller owns the
 //     transaction boundary (typically one transaction per turn).
 //   - `appendEvent` alone (no component write) is legal ONLY for the
-//     no-write verbs: 'looked', 'waited', 'failed'.
+//     no-write verbs: 'looked', 'waited', 'failed', 'examined'.
 //   - ALL other world mutation goes through these helpers; systems code
 //     never runs raw SQL writes against component tables or `events`. The
 //     'generated' verb is helper-issued too: it is written ONLY by

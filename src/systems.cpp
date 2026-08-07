@@ -177,6 +177,24 @@ void resolveTake(Db& db, const Action& action, int64_t player) {
     }
 }
 
+// Perception (REQ-EXAMINE-7): in scope iff the subject stands in the player's
+// room or is carried by the player. Deliberately NO isPortable check — that is
+// the whole difference from take, and it is what makes enemies, characters, and
+// fixed scenery examinable. No description is read here: the text is the
+// renderer's job (REQ-EXAMINE-10/-11), so this writes one event row and nothing
+// else (REQ-EXAMINE-28).
+void resolveExamine(Db& db, const Action& action, int64_t player) {
+    const int64_t room = roomOf(db, player);
+    const std::optional<int64_t> where = containerOf(db, action.subject);
+    if (!where || (*where != room && *where != player)) {
+        // The string resolveTake already uses (REQ-EXAMINE-8) — no new refusal
+        // wording enters the game with this verb.
+        appendEvent(db, player, "failed", 0, 0, "You don't see that here.");
+    } else {
+        appendEvent(db, player, "examined", action.subject, 0, nullptr);
+    }
+}
+
 void resolveDrop(Db& db, const Action& action, int64_t player) {
     const std::optional<int64_t> where = containerOf(db, action.subject);
     if (!where || *where != player) {
@@ -221,6 +239,9 @@ void resolveImpl(Db& db, const Action& action, int64_t player,
             break;
         case Verb::Read:
             resolveRead(db, player, action.subject);
+            break;
+        case Verb::Examine:
+            resolveExamine(db, action, player);
             break;
         case Verb::Quit:
             // Quit is handled by the game loop BEFORE the tick transaction is

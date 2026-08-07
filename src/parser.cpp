@@ -82,6 +82,21 @@ std::optional<Action> parse(Db& db, const std::string& line) {
         return a;
     }
 
+    // Look at one thing (REQ-EXAMINE-3): "examine <noun>", or its shorthand "x".
+    // `look` is deliberately NOT extended — it keeps ignoring its argument
+    // (REQ-EXAMINE-4), so "look at the candle" still just looks. Natural
+    // phrasings that mean examination are the AI resolver's job, never this
+    // parser's. Recognition only: whether the noun is in SCOPE is resolution's
+    // decision, so no portability or container check happens here.
+    if (verbWord == "examine" || verbWord == "x") {
+        if (arg.empty()) return std::nullopt;  // bare verb, REQ-PROTO-6a
+        const int64_t entity = lookupNoun(db, arg);
+        if (entity == 0) return std::nullopt;  // not a noun anywhere in world
+        Action a{Verb::Examine};
+        a.subject = entity;
+        return a;
+    }
+
     // Cast a spell (REQ-COMBAT-7): "cast <spell>". Recognition only — the word
     // must name a catalogued spell; whether it is learned or off cooldown is the
     // engine's gate, not the parser's.

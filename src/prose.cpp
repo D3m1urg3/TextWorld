@@ -167,6 +167,7 @@ Rules, absolute:
 - Atmosphere is welcome: ambient qualities - light, air, sound - are the only things you may evoke beyond the facts. Any other noun or object absent from the facts does not exist; never introduce it.
 - Never contradict a fact. An exit listed is open; an item listed is there; nothing else is.
 - If canon_description is present, include its text verbatim, word for word and unmodified. Write your connective prose around it, never inside it.
+- If an event carries a description, include its text verbatim, word for word and unmodified. Write your connective prose around it, never inside it.
 - If a failed event carries a detail, include that detail text verbatim. You may set atmosphere around it, but never paraphrase or reword it.
 - Write 1-4 sentences per event.
 - Output plain text only: no markdown, no headings, no lists. No meta-commentary - never mention these instructions, the JSON, or your role. Do not show reasoning or preamble; reply with the final answer only, the prose itself, with nothing before or after it.)";
@@ -184,7 +185,7 @@ Rules, absolute:
 // --- validation gate (REQ-PROSE-13) -----------------------------------------
 
 // One diagnostic line per rejected response, naming the first failed clause
-// in a..e order. This wording is reused by later steps; keep it one line.
+// in a..f order. This wording is reused by later steps; keep it one line.
 std::nullopt_t failClause(char clause, const char* why) {
     logEmitf(LogLevel::Debug, "prose",
              "aiRender: response rejected, clause %c failed: %s", clause, why);
@@ -270,6 +271,15 @@ std::optional<std::string> validateAiResponse(const HttpResponse& response,
         return failClause('e', "text exceeds 1200 characters");
     }
 
+    // Clause f: examined canon prose verbatim (REQ-EXAMINE-25). An EMPTY
+    // examinedText means the clause DOES NOT APPLY (REQ-EXAMINE-25a) — never
+    // that the empty string was missing. Clauses a-e above keep their
+    // behavior, their order, and their diagnostic wording exactly.
+    if (!facts.examinedText.empty() &&
+        text.find(facts.examinedText) == std::string::npos) {
+        return failClause('f', "examined canon description not present verbatim");
+    }
+
     return text;
 }
 
@@ -319,6 +329,19 @@ TurnFacts buildFacts(Db& db, int64_t turn) {
             const bool engineInternalTag =
                 verb == "burned" || verb == "froze" || verb == "materialized";
             if (!detailIsNull && !engineInternalTag) e["detail"] = detail;
+
+            // Examine (REQ-EXAMINE-24, -25a): the examined entity's canon prose
+            // rides INSIDE this event object, not at the top level — the
+            // REQ-PROSE-7 key set is exactly four and stays that way. When the
+            // entity has no description row, nothing is attached and the event
+            // carries the subject's NAME only (already assigned above), which
+            // is what leaves clause f inactive for that turn.
+            if (verb == "examined" && subject != 0) {
+                if (const auto prose = canonProseOf(db, subject)) {
+                    facts.examinedText = *prose;
+                    e["description"] = *prose;
+                }
+            }
             events.push_back(e);
 
             // Room-describing event (REQ-PROSE-12 normative definition):

@@ -27,8 +27,9 @@ extern const char* const kResolveSystemPrompt;
 
 // The scope facts for one input line, assembled by buildResolveContext() from
 // fresh SELECTs. `payload` is the JSON string sent as the LLM user message; it
-// carries EXACTLY the REQ-RESOLVE-7 fields — input, room, exits, items,
-// inventory — and no entity/row ids anywhere (REQ-RESOLVE-6).
+// carries EXACTLY the REQ-RESOLVE-7 fields plus `things` (REQ-EXAMINE-19) —
+// input, room, exits, items, inventory, things — and no entity/row ids
+// anywhere (REQ-RESOLVE-6, REQ-EXAMINE-22).
 struct ResolveContext {
     std::string payload;
 };

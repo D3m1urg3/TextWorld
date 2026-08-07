@@ -128,6 +128,18 @@ std::string render(Db& db, int64_t turn) {
             }
             // Other 'looked' details do not exist yet; render nothing rather
             // than invent output with no template.
+        } else if (verb == "examined") {
+            // Perception (REQ-EXAMINE-10, -11): the subject's canon prose,
+            // VERBATIM — nothing wraps, trims, or rewords it — or the
+            // engine-authored fallback when it has no description row. Nothing
+            // mechanical is read or appended here (REQ-EXAMINE-17): health,
+            // hostility, resistance and the rest stay the status band's
+            // business, so the output is the description row and nothing else.
+            Stmt s = db.prepare("SELECT prose FROM description WHERE entity = ?");
+            s.bind(1, subject);
+            out += s.step() ? s.colText(0) + "\n"
+                            : "You see nothing special about the " +
+                                  nameOf(db, subject) + ".\n";
         } else if (verb == "waited") {
             out += "Time passes.\n";
         } else if (verb == "failed") {

@@ -136,6 +136,13 @@ static int64_t queryInt(Db& db, const char* sql) {
     return s.colInt(0);
 }
 
+// Single text-value query helper.
+static std::string queryText(Db& db, const char* sql) {
+    Stmt s = db.prepare(sql);
+    CHECK(s.step());
+    return s.colText(0);
+}
+
 static std::string readFileBytes(const std::filesystem::path& p) {
     std::ifstream in(p, std::ios::binary);
     std::ostringstream buf;
@@ -444,6 +451,42 @@ static void testParser() {
         CHECK(a.has_value());
         CHECK(a->verb == Verb::Quit);
     }
+
+    // --- examine (REQ-EXAMINE-3, -4, -5, -6) ---
+    // A SECOND world, opened from the SHIPPED seed, because the spec's parser
+    // items name the candle in the dormitory cell — that is base.sql's world
+    // (candle = entity 4), not fixture.sql's (whose entity 4 is the lantern).
+    // fixture.sql is deliberately left alone: other tests pin its exact entity
+    // and row counts, which is why combat_fixture.sql exists as a separate file.
+    {
+        const TempDbFile seedPath("textworld_parser_seed_tests.db");
+        Db seed = openWorld(seedPath.string(), "seed/base.sql").db;
+
+        // Item 1: both verb words reach the same entity.
+        for (const char* line : {"examine candle", "x candle"}) {
+            auto a = parse(seed, line);
+            CHECK(a.has_value());
+            CHECK(a->verb == Verb::Examine);
+            CHECK(a->subject == 4);
+        }
+
+        // Item 2: bare verb → nullopt (REQ-PROTO-6a).
+        CHECK(!parse(seed, "examine"));
+        CHECK(!parse(seed, "x"));
+
+        // Item 3: a noun that exists nowhere in the world → nullopt.
+        CHECK(!parse(seed, "examine gryphon"));
+
+        // Item 4, REGRESSION (REQ-EXAMINE-4): `look` is untouched. It still
+        // ignores any trailing argument and yields a bare Look — examination
+        // phrasings are the AI resolver's job, not this parser's.
+        for (const char* line : {"look", "look around", "look at the candle"}) {
+            auto a = parse(seed, line);
+            CHECK(a.has_value());
+            CHECK(a->verb == Verb::Look);
+            CHECK(a->subject == 0);
+        }
+    }
 }
 
 static void testMutations() {
@@ -634,10 +677,98 @@ static void testSystems() {
                    "SELECT COUNT(*) FROM events WHERE verb = 'dropped' "
                    "AND subject = 4 AND object = 2") == 1);
 
-    // Only the fixed six verb strings ever appear in the log.
+    // --- examine: scope, the event row, and the turn (REQ-EXAMINE-7, -8, -13,
+    // -16, -28). The player stands in the garden (room 2); the lantern (4) and
+    // the key (5) are both on its floor. ---
+
+    // Total rows across every component table — everything except the event log
+    // and the turn counter. Reading the table list from sqlite_master rather
+    // than naming tables keeps item 12 honest as the schema grows: a future
+    // component table is counted without anyone remembering to add it here.
+    auto componentRowTotal = [](Db& d) {
+        std::vector<std::string> tables;
+        {
+            Stmt t = d.prepare(
+                "SELECT name FROM sqlite_master WHERE type = 'table' "
+                "AND name NOT IN ('events', 'meta', 'sqlite_sequence')");
+            while (t.step()) tables.push_back(t.colText(0));
+        }
+        int64_t total = 0;
+        for (const std::string& table : tables) {
+            total += queryInt(d, ("SELECT COUNT(*) FROM " + table).c_str());
+        }
+        return total;
+    };
+
+    // Item 5 + items 11, 12, 13: examine a thing on the floor of this room.
+    {
+        const int64_t turnBefore = queryInt(db, "SELECT value FROM meta WHERE key = 'turn'");
+        const int64_t eventsBefore = queryInt(db, "SELECT COUNT(*) FROM events");
+        const int64_t rowsBefore = componentRowTotal(db);
+
+        tick(db, Action{Verb::Examine, 4, ""});
+
+        // Item 13: the turn advanced by exactly one. Item 11: exactly one row,
+        // verb 'examined', the right subject, object 0, detail NULL.
+        CHECK(queryInt(db, "SELECT value FROM meta WHERE key = 'turn'") == turnBefore + 1);
+        CHECK(queryInt(db, "SELECT COUNT(*) FROM events") == eventsBefore + 1);
+        CHECK(queryInt(db,
+                       "SELECT COUNT(*) FROM events WHERE verb = 'examined' "
+                       "AND subject = 4 AND object = 0 AND detail IS NULL") == 1);
+        // Item 12 / REQ-EXAMINE-28: no component table gained or lost a row —
+        // examine writes the event and nothing else.
+        CHECK(componentRowTotal(db) == rowsBefore);
+    }
+
+    // Item 6: the same thing once carried (container = the player) is still in
+    // scope — REQ-EXAMINE-7's second leg.
+    tick(db, Action{Verb::Take, 4, ""});
+    CHECK(queryInt(db, "SELECT container FROM location WHERE entity = 4") == 3);
+    tick(db, Action{Verb::Examine, 4, ""});
+    CHECK(queryInt(db,
+                   "SELECT COUNT(*) FROM events WHERE verb = 'examined' "
+                   "AND subject = 4") == 2);
+
+    // Item 8a / REQ-EXAMINE-9: the player is in scope, because their container
+    // is the room and nothing excludes them. (fixture.sql gives the player a
+    // name row and deliberately no description row — the text half of this is
+    // asserted in testRender.)
+    tick(db, Action{Verb::Examine, 3, ""});
+    CHECK(queryInt(db,
+                   "SELECT COUNT(*) FROM events WHERE verb = 'examined' "
+                   "AND subject = 3") == 1);
+
+    // Item 7: a thing in ANOTHER room refuses with exactly resolveTake's
+    // string, and STILL costs a turn — a refused examine is a turn the world
+    // understood (REQ-EXAMINE-2, -8).
+    {
+        tick(db, Action{Verb::Drop, 4, ""});          // lantern back on the floor
+        tick(db, Action{Verb::Go, 0, "south"});       // stone hall; lantern left behind
+        CHECK(queryInt(db, "SELECT container FROM location WHERE entity = 3") == 1);
+        CHECK(queryInt(db, "SELECT container FROM location WHERE entity = 4") == 2);
+
+        const int64_t turnBefore = queryInt(db, "SELECT value FROM meta WHERE key = 'turn'");
+        const int64_t failedBefore = queryInt(
+            db,
+            "SELECT COUNT(*) FROM events WHERE verb = 'failed' "
+            "AND detail = 'You don''t see that here.'");
+        tick(db, Action{Verb::Examine, 4, ""});
+        CHECK(queryInt(db, "SELECT value FROM meta WHERE key = 'turn'") == turnBefore + 1);
+        CHECK(queryInt(db,
+                       "SELECT COUNT(*) FROM events WHERE verb = 'failed' "
+                       "AND detail = 'You don''t see that here.'") == failedBefore + 1);
+        // No 'examined' row was appended for the out-of-scope subject.
+        CHECK(queryInt(db,
+                       "SELECT COUNT(*) FROM events WHERE verb = 'examined' "
+                       "AND subject = 4") == 2);
+    }
+
+    // Only the fixed seven verb strings ever appear in the log — 'examined'
+    // joins them, and no eighth string is introduced (REQ-EXAMINE-15).
     CHECK(queryInt(db,
                    "SELECT COUNT(*) FROM events WHERE verb NOT IN "
-                   "('moved','took','dropped','looked','waited','failed')") == 0);
+                   "('moved','took','dropped','looked','waited','failed',"
+                   "'examined')") == 0);
 
     // --- Quit never reaches resolve: it throws, and the rollback means
     // no tick is recorded ---
@@ -1744,6 +1875,67 @@ static void testRender() {
     // --- renderError: tier-a path, not event-sourced ---
     CHECK(renderError("I don't understand that.") == "I don't understand that.\n");
 
+    // --- examined: canon prose verbatim, or the engine-authored fallback ---
+    // Item 5 / REQ-EXAMINE-10: the description row, byte-exact, with nothing
+    // wrapped, trimmed, or added around it. The expected text is read from the
+    // db rather than retyped, so this asserts "verbatim" rather than "equal to
+    // a string someone copied correctly once".
+    tick(db, Action{Verb::Examine, 4, ""});
+    ++turn;
+    {
+        const std::string prose =
+            queryText(db, "SELECT prose FROM description WHERE entity = 4");
+        CHECK(render(db, turn) == prose + "\n");
+    }
+
+    // Item 6: carried is in scope too, and renders the same prose.
+    tick(db, Action{Verb::Take, 4, ""});
+    ++turn;
+    tick(db, Action{Verb::Examine, 4, ""});
+    ++turn;
+    CHECK(render(db, turn) ==
+          queryText(db, "SELECT prose FROM description WHERE entity = 4") + "\n");
+    tick(db, Action{Verb::Drop, 4, ""});
+    ++turn;
+
+    // Item 8 / REQ-EXAMINE-11: a named entity with NO description row gets the
+    // engine-authored safety net — deterministic, and never a generated
+    // description (REQ-EXAMINE-27).
+    db.exec("INSERT INTO entities(id) VALUES (6)");
+    db.exec("INSERT INTO name(entity, value) VALUES (6, 'gargoyle')");
+    db.exec("INSERT INTO location(entity, container) VALUES (6, 1)");
+    tick(db, Action{Verb::Examine, 6, ""});
+    ++turn;
+    CHECK(render(db, turn) == "You see nothing special about the gargoyle.\n");
+
+    // Item 8a / REQ-EXAMINE-9: the player is in scope, and reaches that same
+    // fallback — base.sql's deliberate omission of a player description is
+    // left undisturbed rather than papered over.
+    tick(db, Action{Verb::Examine, 3, ""});
+    ++turn;
+    CHECK(render(db, turn) == "You see nothing special about the player.\n");
+
+    // Item 9 / REQ-EXAMINE-17: examine the seeded goblin and assert the output
+    // is BYTE-EQUAL to its description row. Equality, not digit-hunting, is
+    // what proves the requirement: nothing derived from health, hostility,
+    // resistance, or any status table can be present if the output is the
+    // description row exactly.
+    {
+        const TempDbFile foePath("textworld_render_examine_foe_tests.db");
+        Db foe = openWorld(foePath.string(), "tests/combat_fixture.sql").db;
+        foe.exec("UPDATE location SET container = 2 WHERE entity = 3");  // the corridor
+        tick(foe, Action{Verb::Examine, 7, ""});
+        const int64_t foeTurn = queryInt(foe, "SELECT value FROM meta WHERE key = 'turn'");
+        const std::string prose =
+            queryText(foe, "SELECT prose FROM description WHERE entity = 7");
+        CHECK(render(foe, foeTurn) == prose + "\n");
+        // The enemy is alive, hostile, and damaged — none of which shows.
+        foe.exec("UPDATE health SET current = 3 WHERE entity = 7");
+        tick(foe, Action{Verb::Examine, 7, ""});
+        CHECK(render(foe, queryInt(foe, "SELECT value FROM meta WHERE key = 'turn'")) ==
+              prose + "\n");
+    }
+
     // --- render purity: a render call performs no writes. All ticks above
     // are committed (default DELETE journal mode, no WAL), so the world file
     // bytes are the full committed state; byte-identical before/after proves
@@ -2006,16 +2198,90 @@ static void testExamineGoldenSession() {
     CHECK(actual == kExamineGoldenSession);
 }
 
+// Two cross-system guards examine depends on but does not itself contain
+// (spec AI-Validation items 10 and 14). Neither belongs in testSystems: one
+// spans the combat lane, the other spans every entity-minting writer there is.
+static void testExamineWorldGuards() {
+    // --- item 14 / REQ-EXAMINE-16: examining during a fight costs a tick of
+    // the chip clock. resolveCombat runs for every ticked action (loop.cpp), so
+    // this is an assertion about examine being an ordinary ticked verb, not a
+    // change anywhere. ---
+    {
+        const TempDbFile worldPath("textworld_examine_combat_tests.db");
+        Db db = openWorld(worldPath.string(), "tests/combat_fixture.sql").db;
+
+        // Into the corridor, where the goblin grunt (7) waits.
+        CHECK(runTurn(db, "go north").outcome == TurnOutcome::Ticked);
+        const int64_t hpBefore =
+            queryInt(db, "SELECT current FROM health WHERE entity = 3");
+
+        const TurnResult r = runTurn(db, "examine key");
+        CHECK(r.outcome == TurnOutcome::Ticked);
+        const int64_t turn = queryInt(db, "SELECT value FROM meta WHERE key = 'turn'");
+
+        // The player's examine and the enemy's chip landed in the SAME turn —
+        // one transaction, one tick of the clock.
+        CHECK(queryInt(db,
+                       ("SELECT COUNT(*) FROM events WHERE turn = " +
+                        std::to_string(turn) + " AND verb = 'examined'")
+                           .c_str()) == 1);
+        CHECK(queryInt(db,
+                       ("SELECT COUNT(*) FROM events WHERE turn = " +
+                        std::to_string(turn) + " AND verb = 'chip' AND actor = 7")
+                           .c_str()) == 1);
+        CHECK(queryInt(db, "SELECT current FROM health WHERE entity = 3") < hpBefore);
+    }
+
+    // --- item 10 / REQ-EXAMINE-27: the coverage guard. The spec's controlling
+    // finding is that every entity which can appear ALREADY has canon prose,
+    // written by one of five places. Build a world holding one of each and
+    // assert it. If a sixth writer ever mints a named entity without prose,
+    // this fails loudly — which is the only warning anyone will get that
+    // examine has started falling back to its safety net. ---
+    {
+        const TempDbFile worldPath("textworld_examine_coverage_tests.db");
+        Db db = openWorld(worldPath.string(), "tests/combat_fixture.sql").db;
+        const int64_t player = 3;
+
+        db.begin();
+        // (2) dropGrimoire — the defeat drop.
+        CHECK(dropGrimoire(db, "goblin_grunt", /*room=*/1) != 0);
+        // (3) placeEnemy — an instance cast from the bestiary.
+        CHECK(placeEnemy(db, "rime_touched", /*room=*/1) != 0);
+        // (4) writeGeneratedRoom — the architect's room.
+        const RoomProposal proposal{"chapter house",
+                                    "A low vaulted room, its shelves bare.",
+                                    {"east"}};
+        CHECK(writeGeneratedRoom(db, /*originRoom=*/1, "north", proposal, player) != 0);
+        // (5) writeCatalogEntry + placeCatalogEntry — the bard's materialized
+        // story entity.
+        const int64_t entry = writeCatalogEntry(
+            db, "character", "t0_scribe", "scribe",
+            "a scribe copying a ledger nobody asked for", "obligation", 0);
+        CHECK(placeCatalogEntry(db, entry, /*room=*/1,
+                                "A thin scribe bent over a ledger.", player) != 0);
+        db.commit();
+
+        // (1) is the seed itself, already in the fixture. Every named entity in
+        // the world now has canon prose — with exactly one exemption: the
+        // player, whose missing description is deliberate (see base.sql's note
+        // "no description: the player is not canon prose"). REQ-EXAMINE-9 leaves
+        // that undisturbed, so `examine player` reaches the fallback line
+        // instead of prose.
+        CHECK(queryInt(db,
+                       "SELECT COUNT(*) FROM name n "
+                       "LEFT JOIN description d ON d.entity = n.entity "
+                       "WHERE d.entity IS NULL "
+                       "AND n.entity NOT IN (SELECT entity FROM player)") == 0);
+        // …and the exemption is real, not a vacuous filter.
+        CHECK(queryInt(db,
+                       "SELECT COUNT(*) FROM description WHERE entity = 3") == 0);
+    }
+}
+
 // --- facts builder (REQ-PROSE-6, REQ-PROSE-7): pure (db, turn) → TurnFacts,
 // payload parseable JSON with exactly the REQ-PROSE-7 keys, name-resolved,
 // id-free, with validation anchors. No network anywhere. ---
-
-// Single text-value query helper.
-static std::string queryText(Db& db, const char* sql) {
-    Stmt s = db.prepare(sql);
-    CHECK(s.step());
-    return s.colText(0);
-}
 
 // Collect every string VALUE in a JSON tree (keys are the fixed payload
 // schema; values are what carries world data to the model).
@@ -2195,10 +2461,59 @@ static void testProseFacts() {
         CHECK(p["recent_events"].front()["verb"] == "moved");
     }
 
+    // --- turn 9: examine the carried lantern — the new clause-f anchor, and
+    // the prose riding INSIDE the event object (REQ-EXAMINE-24) ---
+    const std::string lanternProse =
+        queryText(db, "SELECT prose FROM description WHERE entity = 4");
+    CHECK(runTurn(db, "examine lantern").outcome == TurnOutcome::Ticked);
+    {
+        const TurnFacts f = buildFacts(db, 9);
+        const json p = json::parse(f.payload);
+
+        // The top-level key set is STILL exactly the REQ-PROSE-7 four: the
+        // description rides inside the event, so nothing about REQ-PROSE-7
+        // moves for this feature.
+        CHECK(p.size() == 4);
+
+        CHECK(p["events"].size() == 1);
+        CHECK(p["events"][0]["verb"] == "examined");
+        CHECK(p["events"][0]["subject"] == "lantern");  // name, not id 4
+        CHECK(p["events"][0]["description"] == lanternProse);  // verbatim
+        CHECK(!p["events"][0].contains("object"));
+        CHECK(!p["events"][0].contains("detail"));
+
+        // The anchor itself, verbatim from the description table.
+        CHECK(f.examinedText == lanternProse);
+        // Examine is not room-describing, and refuses nothing.
+        CHECK(!f.canonRequired);
+        CHECK(f.failedDetails.empty());
+    }
+
+    // --- turn 10: examine the player — no description row, so clause f is
+    // INACTIVE and the event carries the name only (REQ-EXAMINE-25a) ---
+    CHECK(queryInt(db, "SELECT COUNT(*) FROM description WHERE entity = 3") == 0);
+    CHECK(runTurn(db, "examine player").outcome == TurnOutcome::Ticked);
+    {
+        const TurnFacts f = buildFacts(db, 10);
+        const json p = json::parse(f.payload);
+
+        CHECK(p["events"].size() == 1);
+        CHECK(p["events"][0]["verb"] == "examined");
+        CHECK(p["events"][0]["subject"] == "player");
+        // Name only: no description key at all, and emphatically NOT the
+        // template's fallback line — requiring that verbatim would pin AI
+        // output to template wording.
+        CHECK(!p["events"][0].contains("description"));
+        CHECK(!contains(f.payload, "You see nothing special about"));
+
+        // EMPTY means "the clause does not apply", never "not found".
+        CHECK(f.examinedText.empty());
+    }
+
     // --- hygiene sweep over every payload built this session, plus exact
     // entry shape for every recent_events row (with- and without-subject
-    // entries both occur across turns 1..8) ---
-    for (int64_t t = 1; t <= 8; ++t) {
+    // entries both occur across turns 1..10) ---
+    for (int64_t t = 1; t <= 10; ++t) {
         const TurnFacts f = buildFacts(db, t);
         checkPayloadHygiene(f.payload);
         // Bind the parsed payload to a named json first: iterating
@@ -2216,7 +2531,7 @@ static void testProseFacts() {
     {
         const std::string bytesBefore = readFileBytes(worldPath);
         CHECK(!bytesBefore.empty());
-        for (int64_t t = 0; t <= 8; ++t) (void)buildFacts(db, t);
+        for (int64_t t = 0; t <= 10; ++t) (void)buildFacts(db, t);
         CHECK(readFileBytes(worldPath) == bytesBefore);
     }
 }
@@ -2236,20 +2551,27 @@ static void testNlResolveContext() {
         const ResolveContext ctx = buildResolveContext(db, "take the lantern");
         const json p = json::parse(ctx.payload);
 
-        // Top-level keys are EXACTLY the REQ-RESOLVE-7 set — five, nothing else.
+        // Top-level keys are EXACTLY the REQ-RESOLVE-7 set plus `things`
+        // (REQ-EXAMINE-19) — six, nothing else.
         CHECK(p.is_object());
-        CHECK(p.size() == 5);
+        CHECK(p.size() == 6);
         CHECK(p.contains("input"));
         CHECK(p.contains("room"));
         CHECK(p.contains("exits"));
         CHECK(p.contains("items"));
         CHECK(p.contains("inventory"));
+        CHECK(p.contains("things"));
 
         CHECK(p["input"] == "take the lantern");  // raw line, verbatim
         CHECK(p["room"] == "stone hall");
         CHECK(p["exits"] == json::array({"north"}));
         CHECK(p["items"] == json::array({"lantern"}));
         CHECK(p["inventory"].empty());
+        // `things` is wider than `items` and includes the player, whose
+        // container is the room and whom no case excludes (REQ-EXAMINE-9).
+        // (The room itself is absent: rooms have no location row, so nothing
+        // is "in" itself — which is also why examine on a room refuses.)
+        CHECK(p["things"] == json::array({"player", "lantern"}));
 
         // No entity/row id anywhere (REQ-RESOLVE-6): reuse the prose hygiene
         // sweep — no digit in any string value, no table name, no file path.
@@ -2264,12 +2586,40 @@ static void testNlResolveContext() {
     {
         const ResolveContext ctx = buildResolveContext(db, "drop lantern");
         const json p = json::parse(ctx.payload);
-        CHECK(p.size() == 5);
+        CHECK(p.size() == 6);
         CHECK(p["room"] == "garden");
         CHECK(p["exits"] == json::array({"south"}));
         CHECK(p["items"] == json::array({"key"}));
         CHECK(p["inventory"] == json::array({"lantern"}));
+        CHECK(p["things"] == json::array({"player", "key"}));
         checkPayloadHygiene(ctx.payload);
+    }
+
+    // --- item 22 / REQ-EXAMINE-19: a room with a NON-PORTABLE occupant. The
+    // goblin is examinable and cannot be picked up, which is the whole reason
+    // `things` exists — and `items` is unchanged by its presence. Item 23:
+    // the hygiene sweep runs over this wider body too, so no id, tier, or
+    // internal tag rode in with the new key (REQ-EXAMINE-22). ---
+    {
+        const TempDbFile foePath("textworld_nlresolve_things_tests.db");
+        Db foe = openWorld(foePath.string(), "tests/combat_fixture.sql").db;
+        foe.exec("UPDATE location SET container = 2 WHERE entity = 3");  // corridor
+
+        const ResolveContext ctx = buildResolveContext(foe, "look at the goblin");
+        const json p = json::parse(ctx.payload);
+        CHECK(p.size() == 6);
+        CHECK(p["room"] == "corridor");
+        // items: portables only, exactly what it has always meant.
+        CHECK(p["items"] == json::array({"key"}));
+        // things: everything present, in entity order — the key, the player,
+        // and the goblin that `items` can never carry.
+        CHECK(p["things"] == json::array({"player", "key", "goblin grunt"}));
+        checkPayloadHygiene(ctx.payload);
+        // No engine-internal vocabulary rode along with the wider key.
+        for (const char* internal :
+             {"goblin_grunt", "tier", "seeded", "archetype", "hostile", "bestiary"}) {
+            CHECK(!contains(ctx.payload, internal));
+        }
     }
 
     // Purity: the builder performs no writes. All ticks above are committed,
@@ -2292,12 +2642,17 @@ static void testNlResolvePrompt() {
     const std::string sys = kResolveSystemPrompt;
     CHECK(!sys.empty());
 
-    // All ten ISA verbs are named (attack/cast/read added in the combat brick).
+    // Every ISA verb is named (attack/cast/read added in the combat brick,
+    // examine in the perception one).
     for (const char* verb :
          {"look", "go", "take", "drop", "inventory", "wait", "quit", "attack",
-          "cast", "read"}) {
+          "cast", "read", "spells", "examine"}) {
         CHECK(sys.find(verb) != std::string::npos);
     }
+    // The subject may now be drawn from `things` as well (REQ-EXAMINE-20), and
+    // the no-new-nouns rule is unchanged in force.
+    CHECK(sys.find("\"things\"") != std::string::npos);
+    CHECK(sys.find("\"items\", \"inventory\", or \"things\"") != std::string::npos);
 
     // The tool is named; output is a tool call, not prose.
     CHECK(sys.find("emit_action") != std::string::npos);
@@ -3480,6 +3835,11 @@ static void testProseRequestBody() {
         CHECK(sys.find("canon_description") != std::string::npos);
         CHECK(sys.find("verbatim") != std::string::npos);
         CHECK(sys.find("paraphrase") != std::string::npos);
+        // Examined canon verbatim (REQ-EXAMINE-24). Without this rule the model
+        // has no instruction to reproduce the prose, clause f would fail on
+        // every examine turn, and the AI path would silently degrade to the
+        // template.
+        CHECK(sys.find("If an event carries a description") != std::string::npos);
         // Sentence budget.
         CHECK(sys.find("1-4 sentences") != std::string::npos);
         // Plain text, no markdown, no meta-commentary, final answer only.
@@ -3561,10 +3921,12 @@ static void testNlResolveRequestBody() {
         CHECK(verb["type"] == "string");
         // ('spells' added by the status band, REQ-UI-37: the model-facing list
         // must carry it too, or inspection would work only via the fixed-verb
-        // parser word — a silent half-wiring.)
+        // parser word — a silent half-wiring. 'examine' joins it for the same
+        // reason, REQ-EXAMINE-18.)
         CHECK(verb["enum"] ==
               json::array({"look", "go", "take", "drop", "inventory", "wait",
-                           "quit", "attack", "cast", "read", "spells"}));
+                           "quit", "attack", "cast", "read", "spells",
+                           "examine"}));
 
         // subject and direction present; verb is the ONLY required field.
         CHECK(schema["properties"].contains("subject"));
@@ -3676,9 +4038,31 @@ static void testNlResolveGate() {
         CHECK(a->verb == Verb::Drop);
         CHECK(a->subject == 5);
     }
+    // Clause c, examine (REQ-EXAMINE-18): the same treatment as take/drop/read
+    // — the noun word is lowered to an id by lookupNoun, never read from the
+    // model. Recognition only: the lantern is in the room here, but scope is
+    // resolveExamine's decision, not this gate's.
+    {
+        auto a = validateAndLower(cannedToolUse("examine", "lantern"), db);
+        CHECK(a.has_value());
+        CHECK(a->verb == Verb::Examine);
+        CHECK(a->subject == 4);
+        CHECK(a->direction.empty());
+    }
+    // A noun the model may now legitimately see in `things` but which is NOT
+    // portable still lowers — REQ-EXAMINE-21's no-guard stance, applied at the
+    // gate: the player is a name in the world like any other.
+    {
+        auto a = validateAndLower(cannedToolUse("examine", "player"), db);
+        CHECK(a.has_value());
+        CHECK(a->verb == Verb::Examine);
+        CHECK(a->subject == 3);
+    }
     // Clause c failures: unknown noun, and missing subject → nullopt.
     CHECK(!validateAndLower(cannedToolUse("take", "zeppelin"), db));
     CHECK(!validateAndLower(cannedToolUse("take"), db));
+    CHECK(!validateAndLower(cannedToolUse("examine", "gryphon"), db));
+    CHECK(!validateAndLower(cannedToolUse("examine"), db));
 
     // Clause d: go carries the direction verbatim; missing/empty → nullopt.
     {
@@ -4039,6 +4423,71 @@ static void testProseValidation() {
         r.transportError = true;
         CHECK(!validateAiResponse(r, plain).has_value());
     }
+
+    // --- clause f (REQ-EXAMINE-25): examined canon prose verbatim ---
+    // Item 19 is asserted by everything ABOVE this line: clauses a-e keep their
+    // canned responses, their order, and their outcomes unmodified. Nothing in
+    // this block edits them.
+    TurnFacts examinedFacts;
+    examinedFacts.examinedText =
+        "A brass lantern, dented and smoke-dulled, its flame steady.";
+
+    // Item 18: verbatim inside surrounding prose → accepted.
+    {
+        const auto out = validateAiResponse(
+            cannedResponse("You turn it over. " + examinedFacts.examinedText +
+                           " The wick gutters."),
+            examinedFacts);
+        CHECK(out.has_value());
+    }
+
+    // Item 18: a paraphrase (one changed word) → rejected.
+    CHECK(!validateAiResponse(
+               cannedResponse("A brass lantern, dented and smoke-stained, its "
+                              "flame steady."),
+               examinedFacts)
+               .has_value());
+
+    // Item 18: absent entirely → rejected.
+    CHECK(!validateAiResponse(cannedResponse("You look at the lantern."),
+                              examinedFacts)
+               .has_value());
+
+    // Item 18: the diagnostic names clause f, and no earlier clause. Captured
+    // through the log sink at debug level, the way failClause emits it.
+    {
+        std::vector<std::string> lines;
+        logSetSink([&lines](const std::string& line) { lines.push_back(line); });
+        const ScopedEnvVar levelGuard("TEXTWORLD_LOG_LEVEL");
+        setenv("TEXTWORLD_LOG_LEVEL", "debug", 1);
+        logRefreshLevel();
+
+        CHECK(!validateAiResponse(cannedResponse("You look at the lantern."),
+                                  examinedFacts)
+                   .has_value());
+
+        logSetSink({});
+        unsetenv("TEXTWORLD_LOG_LEVEL");
+        logRefreshLevel();
+
+        CHECK(lines.size() == 1);
+        CHECK(contains(lines[0], "clause f failed"));
+        CHECK(contains(lines[0], "examined canon description not present verbatim"));
+    }
+
+    // Item 18a / REQ-EXAMINE-25a: an EMPTY examinedText means the clause does
+    // not apply — never that the empty string was not found. Driven with a
+    // response containing NONE of the template's fallback wording, so a gate
+    // that had quietly started requiring template text would fail here.
+    {
+        TurnFacts noProse;  // examinedText default-empty, like an entity with
+                            // no description row
+        const auto out = validateAiResponse(
+            cannedResponse("Nothing about it holds your attention for long."),
+            noProse);
+        CHECK(out.has_value());
+        CHECK(*out == "Nothing about it holds your attention for long.");
+    }
 }
 
 // --- enable switch (REQ-PROSE-2): aiNarrationEnabled() truth table. Pure
@@ -4222,6 +4671,60 @@ static void testProseAiRender() {
         // REQ-UI-4: the band is LAST — the narration is above it.
         CHECK(w.output.find("Time passes.") < w.output.find("-- "));
         // guards restore both vars here.
+    }
+
+    // --- examine turn through the AI path (REQ-EXAMINE-24, -26), on its own
+    // world so the turn numbering above is untouched ---
+    {
+        const TempDbFile examinePath("textworld_airender_examine_tests.db");
+        Db ex = openWorld(examinePath.string(), "tests/fixture.sql").db;
+        const std::string lanternProse =
+            queryText(ex, "SELECT prose FROM description WHERE entity = 4");
+
+        // Turn 1: examine the lantern on the floor of the stone hall.
+        CHECK(runTurn(ex, "examine lantern").outcome == TurnOutcome::Ticked);
+
+        std::string text;
+        const HttpTransport fakeEx = [&text](const std::string&) {
+            return cannedResponse(text);
+        };
+
+        // Canon prose verbatim inside the model's own connective prose → the
+        // gate accepts, and the prose survives into what the player reads.
+        text = "You lift it toward the light. " + lanternProse +
+               " The glass is still warm.";
+        {
+            const auto out = aiRender(ex, 1, fakeEx);
+            CHECK(out.has_value());
+            CHECK(contains(*out, lanternProse));
+        }
+
+        // Item 20: a paraphrase is rejected by clause f, so aiRender returns
+        // nullopt and the dispatch falls through to the template — which for
+        // this turn is the description row itself. The turn still prints.
+        text = "A battered brass lantern, more or less as it was described.";
+        CHECK(!aiRender(ex, 1, fakeEx).has_value());
+        CHECK(render(ex, 1) == lanternProse + "\n");
+
+        // The same, end to end: with AI off, runTurn's output is non-empty and
+        // carries the prose — the same output the clause-f fallback lands on.
+        // (runTurn hardwires the production transport, so this is the honest
+        // dispatch coverage, exactly as the timeout path above notes.)
+        const ScopedEnvVar keyGuard("ANTHROPIC_API_KEY");
+        const ScopedEnvVar aiGuard("TEXTWORLD_AI");
+        unsetenv("ANTHROPIC_API_KEY");
+        unsetenv("TEXTWORLD_AI");
+        // The output is the WRAPPED template render plus the band, not the raw
+        // prose: runTurn wraps to terminal width, so a description longer than
+        // the width is broken across lines by the display layer — exactly as
+        // room canon already is. render() itself still emits it verbatim.
+        const int exWidth = detectWidth();
+        const TurnResult t = runTurn(ex, "examine lantern");  // turn 2
+        CHECK(t.outcome == TurnOutcome::Ticked);
+        CHECK(!t.output.empty());
+        CHECK(render(ex, 2) == lanternProse + "\n");
+        CHECK(t.output ==
+              wrapProse(render(ex, 2), exWidth) + composeBand(ex, exWidth));
     }
 }
 
@@ -9367,8 +9870,8 @@ static void testSpellsVerb() {
     // the two cannot drift.
     {
         const std::vector<std::string> words = {
-            "look", "go", "take", "drop", "inventory", "wait",
-            "quit", "attack", "cast", "read", "spells"};
+            "look", "go",   "take", "drop",   "inventory", "wait",
+            "quit", "attack", "cast", "read", "spells",    "examine"};
         // Both lists live in nlresolve.cpp; compare them at the source level,
         // since a word present in one and absent from the other is a silent
         // half-wiring rather than a compile error. (The schema's runtime shape
@@ -9382,17 +9885,18 @@ static void testSpellsVerb() {
             CHECK(contains(src, "word == \"" + w + "\""));  // verbFromWord
             CHECK(contains(enumBlock, "\"" + w + "\""));    // the tool enum
         }
-        // Nothing beyond the eleven: verbFromWord has exactly this many arms.
+        // Nothing beyond the twelve: verbFromWord has exactly this many arms.
         size_t arms = 0;
         for (size_t i = src.find("word == \""); i != std::string::npos;
              i = src.find("word == \"", i + 1)) {
             ++arms;
         }
         CHECK(arms == words.size());
-        // And the prompt describes all eleven, so the schema can never accept a
+        // And the prompt describes all twelve, so the schema can never accept a
         // value the prompt never mentions.
         const std::string p = kResolveSystemPrompt;
-        CHECK(contains(p, "exactly eleven verbs"));
+        CHECK(contains(p, "exactly twelve verbs"));
+        CHECK(!contains(p, "exactly eleven verbs"));
         CHECK(!contains(p, "exactly ten verbs"));
         for (const std::string& w : words) CHECK(contains(p, "\n- " + w + ":"));
     }
@@ -12178,7 +12682,11 @@ static void testBardTrigger() {
         bardStart();
 
         bardAdvanceTurns(db, 10);  // well past the ceiling
-        for (const char* verb : {"moved", "took", "looked", "waited", "failed"}) {
+        // 'examined' belongs here and nowhere else (REQ-EXAMINE-14): observing
+        // something changes nothing and is not irreversible, so bard.cpp's wake
+        // predicate is deliberately NOT extended for it.
+        for (const char* verb :
+             {"moved", "took", "looked", "waited", "failed", "examined"}) {
             appendEvent(db, 3, verb, 0, 0, nullptr);
             bardAfterTurn(db);
         }
@@ -13415,6 +13923,7 @@ int main() {
     testExitDisplayInvariant();
     testLoop();
     testExamineGoldenSession();
+    testExamineWorldGuards();
     testProseFacts();
     testNlResolveContext();
     testNlResolvePrompt();

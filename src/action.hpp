@@ -9,11 +9,11 @@
 #include "db.hpp"
 
 enum class Verb { Look, Go, Take, Drop, Inventory, Wait, Quit, Attack, Cast, Read,
-                  Spells };
+                  Spells, Examine };
 
 struct Action {
     Verb verb;
-    int64_t subject = 0;   // entity id for Take/Drop; target enemy for Attack
+    int64_t subject = 0;   // entity id for Take/Drop/Examine; target enemy for Attack
                            // (0 = the hostile in the room); 0 when unused
     std::string direction; // for Go; empty when unused
     std::string spell;     // for Cast: the catalogued spell key; empty otherwise
