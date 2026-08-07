@@ -1,233 +1,588 @@
 # TextWorld
 
-A single-player conversational text adventure where a deterministic game engine is extended — not replaced — by AI. The engine owns rules, state, and consistency; AI owns prose, character, and new territory. Protected canon — room descriptions, engine-authored refusals — is passed to the model verbatim and mechanically checked, never regenerated or paraphrased.
+A single-player text adventure. A normal game engine owns the rules, the state,
+and the numbers. AI writes the prose, plays the characters, and builds new rooms
+when you walk off the edge of the map.
 
-> **Note:** this project is unrelated to [Microsoft TextWorld](https://github.com/microsoft/TextWorld). The name may change.
+The engine never hands the rules to the model. Room descriptions and
+engine-written messages are printed word for word, never rewritten by AI.
 
-## Current state
+> **Note:** unrelated to [Microsoft TextWorld](https://github.com/microsoft/TextWorld).
+> The name may change.
 
-The **engine foundation**, the **AI prose renderer**, the **AI action resolver** — the input-side mirror of narration — the **AI architect**, which grows the world at its unmapped edges, a **deterministic combat system** — enemies as locks, spells as keys — that the architect populates as a self-balancing invasion front, a **live storyteller** that authors the cast and the beats and brings them into rooms as real entities, an **examine verb** that makes every one of them inspectable, and **characters you can talk to**, who answer in their own voice and remember what you said.
+## What works today
 
-- SQLite is the live world store — the world *is* the database file (`world.db`).
-- One turn = one tick = one SQLite transaction. No world write ever happens outside a tick.
-- Every state change is paired with an event row in the same transaction; the `events` table is a complete transcript of the playthrough.
-- All player-visible output is rendered from event rows plus read-only lookups — the renderer never writes.
-- State persists across restarts, and copying the database file forks an independent world.
+- **The engine.** Rooms, items, movement, inventory, and a full event log.
+- **AI prose.** Turn results are described by Claude instead of flat templates.
+- **AI input.** You can type normal English instead of fixed verbs.
+- **AI world building.** Walking an unbuilt exit generates a new room on the spot.
+- **Combat.** Fully deterministic. Enemies are locks, spells are keys, no dice.
+- **A storyteller.** Writes the cast and the story beats, then places them in
+  rooms as real objects you can look at.
+- **`examine`.** Every one of those things can be inspected.
+- **Characters you can talk to.** They answer in their own voice and remember
+  what you said.
 
-**AI narration** replaces the flat templates with Claude-generated second-person prose, grounded in a facts payload built from the turn's events (never the raw database). It is read-only and additive: the AI path performs SELECTs only, and every failure — no key, HTTP error, timeout, refusal, or a response that fails the mechanical validation gate — falls back silently to the original templates for that turn. The template renderer stays intact as the permanent fallback, so a turn never fails to produce output. Exits, visible items, and inventory lines are always appended deterministically by the engine, never left to the model. See [AI narration](#ai-narration) below to enable it.
+Every AI feature is optional. Without an API key the game still runs, using
+templates and fixed verbs.
 
-**AI input resolution** is the input-side mirror of narration: with AI enabled, a raw input line is lowered to the engine's fixed instruction set by Claude tool-use *before* the parser runs, so natural phrasings like `pick up the candle`, `grab the key`, or `head north` resolve to the same actions the fixed verbs produce. It is read-only and additive on the same terms — SELECTs only, one call per line, a uniform 20-second timeout, no retries — and shares narration's single on/off switch and its silent fallback on any failure. The model recognizes nouns only; whether an action actually applies stays the engine's decision, so a resolved `take` for an item that isn't in the room fails the ordinary way.
+### How the engine is put together
 
-**AI world generation** is the first *read-write* AI feature — the world is no longer fixed at two rooms. A room's exits are **declared at its birth**: every direction is either a real opening or a wall, fixed when the room is written. An opening whose room does not exist yet is **latent**, and walking it is what triggers generation. With AI enabled, walking a latent exit generates one new room, coherent with the setting (a hand-authored `seed/setting.txt` loaded into canon at init) and with the room you are leaving, writes it to canon, and moves you in. The model co-authors the room's prose *and* the directions that lead onward from it via Claude tool-use; the engine mints the id, adds the reciprocal exit back, plants each declared direction as its own latent exit, and enforces every invariant (invertible directions only, no duplicates, the return exit is the engine's), so the model never invents structure and never sees an id. A generated room is permanent — walk back and forth and it is the same room, never regenerated. A direction the room never declared is a hard wall; a latent exit under a disabled AI or a failed generation falls back to the original `You can't go that way.` while staying open and retryable — so an edge behaves exactly as it does today whenever generation can't run. The write is confined to one sanctioned engine helper; the architect translation unit itself issues no raw SQL.
+- The world is a SQLite file (`world.db`). There is no separate save format.
+- One command = one turn = one database transaction. Nothing is written outside
+  a turn.
+- Every change also writes a row to the `events` table, in the same
+  transaction. That table is the full transcript of your playthrough.
+- Everything printed on screen is built from event rows plus read-only lookups.
+  The part that prints never writes.
+- State survives restarts. Copying the database file gives you an independent
+  world.
 
-**Combat** is a deterministic **puzzle**: enemies are locks, spells are keys, and the engine owns every number — there is no RNG anywhere. It rides the same tick model (one prompt = one tick = one transaction) and the same seams — new verbs, engine-owned mutation helpers, template + AI narration — so a fight is just more events in the same transcript. See [Combat](#combat) below.
+### What is missing
 
-**Turn latency** is now measurable, and a little cheaper. All three AI roles share one persistent libcurl handle owned by the process, so only the first call of a session pays DNS, TCP, and TLS — every later call, of any role and across idle gaps, reuses the connection. Input resolution runs on a fast model while narration and generation keep the prose model. Gated profiling (`TEXTWORLD_LOG_LEVEL=debug`) reports per-phase wall-clock and a per-call setup-vs-TTFB split — into the session log, not onto the screen — which is how the honest accounting below got made: a turn is ~99.9% model latency, so connection reuse buys back well under 1% of it. It is free and permanent; the levers that would actually move a turn — streaming narration, pre-generating neighbor rooms — are deferred, and profiling now exists to measure them.
-
-**The status band** is the engine's answer to "where am I and what is happening": an ANSI-colored block printed above the prompt on *every* turn — including turns the world declines — showing the room, its exits, the objects in it, every living hostile with its HP, telegraphed strikes and active states, and your own HP and spell readiness. It is composed once, in the turn loop, from read-only queries, so the AI and template paths get identical bytes and no model-supplied number can ever reach it. Prose is wrapped to the terminal width, color follows the `NO_COLOR` / `CLICOLOR` conventions and vanishes entirely when output is piped, and nothing is ever truncated to fit — a narrow terminal makes the band taller, never quieter. See [The status band](#the-status-band) below.
-
-**The bard's fact store** is the first piece of the live storyteller, and it is the layer the other two stand on. It adds where the story's facts will live and, more importantly, who may change them: a `catalog` table the storyteller appends entries to, a closed vocabulary of eight character motives, and two freeform notes it keeps for itself. The load-bearing property is **append-only, enforced by the absence of a code path** — there is no helper that edits an entry's text, so a correction has to be appended as a new entry and the contradiction stays visible in the table instead of being absorbed into it. Two fields move, both one-way latches guarded in SQL. Entries that claim something about combat ("the rime-touched fear fire") are checked against the real resistance table at admission and refused if the claim is not mechanically true, so the world can teach you a weakness through fiction without ever lying about the rules. The tables ship empty; what fills them is the overture described two paragraphs down.
-
-**The bard's catalog selection** is the second piece, and it settles what the storyteller may be offered and what the engine will accept back. Eligibility is **spatial**, like everything else here: each entry records how deep from the start it belongs, and it is offered only once you are that far in — measured with the same graph distance the invasion front uses, so story and danger escalate on one dial rather than two. An entry that teaches something about combat is offered only where its subject is actually live nearby, decided by *calling* combat's own eligible-archetype menu rather than by keeping a second copy of its rules. There are no per-entry unlock flags and no column to hold one: what is offerable follows from where you are and what you can already solve, never from a hand-wired prerequisite. What crosses the wire is a handle, a blurb, and a motive's meaning — never an id, a depth, or an internal tag, and the event log the storyteller reads is passed through the same shield that keeps machine tokens out of narration. Coming back, a malformed entry inside a batch is dropped and its siblings still land, while only a transport or parse failure rejects a response outright; a waking that calls no tool at all is a **success**, because declining to act is a legitimate turn. Every entry is re-checked at admission against the same rules the write helper enforces — so a claim that isn't mechanically true costs the whole entry, while a genuine database fault still propagates and rolls the batch back instead of being mistaken for a bad entry. Two prompts ship with it, both forbidding deadlines and countdowns: escalation here is distance, and a ticking clock would undercut the one mechanic the whole system rests on.
-
-**The bard now runs.** The two pieces above stop being groundwork: the storyteller writes, and the engine schedules it. Once — on the very first launch of a world file, and never again — the game blocks and says so while the whole cast and the beats are authored in one call. Blocking is the point rather than a compromise: generated rooms are canon forever, so an opening area written before the story existed would be permanently story-less, and the sixty seconds this is allowed to take is the one deliberate exception to the engine's uniform call budget. After that the storyteller **wakes only on irreversible change** — a room generated, an enemy defeated, a spell learned, a beat made real — never on movement, never on a look, and never more than once every five turns however frantically you play. A waking runs on its own background thread with its own connection, so the turn that triggered it is already on your screen before the call begins; a burst of three kills across three turns is one waking, not three, and a trigger that arrives mid-waking earns exactly one more look afterwards rather than a queue of them. Everything it proposes is re-checked against the world as it is at the moment it commits, not as it was when the request was sent, so a waking that took a while cannot write something that has since become false. And the whole thing is built to be **skippable**: the overture failing, the thread never starting, every waking failing, or the commit itself faulting all leave you with byte-for-byte the game you would have had with the storyteller switched off — asserted by running one scripted session seven ways and comparing the output byte for byte.
-
-**The cast now enters the world.** This is the seam the other three bricks were built toward: when the world generator writes a new room, it is handed the story entries eligible for that room alongside the enemy menu it already had, and it may bring **at most one** of them in. The division is strict — the catalog supplies *who or what it is*, the generator supplies *how it looks here*. The blurb the model chose from is selection text and is never written into the world; the prose that lands is written fresh for that room. What materializes is a **real entity with a real parser noun**, not a sentence in a description: the whole point of the storyteller was to stop the world's facts from living only in prose, and an entry that materialized as flavor text would have defeated it. The handle is re-checked against the world **as it is at the moment of commit**, not as it was when the request was sent — a room pre-generated fifty turns ago that names an entry since placed elsewhere places nothing, and the room is still made. That leniency runs all the way down: a malformed selection is dropped and never rejects a room, and an entry arriving without its prose is dropped whole rather than half-written. The generator itself still cannot write — it performs only reads and one network call, with every write going through the same sanctioned helper as before, asserted by grep. And the placement sits deliberately **outside** the failure boundary that turns a bad AI call into a wall: a genuine database fault while placing rolls the turn back instead of being quietly downgraded, which is a distinction only a fault-injection test can see and so has one.
-
-**You can look at any of it.** `examine <noun>` — or `x` — prints an entity's canon prose **verbatim**, the treatment room descriptions already get, with an engine-authored fallback for the few things that have none. Scope is the room and your hands, with no portability check: that is the whole difference from `take`, and it is what makes enemies, characters, and fixed scenery inspectable where the narrator's facts and the resolver's noun list previously saw only what could be picked up. Nothing mechanical is appended — health, hostility, and resistance stay the status band's business — so examining is a way to read the world's prose, never a way to read its numbers. It costs a turn like any other action the world understands, which means examining mid-fight ticks the chip clock.
-
-**Characters remember, and characters answer.** A character's *identity* is written once and never edited; its *memory* is rewritten freely and capped. That split is load-bearing rather than tidy — the research round found persona consistency degrading sharply when one store carries both jobs, and found that generic summarisation strips out exactly the details that make a character themselves. Conversation lines are ordinary event rows, so the transcript that already records every mutation is also the raw memory, and there is no second log to drift from the first. Type `say <something>` — or, with AI on, just talk — and the character in the room answers in its own voice, printed **verbatim**, with no narrator paraphrasing it. On first contact the same call that produces the reply also writes that character's identity document, permanently; once the conversation runs long the same call folds it into a memory summary, so the prompt stays bounded across a session instead of growing with it. See [Talking to characters](#talking-to-characters) below.
-
-The load-bearing property is that **a conversation cannot write to the world**. A talk turn produces two event rows, at most one profile, and at most one memory summary — a character cannot open a door, hand over an item, or change a number, because no code path exists for it. The research round named the failure this prevents: players social-engineer NPCs into surrendering quest-critical items, which decouples persuasion from the game's own systems. Prompt rules exist too, but they are defence in depth; the structure is the defence, and it is asserted by counting component-table rows across a turn in which the character cheerfully agrees to hand something over.
-
-What is still missing: **major characters have an identity but no way in.** The store, the hand-authored profile loader, and the conversation all handle them — but nothing places one in a room, deliberately, on three separate guards. They are meant to *arrive* rather than spawn, and arrival is unbuilt. Characters also do not move, act, or leave. The setting itself remains a hand-authored seed. The fixed-verb parser is no longer a throwaway harness — it is the **permanent deterministic fallback** for input, the input-side analog of the template renderer: it handles every line when the resolver is disabled, declines, or fails.
+- **Major characters have no way into the world.** The storage, the profile
+  loader, and the conversation code all handle them, but nothing places one in a
+  room yet. They are meant to arrive, and arrival is not built.
+- Characters don't move, act, or leave.
+- The setting is still a hand-written file, not something the game evolves.
 
 ## Building
 
-Requirements: CMake ≥ 3.20 and a C++20 compiler. Dependencies are the vendored SQLite and nlohmann/json amalgamations plus system libcurl (`find_package(CURL REQUIRED)`). libcurl ships with macOS, so there is still nothing to install there; on Linux install a libcurl dev package (e.g. `libcurl4-openssl-dev`).
+You need CMake 3.20+ and a C++20 compiler. SQLite and nlohmann/json are
+vendored. libcurl comes from the system (`find_package(CURL REQUIRED)`) — macOS
+already has it; on Linux install a dev package such as `libcurl4-openssl-dev`.
 
 ```sh
 cmake -B build
 cmake --build build
 ```
 
-This produces two binaries in `build/`: `textworld` (the game) and `tests` (the test suite).
+You get two binaries in `build/`: `textworld` (the game) and `tests`.
 
 ## How to play
 
-Run the game from the directory where you want the world file to live:
+Run the game from wherever you want the world file to live:
 
 ```sh
 ./build/textworld
 ```
 
-On first launch it creates `world.db` and seeds the starting world: a dormitory cell and a night-dark corridor, a white candle, a cold iron key, an ashwood wand — and a goblin grunt in the corridor, one of the invaders come up from the breached lower halls. On later launches it resumes exactly where you left off.
+On first launch it creates `world.db` and builds the starting world: a dormitory
+cell and a dark corridor, a white candle, a cold iron key, an ashwood wand, and
+a goblin grunt in the corridor. Later launches pick up where you left off.
 
-You are a student at Thornmere Hall, a manor-castle school of magic, on a night when something has come up from the breached lower halls. There is no quest log and no objective text. What you have is a place to be in, things to look at, people to talk to, and invaders to get past.
+You are a student at Thornmere Hall, a manor-castle school of magic, on a night
+when something has come up from the breached lower halls. There is no quest log
+and no objective text. You get a place to be in, things to look at, people to
+talk to, and invaders to get past.
 
 ### Commands
 
 | Command | Effect |
 |---|---|
-| `look` | Describe the current room, its exits, and visible items |
-| `examine <noun>` / `x <noun>` | Look closely at one thing present — an item, an enemy, a person, the scenery |
+| `look` | Describe the room, its exits, and what you can see |
+| `examine <noun>` / `x <noun>` | Look closely at one thing — an item, an enemy, a person, scenery |
 | `go <direction>` | Move through an exit (e.g. `go north`) |
-| `take <item>` | Pick up a portable item in the room |
-| `drop <item>` | Drop a carried item |
-| `inventory` | List carried items |
-| `say <something>` | Speak to the character in the room (e.g. `say who are you`) |
-| `attack` | Strike the hostile in the room (always available, fixed damage) |
-| `cast <spell>` | Cast a known spell that is off cooldown (e.g. `cast ward`) |
+| `take <item>` | Pick up an item in the room |
+| `drop <item>` | Drop something you're carrying |
+| `inventory` | List what you're carrying |
+| `say <something>` | Talk to the character in the room (e.g. `say who are you`) |
+| `attack` | Hit the enemy in the room. Always available, fixed damage |
+| `cast <spell>` | Cast a spell you know that is off cooldown (e.g. `cast ward`) |
 | `read <grimoire>` | Study a dropped grimoire to learn its spell, permanently |
-| `spells` | List what your known spells do — element, cooldown, effect. Costs no turn |
+| `spells` | List your spells and what they do. Free, costs no turn |
 | `wait` | Pass time |
-| `quit` | Exit the game |
+| `quit` | Exit |
 
-Directions are `north`, `south`, `east`, `west`, `up`, `down`, `in`, `out`. `attack` also answers to `hit`, `kill`, and `fight`, and a bare spell name (`ward`, `fire`) is shorthand for casting it.
+Directions: `north`, `south`, `east`, `west`, `up`, `down`, `in`, `out`.
+`attack` also answers to `hit`, `kill`, and `fight`. A bare spell name (`ward`,
+`fire`) casts it.
 
-### How turns work
+### Turns
 
-Every command except `quit` and `spells` consumes a turn — **including failed attempts the world understands**, like walking into a wall or talking to an empty room. `spells` is reference information about the rules rather than an action in the world, so checking it mid-fight is free: the turn counter does not move and no enemy acts. It lists only the spells you have actually learned; the catalog is not a spoiler list.
+Every command except `quit` and `spells` uses up a turn. That includes failed
+attempts the game understands, like walking into a wall or talking to an empty
+room.
 
-A turn that consumes time also gives every hostile in the room its one turn, in the same transaction. That is why examining a goblin mid-fight costs you health: it is an ordinary action, and the chip clock does not care what you spent the tick on.
+`spells` is free because it tells you about the rules rather than doing
+something in the world. Checking it mid-fight costs nothing and no enemy moves.
+It lists only spells you have actually learned.
 
-With AI enabled (see below), you can type all of the above as natural phrasings — `pick up the candle`, `head north`, `grab the key`, `swing at the goblin`, `burn it`, `look at the desk` — and the resolver lowers them to the actions above. Anything it can't map falls through to the fixed verbs, and a line neither can resolve is declined **without consuming a turn**, so a typo is never punished.
+When a turn passes, every enemy in the room also gets its move, in the same
+transaction. That's why examining a goblin mid-fight costs you health — it is a
+normal action, and the damage clock doesn't care what you spent the turn on.
 
-With AI enabled you can also walk *off the edge of the map*: the `Exits:` line lists exactly the directions you can act on, and walking one whose room does not exist yet builds it on the spot and steps you through — see [AI world generation](#ai-world-generation) below. Without AI those not-yet-built exits are hidden, and that same move is the usual `You can't go that way.`
+With AI on, you can type normally: `pick up the candle`, `head north`, `grab the
+key`, `swing at the goblin`, `burn it`, `look at the desk`. Anything the AI
+can't map falls through to the fixed verbs. A line neither can understand is
+refused **without using a turn**, so typos aren't punished.
+
+With AI on you can also walk off the edge of the map. The `Exits:` line lists
+exactly the directions you can use, and walking one that has no room yet builds
+it and steps you through. See [AI world generation](#ai-world-generation).
+Without AI those exits are hidden and that move gives the usual
+`You can't go that way.`
 
 ### Tips
 
-**Read the band, not the prose.** The block above the prompt carries every number that matters — your HP, each spell's cooldown, every enemy's HP, what is winding up, and what states are running. Prose is written by a model; the band is written by the engine, and no model-supplied number can reach it. When the two seem to disagree, the band is right.
+**Read the band, not the prose.** The block above the prompt has every number
+that matters: your HP, spell cooldowns, enemy HP, what is winding up, and what
+effects are running. The prose comes from a model; the band comes from the
+engine. If they disagree, the band is right.
 
-**`[WINDING UP]` is a question with three right answers.** An enemy winding up lands a heavy blow next turn. Kill it, `cast stun` to cancel the strike outright, or `cast ward` to negate the damage. Doing anything else that turn is choosing to take the hit.
+**`[WINDING UP]` has three right answers.** That enemy lands a heavy blow next
+turn. Kill it, `cast stun` to cancel the strike, or `cast ward` to block the
+damage. Doing anything else is choosing to take the hit.
 
-**Fights are puzzles, not damage races.** There is no RNG anywhere. If an enemy is shrugging off everything, you are using the wrong key: try a different element, or `dispel` if attacks are breaking against a barrier. `attack` always does its floor damage, so nothing is ever a hard deadlock — but grinding is rarely the intended answer.
+**Fights are puzzles, not damage races.** There is no randomness anywhere. If an
+enemy shrugs off everything, you're using the wrong key: try another element, or
+`dispel` if your attacks are breaking against a barrier. `attack` always does
+its floor damage, so nothing is ever unwinnable — but grinding is rarely the
+answer.
 
-**Discovery is permanent, and it is the mechanic.** Hit an archetype with an element once and that resistance is shown on its row forever after, across deaths and restarts. It is derived from the event transcript, so it cannot be lost. Experimenting costs a turn and buys knowledge you keep.
+**Discovery is permanent.** Hit an enemy type with an element once and that
+resistance shows on its row forever, across deaths and restarts. It's worked out
+from the event log, so it can't be lost. Experimenting costs a turn and buys
+knowledge you keep.
 
-**Power is keys, never numbers.** There are no levels and no XP. Defeated enemies drop grimoires; `read` one to learn its spell permanently. That is the entire progression, and a learned spell survives being downed.
+**Power is spells, not stats.** No levels, no XP. Defeated enemies drop
+grimoires; `read` one to learn its spell for good. That's the whole progression,
+and learned spells survive being downed.
 
-**Being downed is not dying.** At zero HP you wake in the dormitory cell at full health, having dropped what you carried where you fell. Your spellbook is never lost. The enemy resets too, so a bad fight costs you the walk back and the items, not the run.
+**Being downed is not dying.** At zero HP you wake in the dormitory cell at full
+health, having dropped what you were carrying where you fell. Your spellbook is
+never lost. The enemy resets too, so a bad fight costs you the walk back and
+your items, not the run.
 
-**Examine everything, especially people.** Canon prose is printed verbatim and is the only place some of the world's detail exists. It is also how you find out whether the figure in the room is worth talking to.
+**Examine everything, especially people.** The prose is printed word for word
+and is the only place some details exist. It's also how you find out whether the
+figure in the room is worth talking to.
 
-**Talk to characters as if they were people.** With AI on you rarely need the `say` verb — just type what you want to say. Ask questions, be rude, lie. They answer in character and remember it. What they will not do is act: no character can open a door or hand you an item, so treat them as a source of voice and rumour rather than a lock to be picked.
+**Talk to characters like people.** With AI on you rarely need the `say` verb —
+just type what you want to say. Ask questions, be rude, lie. They answer in
+character and remember it. What they won't do is act: no character can open a
+door or hand you an item.
 
-**You cannot break the world by playing badly.** Every failure — a bad model response, a timeout, no API key at all — falls back to something playable rather than stopping the game. And the world file is just SQLite: copy `world.db` before trying something reckless and you have a save.
+**You can't break the world by playing badly.** Every failure — a bad model
+response, a timeout, no API key at all — falls back to something playable. And
+the world file is just SQLite: copy `world.db` before trying something reckless
+and you have a save.
 
-### AI narration
+## AI
 
-By default the game runs in template mode and prints `AI narration off — template mode` once at startup. Setting `ANTHROPIC_API_KEY` enables both AI features — Claude-generated prose *and* natural-language input resolution — under a single switch:
+By default the game runs on templates and prints `AI narration off — template
+mode` at startup. Setting `ANTHROPIC_API_KEY` turns on all AI features at once:
 
 ```sh
 ANTHROPIC_API_KEY=sk-ant-... ./build/textworld
 ```
 
-Environment variables:
+### Environment variables
 
 | Variable | Effect |
 |---|---|
-| `ANTHROPIC_API_KEY` | Enables both AI features (narration and input resolution) when set and non-empty. The key is sent only in the request's `x-api-key` header — never logged, stored, or written to the world file. |
-| `TEXTWORLD_AI` | Kill switch for both AI features. Set to exactly `0` to force template + fixed-verb mode even with a key present. Any other value (or unset) leaves AI on. |
-| `TEXTWORLD_MODEL` | Overrides the model **for every role**. Without it each role uses its own default: input resolution runs on `claude-haiku-4-5` (a constrained, schema-gated classification — a wrong answer fails the same validation gate and falls back to the fixed-verb parser), while narration, world generation, the storyteller, and dialogue stay on `claude-opus-4-8` for prose quality. Set and non-empty, this variable replaces all five. |
-| `TEXTWORLD_LOG_LEVEL` | How much the engine records about itself: `error`, `warn`, `info`, or `debug`, case-insensitive. **Defaults to `info`**; unset, empty, or unrecognized values all mean `info`, silently. Everything lands in `logs/textworld-*.log` and **nothing ever reaches the terminal** — see [The session log](#the-session-log) below. `debug` is also the profiling switch: at that level each turn writes one `twprof key=value` line per phase (`resolve`, `tick`, `narrate`, `generate`, `total`) and per network call (curl's namelookup/connect/appconnect/starttransfer/total split, plus role, model, and token counts). Whatever the level, a turn's output and behavior on screen are byte-for-byte identical. |
+| `ANTHROPIC_API_KEY` | Turns AI on when set and non-empty. The key is sent only in the request's `x-api-key` header. It is never logged, stored, or written to the world file. |
+| `TEXTWORLD_AI` | Off switch. Set to exactly `0` to force template mode even with a key. Any other value, or unset, leaves AI on. |
+| `TEXTWORLD_MODEL` | Overrides the model for every role. Without it, input parsing uses `claude-haiku-4-5` and narration, world generation, the storyteller, and dialogue use `claude-opus-4-8`. |
+| `TEXTWORLD_LOG_LEVEL` | `error`, `warn`, `info`, or `debug`, case-insensitive. Defaults to `info`; anything unrecognized also means `info`. Everything goes to `logs/textworld-*.log` and nothing reaches the terminal. `debug` also turns on profiling. The level never changes what you see on screen. |
 
-With AI enabled, a turn makes up to two synchronous Claude calls — one to resolve the input line, one to narrate the result — and a `go` across an unmapped edge adds one more to generate the room. A **talk** turn is still two: the narrator does not run, so the reply takes the slot narration would have used. Each call has a 20-second timeout and no retries; a slow or failed call falls back (to the fixed-verb parser, that turn's template, the `You can't go that way.` wall, or `You get no reply.` respectively). No network access happens in template mode.
+### What AI does
 
-Measured on a live session, a talk turn costs about **3.4 s** wall clock, the same as an ordinary narrated turn. That is the honest number behind the deferred streaming work: waiting three and a half seconds for a room description is tolerable, and waiting it for a person to answer you is not.
+**Narration.** Claude writes second-person prose instead of the flat templates.
+It gets a summary built from the turn's events, never the raw database. It only
+reads. Exits, visible items, and inventory lines are always added by the engine.
 
-All three roles go out through one shared client holding a single persistent libcurl handle, initialized and torn down at the process boundaries. The first call of a session pays the full DNS + TCP + TLS handshake; every later one reuses that connection and TLS session, so its setup time is effectively zero. The handle is main-thread-only by contract — nothing here starts a thread — which is recorded in `src/aihttp.hpp` for the deferred background pre-generation work.
+**Input.** Before the parser runs, Claude turns your typed line into one of the
+engine's fixed commands. It only recognizes nouns — whether an action actually
+works stays the engine's call, so `take` for an item that isn't in the room
+fails normally.
 
-Setting `TEXTWORLD_LOG_LEVEL=debug` makes all of this visible. Each turn writes `twprof` lines into the session log — stage durations, plus one record per network call carrying curl's timing split, the role, the model, and the token counts. The `twprof key=value` payload is unchanged from when these records went to stderr; it now follows the log's standard six-field prefix. Failed calls are marked and carry no token counts rather than fabricated zeros, and a stage that did not run is absent rather than reported as zero. A measured live run is written up in `.lore/work/validation/turn-latency-polish/findings.md`.
+**World generation.** See [AI world generation](#ai-world-generation).
 
-### The session log
+**Dialogue.** See [Talking to characters](#talking-to-characters).
 
-The terminal is the game screen, and only game text reaches it. Everything the
-engine has to say about itself — a rejected AI response, a fallback to template
-prose, a failed background job — goes to a log file instead.
+### When AI fails
 
-One file per session, created at startup in a `logs/` directory beside
-`world.db`, named `textworld-YYYYMMDD-HHMMSS.log` so a directory listing sorts
-chronologically. The 20 most recent are kept, the session's own file included;
-older ones are deleted at startup, and a file in `logs/` that does not match
-that pattern is never touched. Logging is **best effort**: if the file cannot be
-created the game plays normally and records nothing — no retry, no message, no
-non-zero exit.
+Any failure — no key, an HTTP error, a timeout, a refusal, or a response that
+doesn't pass validation — silently falls back for that turn:
 
-Every entry is one line of six fields — timestamp, level, thread, turn, source,
-message:
+| Feature | Fallback |
+|---|---|
+| Narration | The original template text |
+| Input | The fixed-verb parser |
+| World generation | `You can't go that way.` (the exit stays open, try again) |
+| Dialogue | `You get no reply.` |
+
+The template renderer and the fixed-verb parser are permanent. They are not
+scaffolding to be removed — they are what the game runs on when AI is off or
+fails, so a turn always produces output.
+
+### Cost per turn
+
+With AI on, a turn makes up to two calls: one to read your input, one to narrate
+the result. Walking into an unbuilt room adds a third. A talk turn is still two —
+the narrator doesn't run, so the reply takes its slot.
+
+Each call times out after 20 seconds and is never retried. Template mode makes
+no network calls at all.
+
+Measured live, a talk turn takes about **3.4 s**, the same as a narrated turn.
+That's the honest number behind the deferred streaming work: waiting three and a
+half seconds for a room description is fine, waiting it for a person to answer
+you is not.
+
+All roles share one libcurl handle owned by the process, so only the first call
+of a session pays for DNS, TCP, and TLS. Every later call reuses the connection.
+This is free, but small: a turn is about 99.9% model latency, so connection
+reuse buys back well under 1% of it. The changes that would actually help —
+streaming narration, building neighbour rooms ahead of time — are deferred.
+Profiling now exists to measure them.
+
+Set `TEXTWORLD_LOG_LEVEL=debug` and each turn writes `twprof key=value` lines to
+the session log: one per stage (`resolve`, `tick`, `narrate`, `generate`,
+`total`) and one per network call, with curl's timing breakdown, the role, the
+model, and token counts. Failed calls are marked and carry no token counts. A
+stage that didn't run is left out rather than reported as zero. A measured run
+is written up in `.lore/work/validation/turn-latency-polish/findings.md`.
+
+## The session log
+
+The terminal is the game screen. Only game text reaches it. Everything the
+engine has to say about itself — a rejected AI response, a fallback to
+templates, a failed background job — goes to a file.
+
+One file per session, created at startup in a `logs/` directory next to
+`world.db`, named `textworld-YYYYMMDD-HHMMSS.log` so listings sort by time. The
+20 most recent are kept; older ones are deleted at startup. Files that don't
+match that pattern are never touched.
+
+Logging is best effort. If the file can't be created the game plays normally and
+records nothing — no retry, no message, no error exit.
+
+Each entry is one line with six fields: timestamp, level, thread, turn, source,
+message.
 
 ```
 2026-08-05 14:30:44.310  WARN   main    turn=3   prose   aiRender: failed, falling back to templates: timeout
 ```
 
-The turn number is what correlates a message with what the player was doing, and
-the thread field (`main`, `pregen`, or `bard`) says which part of the program was
-speaking. Entries are flushed as they are written, so a session killed mid-turn
-still has everything up to that point.
+The turn number tells you what the player was doing. The thread field (`main`,
+`pregen`, or `bard`) tells you which part of the program was talking. Entries
+are flushed as they're written, so a session killed mid-turn still has
+everything up to that point.
 
-Two messages are exempt and still reach the terminal, because they fire when
-there is no game on screen: the schema-mismatch refusal and the fatal-exception
-message. Both are written to the log as well.
+Two messages still reach the terminal, because they happen when there is no game
+on screen: the schema-mismatch refusal and the fatal-error message. Both are
+also written to the log.
 
-No log entry at any level contains an API key, and none at `info` or above
-contains a prompt, a response body, or the player's typed input.
+No log entry at any level contains an API key. Nothing at `info` or above
+contains a prompt, a response body, or what the player typed.
 
-### AI world generation
+## AI world generation
 
-When AI is on and you walk a **latent** exit — an opening whose room has not been generated yet — the game generates that room synchronously and moves you in. The context sent to the model is deliberately small and fixed-size: the setting text, the name and canon description of the room you are leaving, and the direction — no ids, no map, no history. The model returns a room name, its description, and the directions that lead onward from it; the engine assigns the id, adds the reciprocal exit back (`north↔south`, `east↔west`, `up↔down`, `in↔out`), plants each declared onward direction as a new latent exit, and commits it all inside the same turn transaction, so a generation either lands whole or not at all. Because the new exit then points at a real room, re-crossing it never calls the model again.
+Each room's exits are decided when the room is created. Every direction is
+either a real opening or a wall. An opening whose room doesn't exist yet is
+**latent**, and walking it is what triggers generation.
 
-The `Exits:` line is **truthful**: it lists every direction you can act on — rooms already reached and latent openings alike, rendered indistinguishably — and nothing else. A direction not listed is a wall. So rooms can now be dead ends or narrow passages rather than silent eight-way junctions; how many ways lead onward is the architect's call, room by room. With AI off, latent exits are hidden (walking one would only wall) and the world is a frozen tree of whatever was already generated. Because generation now fires only on latent exits, the shipped seed plants a small frontier — a couple of latent openings off the starting corridor — so a fresh world has somewhere to grow.
+With AI on, walking a latent exit generates one room, writes it, and moves you
+in. What the model gets is small and fixed: the setting text, the name and
+description of the room you're leaving, and the direction. No ids, no map, no
+history. It returns a room name, a description, and the directions leading
+onward.
 
-The setting lives in `seed/setting.txt` — a freeform prose document describing the world's tone, premise, and scale, loaded into the world once at creation. Edit it before first launch (or delete `world.db` and relaunch) to grow a different kind of world; an absent or empty file just yields plainer rooms. The shipped setting is Thornmere Hall, a manor–castle school of magic explored at night, coherent with the dormitory cell and corridor of the starting world.
+The engine does the rest: it assigns the id, adds the exit back the way you came
+(`north↔south`, `east↔west`, `up↔down`, `in↔out`), turns each declared onward
+direction into a new latent exit, and commits it all inside the same turn. A
+generation either lands whole or not at all. The model never invents structure
+and never sees an id.
 
-Deferred for now: a live storyteller that evolves the setting, coarse-to-fine level-of-detail with background prefetch (generation currently stalls the turn for one round trip), a world-size cap, and de-duplicating rooms that should be the same place. The world grows as a **tree** — every declared exit spawns a brand-new room, so no two openings ever lead to the same place.
+Generated rooms are permanent. Walk back and forth and it's the same room.
 
-### Combat
+The `Exits:` line is truthful: it lists every direction you can act on, whether
+the room behind it exists yet or not, and nothing else. A direction not listed
+is a wall. So rooms can be dead ends or corridors rather than eight-way
+junctions — how many ways lead on is the generator's choice, room by room.
 
-Combat is a **deterministic puzzle**, not a dice game. Enemies are locks and spells are keys; the engine owns every quantity — damage, health, cooldowns, resistances — and **no RNG** is involved anywhere, so the same inputs always produce the same fight. It needs no AI: the whole system runs in template + fixed-verb mode.
+With AI off, latent exits are hidden and the world is frozen at whatever was
+already built. Because generation only fires on latent exits, the starting world
+ships with a few of them off the corridor so a fresh world has somewhere to
+grow.
 
-You are in combat implicitly whenever a hostile shares your room. Each tick you take **one** action — `attack`, or `cast` a spell (never both) — and then every hostile present takes its single turn, all inside the one transaction. A **chip** of fixed damage lands every tick regardless, so health is a **clock**: even flawless play costs something, and a fight you can't solve is a fight you'll lose. `attack` always deals a fixed, non-zero amount to any enemy, so no encounter is ever a hard deadlock — but grinding through the wrong way is rarely enough.
+The setting lives in `seed/setting.txt` — freeform prose about the world's tone,
+premise, and scale, loaded into the world once at creation. Edit it before first
+launch (or delete `world.db` and relaunch) to grow a different kind of world. An
+empty or missing file just gives you plainer rooms. What ships is Thornmere
+Hall.
 
-Enemies express four kinds of **lock**, each answered by the right key:
+Deferred: coarse-to-fine detail with background prefetch (generation currently
+stalls the turn for one round trip), a world-size cap, and merging rooms that
+should be the same place. The world currently grows as a tree — every exit leads
+to a brand-new room, so no two openings ever meet.
 
-- **Telegraph** — the enemy winds up a heavy blow one tick before it lands. Your action in that window is the counter: **Ward** negates the strike, **Stun** cancels it outright and interrupts the enemy.
-- **Element** — a resistance/weakness table (exact integer ratios, no floats). The right element hits for extra; the wrong one is shrugged off. A basic attack ignores the table and always deals its floor.
-- **Defense** — a **barrier** negates all damage until **Dispel** strips it: a two-key sequence.
-- **Multiplicity** — a swarm of low-health bodies answered by area damage or a damage-over-time that reaches each of them.
+## Combat
 
-A defeated enemy **drops a grimoire**; `read` it to add its spell to your book — **permanently**, surviving death and restart. That is the *only* progression: power is **keys known, never numbers grown** — there are no levels, no XP, no growable stat anywhere in the schema. Falling to zero health leaves you **downed, not dead**: you wake in the dormitory cell at full health, having dropped what you carried where you fell (your spellbook is never lost), and the enemy resets to its opening state. You can **flee** through an already-generated exit — the enemy takes one parting turn as you go — but never into an ungenerated one. An engine-authored status line reports your health and each spell's cooldown; it is never left to the model.
+Combat is a deterministic puzzle, not a dice game. Enemies are locks and spells
+are keys. The engine owns every number — damage, health, cooldowns, resistances
+— and there is no randomness anywhere, so the same inputs always give the same
+fight. It needs no AI and works fully in template mode.
 
-The shipped world hand-places one goblin so combat is exercisable immediately, and the **architect grows the rest**. A `bestiary` catalog (seed data, like the rooms) is the mold every enemy is cast from: when the architect generates a room it may place at most one enemy, **selecting** an archetype from an engine-computed eligible menu — the model sees only each archetype's short blurb and picks a costume; the engine mints every number by copying the catalog. The menu is gated so the economy can't deadlock (only locks you can already solve, or easy foes that teach a key you lack), seeded by a bootstrap rule (the first spawn is basic-soluble and drops a starter spell), and shaped by an **invasion front**: rooms near the breached core are contested, the far edges are safe. With AI off or on any generation failure, no enemy is placed — the same silent boundary as room generation.
+You're in combat whenever an enemy shares your room. Each turn you take one
+action — `attack` or `cast`, never both — and then every enemy takes its turn,
+all in one transaction.
 
-### Talking to characters
+A fixed **chip** of damage lands every turn no matter what, so health is a
+clock. Even perfect play costs something, and a fight you can't solve is a fight
+you'll lose. `attack` always deals a fixed non-zero amount to anything, so no
+fight is ever a dead end — but grinding is rarely enough.
 
-When a character shares your room you can speak to it. `say <something>` always works; with AI on you can usually just type what you mean, and the resolver decides whether a line is an action or speech — preferring the action whenever the line clearly means one, so `take the key` stays a `take` even with someone standing there.
+Enemies have four kinds of lock:
 
-A talk turn has exactly one shape. Your line is recorded, one model call produces the reply, and the reply prints **verbatim** — the narrator does not run at all, because the reply *is* the AI output for that turn and a narrator would paraphrase the one thing this feature refuses to paraphrase. That also means dialogue costs no more per turn than an ordinary narrated one.
+- **Telegraph** — the enemy winds up a heavy blow one turn before it lands. Your
+  move in that window is the answer: **ward** blocks the strike, **stun**
+  cancels it and interrupts the enemy.
+- **Element** — a resistance table of exact whole-number ratios, no floats. The
+  right element hits harder; the wrong one is shrugged off. A basic `attack`
+  ignores the table and always deals its floor.
+- **Defense** — a **barrier** blocks all damage until **dispel** strips it. Two
+  keys in sequence.
+- **Multiplicity** — a swarm of low-health bodies, answered by area damage or a
+  damage-over-time effect that reaches all of them.
 
-The prompt is split by **stability, not tidiness**: the engine's rules for every character, that character's identity document, and the setting are stable and go in the system block; the memory summary, the recent lines, and what you just said are volatile and go in the user message. That boundary is the prompt-cache boundary, and it is asserted as a property — two conversations with the same character whose memory differs produce byte-identical system blocks.
+A defeated enemy drops a grimoire. `read` it to learn its spell permanently,
+surviving death and restart. That is the only progression — there are no levels,
+no XP, and no growable stat anywhere in the database.
 
-Three rules are engine-owned rather than authored into any character file, because a rule players will actively attack cannot live somewhere an author can edit or forget. No character will explain a mechanic — a weakness, a cooldown, a resistance, a number — however you ask; none volunteers background you did not ask for; and none names a place, person, or object the world has not already established. On top of that, no character can act at all: agreeing to open a door changes nothing, because there is no code path from a conversation to a component write.
+At zero health you are **downed, not dead**. You wake in the dormitory cell at
+full health, having dropped what you carried where you fell. Your spellbook is
+never lost, and the enemy resets to its starting state.
 
-Two refusals, both consuming the turn like every refusal the world understands:
+You can **flee** through an exit that already exists — the enemy gets one
+parting shot as you go — but never into an unbuilt one.
+
+The starting world places one goblin by hand so combat works immediately. The
+generator grows the rest. A `bestiary` catalog in the seed data is the mold every
+enemy is cast from: when the generator makes a room it may place at most one
+enemy, picking a type from a menu the engine computes. The model sees only a
+short blurb for each type and picks a costume. The engine copies every number
+from the catalog.
+
+That menu is filtered so the game can't deadlock: it only offers locks you can
+already solve, or easy enemies that teach you a key you're missing. The first
+spawn is always beatable with basic attacks and drops a starter spell. And it's
+shaped by an **invasion front** — rooms near the breached core are dangerous,
+the far edges are safe.
+
+With AI off, or on any generation failure, no enemy is placed.
+
+## Talking to characters
+
+When a character is in your room you can talk to it. `say <something>` always
+works. With AI on you can usually just type what you mean, and the resolver
+decides whether a line is an action or speech. It prefers the action when the
+line clearly is one, so `take the key` stays a `take` even with someone
+standing there.
+
+A talk turn has one shape: your line is recorded, one model call produces the
+reply, and the reply prints **word for word**. The narrator doesn't run at all —
+the reply *is* the AI output for that turn, and a narrator would paraphrase the
+one thing this feature refuses to paraphrase. Dialogue therefore costs no more
+per turn than ordinary narration.
+
+### What characters won't do
+
+Three rules are built into the engine rather than written into any character
+file, because a rule players will attack can't live somewhere an author might
+edit or forget:
+
+- No character explains a mechanic. Not a weakness, a cooldown, a resistance, or
+  a number, however you ask.
+- No character volunteers background you didn't ask for.
+- No character names a place, person, or object the world hasn't established.
+
+On top of that, **no character can act at all**. Agreeing to open a door changes
+nothing, because there is no code path from a conversation to a world change. A
+talk turn writes exactly two event rows, at most one character profile, and at
+most one memory summary. Nothing else.
+
+This is deliberate. The common failure in AI-driven games is players talking an
+NPC into handing over quest items, which disconnects persuasion from the game's
+own systems. Prompt rules exist too, but they're a backup. The structure is the
+real defence, and a test checks it by counting database rows across a turn where
+the character happily agrees to hand something over.
+
+### Refusals
+
+Both use up the turn, like every refusal the game understands.
 
 | Situation | What you get |
 |---|---|
 | Nobody here | `There is no one here to talk to.` |
-| A hostile in the room | `There is no time for talk in a fight.` |
+| An enemy in the room | `There is no time for talk in a fight.` |
 
-The no-one-here check runs **first**, so an empty room that happens to contain a goblin tells you there is nobody to talk to rather than implying there was.
+The nobody-here check runs first, so an empty room that happens to contain a
+goblin tells you there's nobody to talk to rather than implying there was.
 
-Every AI failure — no key, a timeout, a transport error, a malformed response — produces the same engine-authored `You get no reply.` and still ticks the turn. The fallback line is a constant precisely so a failure can never surface as a fabricated line of dialogue. A **database** fault is the one thing treated differently: it rolls the whole turn back rather than degrading to the no-reply line, because that line would report a world that did not change as one that did.
+Every AI failure — no key, timeout, transport error, malformed response — gives
+the same `You get no reply.` and still uses the turn. That line is a fixed
+constant precisely so a failure can never show up as invented dialogue.
 
-**Memory.** A character's identity document is written on first contact and never edited, so it cannot drift. Its memory of your conversation is rewritten freely and capped — it is a reconstruction, and a character misremembering costs nothing mechanical. Once twenty unsummarised lines accumulate, the same call that answers you also folds the conversation into a fresh summary, so the prompt stays bounded however long you talk.
+A database error is handled differently: it rolls the whole turn back rather
+than printing the no-reply line, because that line would report an unchanged
+world as a changed one.
 
-**Major characters** exist as a shape — hand-authored profile files load from `seed/majors/` at world creation, and the conversation machinery already accepts them — but nothing places one in a room yet. They are meant to arrive rather than spawn, and arrival is not built. `seed/majors/` does not ship, so a fresh world has none.
+### Memory
 
-### The status band
+A character's identity is written once, on first contact, and never edited, so
+it can't drift. Its memory of your conversation is rewritten freely and capped —
+it's a reconstruction, and a character misremembering costs you nothing
+mechanically.
 
-Every turn ends with a band printed directly above the prompt:
+These are two separate jobs on purpose. Research found that personas degrade
+badly when one store does both, and that generic summarising strips out exactly
+the details that make a character themselves.
+
+Conversation lines are ordinary event rows, so the transcript that already
+records every change is also the raw memory. There is no second log to drift
+from the first.
+
+Once twenty unsummarised lines pile up, the same call that answers you also
+folds the conversation into a fresh summary, so the prompt stays bounded however
+long you talk.
+
+The prompt is split by how often things change. The engine's rules, the
+character's identity, and the setting go in the system block. The memory
+summary, recent lines, and what you just said go in the user message. That's the
+prompt-cache boundary, and it's tested: two conversations with the same
+character but different memory produce byte-identical system blocks.
+
+### Major characters
+
+They exist as a shape. Hand-written profiles load from `seed/majors/` at world
+creation and the conversation code accepts them, but nothing places one in a
+room. They're meant to arrive rather than spawn, and arrival isn't built.
+`seed/majors/` doesn't ship, so a fresh world has none.
+
+## The storyteller
+
+The storyteller writes the world's cast and story beats, and the world generator
+brings them into rooms.
+
+### Where the facts live
+
+A `catalog` table holds story entries. It is **append-only** — there is no code
+that edits an entry's text, so a correction has to be added as a new entry and
+the contradiction stays visible instead of being quietly absorbed. Two fields
+can change, both one-way switches guarded in SQL.
+
+Entries pick a motive from a closed list of eight, and the storyteller keeps two
+freeform notes for itself.
+
+An entry that claims something about combat ("the rime-touched fear fire") is
+checked against the real resistance table before it's accepted, and refused if
+the claim isn't true. So the world can teach you a weakness through fiction
+without ever lying about the rules.
+
+### What gets offered
+
+Eligibility is based on distance, like everything else here. Each entry records
+how deep from the start it belongs, and it's only offered once you're that far
+in — measured with the same graph distance the invasion front uses, so story and
+danger escalate together rather than on two separate dials.
+
+An entry that teaches something about combat is only offered where its subject
+is actually nearby, decided by calling combat's own eligible-enemy menu rather
+than keeping a second copy of its rules.
+
+There are no per-entry unlock flags, and no column to hold one. What's available
+follows from where you are and what you can already solve.
+
+What crosses the wire is a handle, a blurb, and a motive's meaning. Never an id,
+a depth, or an internal tag. The event log the storyteller reads goes through
+the same filter that keeps machine tokens out of narration.
+
+### When it runs
+
+**Once, at world creation**, the game blocks and says so while the whole cast and
+the story beats are written in a single call. Blocking here is the point, not a
+compromise: generated rooms are permanent, so an opening area written before the
+story existed would be story-less forever. This one call is allowed sixty
+seconds — the only exception to the engine's uniform timeout.
+
+**After that it wakes only on irreversible change**: a room generated, an enemy
+defeated, a spell learned, a beat made real. Never on movement, never on a
+`look`, and never more than once every five turns however fast you play.
+
+Each waking runs on a background thread with its own database connection, so the
+turn that triggered it is already on your screen before the call starts. Three
+kills across three turns is one waking, not three. A trigger arriving mid-waking
+earns exactly one more look afterwards, not a queue.
+
+Everything the storyteller proposes is re-checked against the world as it is
+when it commits, not as it was when the request was sent. A waking that took a
+while can't write something that has since become false.
+
+Inside a batch, a malformed entry is dropped and its siblings still land. Only a
+transport or parse failure rejects a whole response. A waking that calls no tool
+is a **success** — declining to act is a legitimate turn.
+
+The two prompts both forbid deadlines and countdowns. Escalation here is
+distance, and a ticking clock would undercut the mechanic the whole system rests
+on.
+
+### It is skippable by design
+
+The overture failing, the thread never starting, every waking failing, or the
+commit itself faulting all leave you with byte-for-byte the game you'd have had
+with the storyteller switched off. This is checked by running one scripted
+session seven ways and comparing the output.
+
+### Getting into rooms
+
+When the generator writes a new room, it's handed the story entries eligible for
+that room alongside the enemy menu it already had. It may bring in **at most
+one**.
+
+The division is strict: the catalog says *who or what it is*, the generator says
+*how it looks here*. The blurb the model chose from is selection text and is
+never written into the world — the prose that lands is written fresh for that
+room.
+
+What appears is a **real object with a real parser noun**, not a sentence in a
+description. The whole point of the storyteller was to stop the world's facts
+from living only in prose.
+
+The handle is re-checked at commit time. A room pre-generated fifty turns ago
+that names an entry since placed elsewhere places nothing, and the room is still
+made. Same for malformed input: a bad selection is dropped and never rejects a
+room, and an entry arriving without its prose is dropped whole rather than
+half-written.
+
+The generator still can't write. It does reads and one network call, with every
+write going through the same sanctioned helper as before.
+
+One thing is deliberately *not* forgiving: a real database error while placing
+an entry rolls the turn back instead of quietly becoming a wall.
+
+## Examine
+
+`examine <noun>` — or `x` — prints an object's prose **word for word**, the same
+treatment room descriptions get, with an engine-written fallback for the few
+things that have none.
+
+Scope is the room and your hands, with no portability check. That's the whole
+difference from `take`, and it's what makes enemies, characters, and fixed
+scenery inspectable — previously the narrator and the input resolver only saw
+things that could be picked up.
+
+Nothing mechanical is added. Health, hostility, and resistance are the status
+band's job, so examining reads the world's prose, never its numbers.
+
+It costs a turn like any other action, which means examining mid-fight advances
+the damage clock.
+
+## The status band
+
+Every turn ends with a band printed just above the prompt:
 
 ```
 -- corridor -------------------------------------------------
@@ -237,31 +592,61 @@ Every turn ends with a band printed directly above the prompt:
  You      HP: 11/12  Stun: ready  Ward: 2
 ```
 
-Rows appear only when they have content, so an empty room collapses to a header and your HP. Every number in it is engine-authored and read straight from the world — the model never supplies one, and the band never sees narration text.
+It prints on *every* turn, including turns the game refuses. Rows only appear
+when they have content, so an empty room collapses to a header and your HP.
 
-`[WINDING UP]` means that enemy has a heavy blow landing next turn: strike it down, stun it, or raise a ward. Enemy and player states show as kind plus **turns remaining** (`slow 1`, `dot 2`, `ward 1`) — duration is what you can act on. Spell readiness is either `ready` or the number of turns left.
+Every number is written by the engine and read straight from the world. It's
+composed once, in the turn loop, from read-only queries, so the AI and template
+paths produce identical bytes. The band never sees narration text and no
+model-supplied number can reach it.
 
-Once you have hit an archetype with an element, that archetype's resistance to it is permanently known and shown on its row from then on — `fire x1/2` for a resistance, `fire x2` for a weakness, `fire x1` for an element it simply does not resist. Untested elements show nothing; discovery is the mechanic. It survives the enemy's death and reopening the world, because it is derived from the event transcript rather than stored anywhere.
+`[WINDING UP]` means that enemy has a heavy blow landing next turn: kill it,
+stun it, or ward.
 
-**Color** uses the basic 16 ANSI colors only, so it resolves through your terminal theme, and it is suppressed by any of the usual signals:
+Effects show as kind plus **turns remaining** (`slow 1`, `dot 2`, `ward 1`) —
+duration is what you can act on. Spell readiness is either `ready` or the number
+of turns left.
+
+Once you've hit an enemy type with an element, its resistance shows on that row
+from then on: `fire x1/2` for a resistance, `fire x2` for a weakness, `fire x1`
+for no effect. Untested elements show nothing. This survives the enemy's death
+and reopening the world, because it's worked out from the event log rather than
+stored.
+
+### Color and width
+
+Color uses the basic 16 ANSI colors only, so it goes through your terminal
+theme. It's suppressed by the usual signals:
 
 | Variable | Effect |
 |---|---|
-| `NO_COLOR` (set, non-empty) | No color. Bold survives, so telegraphs stay distinct |
-| `CLICOLOR_FORCE` (set, non-`0`) | Color even when output is not a terminal |
+| `NO_COLOR` (set, non-empty) | No color. Bold survives, so telegraphs stay visible |
+| `CLICOLOR_FORCE` (set, non-`0`) | Color even when piped |
 | `CLICOLOR=0` | No color |
 | `TERM=dumb` | No escape sequences at all, bold included |
 
-Piping or redirecting output emits no escape bytes of any kind, so `./build/textworld > log.txt` is clean. Every colored fact is also carried by its text, so nothing is lost without color.
+Piping or redirecting emits no escape bytes, so `./build/textworld > log.txt` is
+clean. Every colored fact is also carried by its text, so nothing is lost
+without color.
 
-**Width** comes from `ioctl(TIOCGWINSZ)` on stdout, falling back to `COLUMNS`, then to 80, re-checked each turn — resize is picked up on the next turn. Long rows wrap onto continuation lines aligned to the content column; the band never truncates or elides, and never drops an exit, object, or status to fit.
+Width comes from `ioctl(TIOCGWINSZ)` on stdout, then `COLUMNS`, then 80. It's
+re-checked each turn, so resizing is picked up on the next one. Long rows wrap
+onto continuation lines aligned to the content column. The band never truncates
+and never drops an exit, object, or status to fit — a narrow terminal makes it
+taller, not quieter.
 
-### World files
+## World files
 
 - **Reset:** delete `world.db` and relaunch.
-- **Fork:** with the game not running, `cp world.db copy.db` — the copy is a fully independent world.
-- **Inspect:** the file is a plain SQLite database; `sqlite3 world.db` and poke around. The `events` table holds the full transcript.
-- **Schema changes:** the world file records the schema version it was built with, and the game **refuses to open a file from an older one** rather than migrating it — there are no migrations until there is a world worth keeping. It prints what it found, what it expected, and what to do: delete `world.db` and relaunch. The NPC memory store took the schema to version 7, so a world file created before it needs exactly that.
+- **Fork:** with the game closed, `cp world.db copy.db`. The copy is a fully
+  independent world.
+- **Inspect:** it's a plain SQLite database. Run `sqlite3 world.db` and look
+  around. The `events` table has the full transcript.
+- **Schema changes:** the file records the schema version it was built with, and
+  the game **refuses to open an older one** rather than migrating it. There are
+  no migrations until there's a world worth keeping. It prints what it found,
+  what it expected, and what to do — delete `world.db` and relaunch. The current
+  version is 7.
 
 ## Testing
 
@@ -269,13 +654,76 @@ Piping or redirecting output emits no escape bytes of any kind, so `./build/text
 ./build/tests
 ```
 
-Runs the engine test suite against temporary world files. Exit code 0 means all tests passed. Coverage includes world seeding, movement, take/drop, world generation (creation, reciprocal exits, architect-declared onward exits as latent stubs, three-state movement across wall/latent/realized exits, truthful exit display, persistence/no-regeneration, and atomic fallback with no orphan rows), the full combat system (the enemy-turn tick, chip clock, telegraph/counter, cooldowns, all four lock categories, status effects, the grimoire→learn economy, the downed model, fleeing, the bestiary catalog, the gated eligible menu, architect enemy spawning, and a determinism replay asserting two identical runs produce byte-identical worlds), all three failure tiers (including mid-tick fault injection and rollback), persistence across reopen, and file-copy portability. All three AI features — the prose renderer, the input resolver, and the architect (including its enemy and story selection) — are tested with fake HTTP transports, so the default run needs no network and no API key. The latency work is covered the same offline way: the profiling gate and record format, the per-stage timers (including `generate` nested inside `tick`, and stages being absent rather than zero), the per-role model rule and its `TEXTWORLD_MODEL` override, and the pure `usage`/`model` body parsers. The bard fact store is covered the same way and needs nothing but SQL: the schema shape and seeded motive vocabulary, every argument refusal, the truth gate driven from the real resistance rows, the two one-way latches and their idempotence, the code-point-safe truncation of the storyteller's public note, and rollback behavior inside a caller-owned transaction. Its two append-only guarantees — that no code path edits a catalog entry, and that one translation unit is the only writer — are asserted against the **source text** so they survive as regression guards rather than being grepped once by hand. Catalog selection is offline too, and needs no key: the four composing eligibility gates and their ordering, the knowledge-beat gate driven from one world by moving only the room argument, determinism across a close and reopen, both context payloads and both request bodies (including a sweep asserting no id, depth, or internal tag reaches the wire, and a ninth motive row proving the tool schema's vocabulary is read from the database rather than hardcoded), both validation gates over canned responses — every drop reason, every rejection clause, and the no-tool-call waking asserted to emit no failure diagnostic at all — and admission, where a false claim is shown to leave zero rows while its siblings commit, duplicate handles inside one batch admit exactly one without throwing, and a caller's rollback discards the lot. The pre-flight that makes that possible is fenced by an equivalence test: it refuses a set of arguments **if and only if** the write helper throws on the same ones. The scheduling brick is offline too, and every one of its threads is driven by a fake transport with no sleeps anywhere: the worker's lifecycle matrix (asserted through a thread-existence hook rather than through an absent log line, because a thread never created and a thread sitting idle log identically), one waking in flight at a time with concurrent entry flagged, the coalescing flag proven to be a flag and not a counter, the rate ceiling and the case where it masks the flag — the common path, where the events are shown to survive anyway because the wake marker is stamped when a request is sent rather than when it returns — the marker asserted mid-call to pin exactly that, the commit path leaving the world's clock untouched and rolling back every one of its writes together on a fault, and a stale waking whose handles have since been taken applying the rest of itself and dropping only what no longer holds. The degradation claim is a test rather than a promise: one scripted session run seven ways — the storyteller off, the overture failed, the thread never started, the thread throwing, every waking unparseable, the commit faulting, and the evaluation itself throwing — with all six failing runs compared byte-for-byte against the first, along with the turn counter and the whole event log. Two orderings that are undefined behavior if broken, rather than merely wrong, are pinned as source-text regression guards: the declaration order in `main()` that joins both worker threads before libcurl is torn down, and the flush that puts the player's text on screen before the storyteller is given the turn. Materialization is covered offline too, and its first obligation is **not regressing the world generator**: every existing generator, pre-generation, and combat test passes **unmodified**, which is checked as a property of the diff rather than claimed — the whole brick adds test code and edits none. On top of that: the context and tool schema on an empty catalog asserted to be exactly what they were before the storyteller existed, with both new fields omitted rather than present-and-empty; the offered menu proven to be the **prospective** room's rather than the origin's, which after the read was hoisted into the caller is a property of the call site and so is driven end-to-end through a body-capturing transport; all eight ways a malformed selection is dropped, each asserting the room survived intact; an entry that was materialized between snapshot and commit resolving to nothing rather than minting a second copy; and a path-equivalence proof committing the same proposal through the pre-generated and synchronous paths into two worlds and comparing the rows and events. The claim that a database fault during placement rolls the turn back rather than degrading to a wall is pinned by a surgical fault injection with a **control arm** proving the injection touches nothing else — and the arm was itself checked by mutation: swallowing the exception, the exact downgrade the requirement forbids, turns the suite red.
+Runs the suite against temporary world files. Exit code 0 means everything
+passed. No network and no API key needed — all AI features are tested with fake
+HTTP transports.
 
-The perception verb is pinned by a **golden session**: one scripted playthrough exercising every other verb, captured as a byte-exact literal before `examine` existed, so the claim that the new verb changed nothing else is a property of the diff rather than a promise. The NPC work is offline too, and needs no key. The memory store is pure SQL: both tables' shapes, the write-once profile latch and its refusal of orphans, the free-rewrite memory, the code-point-safe caps, and the bounded raw-line read — including the case where the cap would hand back a reply without its question, told apart from a legitimately leading reply by probing one row past the cap rather than guessing from the row count. Conversation is driven with fake transports throughout: both refusals and their fixed ordering, the character-versus-beat target rule, the exact top-level shape of the request body and its three-property tool, all eight enumerated AI failures asserted to produce **byte-identical output across every one of them**, and the leniency that drops a malformed profile or summary without costing the reply. Three properties get sharper treatment than a test each. The prompt-cache boundary is asserted as byte-identity between two system blocks built either side of a memory write. The id shield is a sweep over both prompt builders for a character deliberately given catalog id 317, entity id 419, tier 3, a `seeded` flag, and a distinctive handle — none of which may appear anywhere in the request. And the rule that a conversation cannot write to the world is checked by counting every component table's rows across a turn in which the character agrees to hand over a key, with a full-row checksum on `health` so a value change with a stable count is caught too.
+Covered:
 
-Two guarantees are verified by **mutation**, run by hand and reverted: that the memory summary is stamped with the turn *before* the current one — an off-by-one that would silently lose the last exchange of every conversation, forever, with nothing failing — and that a database fault during a talk turn rolls the turn back rather than degrading to the no-reply line. Both were observed turning the suite red before being restored, because a guard never seen to fail is not a guard.
+- **Engine:** world seeding, movement, take/drop, persistence across reopen,
+  file-copy portability, and all three failure tiers including mid-turn fault
+  injection and rollback.
+- **World generation:** room creation, reciprocal exits, declared exits becoming
+  latent stubs, movement across wall/latent/real exits, truthful exit display,
+  no regeneration on revisit, and atomic fallback leaving no orphan rows.
+- **Combat:** the enemy turn, the chip clock, telegraph and counters, cooldowns,
+  all four lock types, status effects, the grimoire economy, being downed,
+  fleeing, the bestiary catalog, the filtered enemy menu, generator spawning,
+  and a replay proving two identical runs produce byte-identical worlds.
+- **Latency:** the profiling gate and record format, per-stage timers, the
+  per-role model rule and its override, and the response body parsers.
+- **The storyteller's fact store:** schema shape, the motive vocabulary, every
+  argument refusal, the truth gate against real resistance rows, the two one-way
+  switches, safe truncation, and rollback inside a caller's transaction.
+- **Selection:** the four eligibility gates and their order, determinism across
+  close and reopen, both request bodies (including a sweep proving no id, depth,
+  or internal tag reaches the wire), every validation drop and rejection, and
+  admission — where a false claim leaves zero rows while its siblings commit.
+- **Scheduling:** the worker's lifecycle, one waking at a time, coalescing, the
+  rate ceiling, commit leaving the world clock untouched, and a stale waking
+  applying what still holds and dropping what doesn't. Every thread is driven by
+  a fake transport with no sleeps anywhere.
+- **Conversation:** both refusals and their order, the character-versus-beat
+  target rule, the request body shape, all eight AI failures producing
+  byte-identical output, and leniency dropping a malformed profile or summary
+  without costing the reply.
+- **Memory:** both table shapes, the write-once profile latch and its refusal of
+  orphans, the free-rewrite memory, safe caps, and the bounded line read —
+  including the case where the cap would return a reply without its question.
 
-Live smoke tests for all AI features hit the real API and are gated behind `TEXTWORLD_AI_LIVE_TEST=1` (with a real `ANTHROPIC_API_KEY`), skipped otherwise:
+Some claims get sharper treatment than a normal test:
+
+- **Append-only is asserted against the source text**, not just behavior — that
+  no code edits a catalog entry, and that one file is the only writer. Same for
+  two orderings that would be undefined behavior if broken: joining both worker
+  threads before libcurl is torn down, and flushing the player's text to screen
+  before the storyteller gets the turn.
+- **The storyteller is skippable** is a test, not a promise: one scripted
+  session run seven ways, with all six failing runs compared byte-for-byte
+  against the first, including the turn counter and the whole event log.
+- **Materialization doesn't regress the generator** is checked as a property of
+  the diff: every existing generator, pre-generation, and combat test passes
+  unmodified. The whole feature adds test code and edits none.
+- **The prompt-cache boundary** is asserted as byte-identity between two system
+  blocks built either side of a memory write.
+- **The id shield** is a sweep over both prompt builders for a character given a
+  deliberately distinctive id, tier, flag, and handle — none of which may appear
+  anywhere in the request.
+- **A conversation can't write to the world** is checked by counting every
+  component table's rows across a turn where the character agrees to hand over a
+  key, with a full-row checksum on `health` so a value change with a stable
+  count is caught too.
+- **`examine` changed nothing else** is pinned by a golden session: a scripted
+  playthrough of every other verb, captured byte-exact before `examine` existed.
+- **Two guarantees were verified by mutation**, run by hand and reverted: that
+  the memory summary is stamped with the previous turn (an off-by-one would
+  silently lose the last exchange of every conversation, with nothing failing),
+  and that a database fault during a talk turn rolls back rather than printing
+  the no-reply line. Both were seen turning the suite red before being restored,
+  because a guard never seen to fail is not a guard.
+
+Live tests hit the real API and are gated behind `TEXTWORLD_AI_LIVE_TEST=1`,
+skipped otherwise:
 
 ```sh
 TEXTWORLD_AI_LIVE_TEST=1 ANTHROPIC_API_KEY=sk-ant-... ./build/tests
@@ -284,12 +732,35 @@ TEXTWORLD_AI_LIVE_TEST=1 ANTHROPIC_API_KEY=sk-ant-... ./build/tests
 ## Project layout
 
 ```
-src/        engine sources (built into the twcore static library); prose.cpp is the AI renderer, nlresolve.cpp the AI input resolver, architect.cpp the AI world generator (which also offers the storyteller's eligible entries and places the one chosen), combat.cpp the deterministic combat system, band.cpp the status band and term.cpp its terminal services (color gating, width detection, wrapping), aihttp.cpp the shared persistent-connection HTTP client and per-role model rule, log.cpp the session log (levels, the six-field entry format, the one file per session, and the redirect that keeps internal messages off the game screen), profile.cpp the turn profiling that rides on it, bard.cpp the storyteller's eligibility, wire format, validation gates, overture, and post-turn scheduling (read-only: every write goes through mutations.cpp), bardworker.cpp its background waking thread (no database access of any kind, by construction), npc.cpp the conversation verb — the character lookup, the two refusals, the dialogue prompt and its engine-owned rules, the reply validation gate, and the one model call per talk turn (read-only apart from mutations.cpp calls: the translation unit contains no raw write statement, asserted by grep)
-tests/      test suite (hand-rolled micro-harness, no framework)
-seed/       base.sql — the hand-authored starting world, the bestiary catalog, and the closed motive vocabulary; setting.txt — the freeform setting (including the invasion premise) that guides world generation; majors/ — optional hand-authored major-character profiles, read at world creation (does not ship; a world with none is valid)
-logs/       one session log per run, 20 kept (created at runtime, git-ignored)
+src/        engine sources, built into the twcore static library
+tests/      test suite (hand-rolled, no framework)
+seed/       starting world, bestiary, setting text, optional major-character profiles
+logs/       one session log per run, 20 kept (runtime, git-ignored)
 vendor/     SQLite and nlohmann/json amalgamations
 .lore/      vision, specs, designs, plans, and retros
 ```
 
-`.lore/vision.md` describes where the project is headed and the design principles that govern it.
+Inside `src/`:
+
+| File | What it does |
+|---|---|
+| `prose.cpp` | AI narration |
+| `nlresolve.cpp` | AI input resolution |
+| `architect.cpp` | AI world generation, plus offering and placing story entries |
+| `combat.cpp` | The deterministic combat system |
+| `band.cpp` | The status band |
+| `term.cpp` | Terminal services — color gating, width, wrapping |
+| `aihttp.cpp` | Shared HTTP client and the per-role model rule |
+| `log.cpp` | The session log |
+| `profile.cpp` | Turn profiling |
+| `bard.cpp` | Storyteller eligibility, wire format, validation, overture, scheduling |
+| `bardworker.cpp` | The storyteller's background thread (no database access at all) |
+| `npc.cpp` | Conversation — lookup, refusals, prompt, validation, one call per turn |
+| `mutations.cpp` | The only place world writes happen |
+
+`prose.cpp`, `nlresolve.cpp`, `architect.cpp`, `bard.cpp`, and `npc.cpp` are
+read-only apart from calls into `mutations.cpp`. None of them contains a raw
+write statement, which is checked by grep.
+
+`.lore/vision.md` describes where the project is headed and the design
+principles behind it.
