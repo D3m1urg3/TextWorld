@@ -80,28 +80,40 @@ struct CatalogRow {
     int64_t tier = 0;
 };
 
-// Every UNMATERIALIZED catalog row (gate a), optionally of one `kind` (gate c),
-// ordered by catalog.id ascending (REQ-BARD-SEL-4) — an empty `kind` spans
-// both, which is what the prospective-room menu wants (plan micro-decision 5).
+// Every UNMATERIALIZED catalog row (gate a) whose kind is one of `kinds`
+// (gate c), ordered by catalog.id ascending (REQ-BARD-SEL-4).
+//
+// `kinds` is a LIST and there is deliberately no "every kind" path
+// (REQ-NPCSTORE-25). There used to be one — an empty `kind` spanned every kind,
+// and eligibleCatalogForNewRoom was its only caller — and the arrival of
+// catalog.kind = 'major' turned it into a trapdoor: majors would have started
+// appearing on the room generator's menu, which is the exact arrival mechanism
+// the NPC design avoids. Deleting the branch rather than working around it
+// means the next caller cannot reuse it either. The generator's menu is a
+// STATED list, not a default.
 //
 // LEFT JOIN on motive_catalog deliberately: an entry whose motive row is
 // somehow absent still offers, with an empty motive blurb, rather than silently
 // vanishing from the menu. writeCatalogEntry makes that unreachable today, and
 // a disappearance would be the harder failure to diagnose if it ever is not.
-std::vector<CatalogRow> catalogRows(Db& db, const std::string& kind) {
+std::vector<CatalogRow> catalogRows(Db& db, const std::vector<std::string>& kinds) {
     std::vector<CatalogRow> rows;
-    const char* sql =
-        kind.empty()
-            ? "SELECT c.handle, c.blurb, COALESCE(m.blurb, ''), "
-              "COALESCE(c.fact_archetype, ''), c.tier "
-              "FROM catalog c LEFT JOIN motive_catalog m ON m.motive = c.motive "
-              "WHERE c.entity IS NULL ORDER BY c.id"
-            : "SELECT c.handle, c.blurb, COALESCE(m.blurb, ''), "
-              "COALESCE(c.fact_archetype, ''), c.tier "
-              "FROM catalog c LEFT JOIN motive_catalog m ON m.motive = c.motive "
-              "WHERE c.entity IS NULL AND c.kind = ? ORDER BY c.id";
-    Stmt s = db.prepare(sql);
-    if (!kind.empty()) s.bind(1, kind);
+    if (kinds.empty()) return rows;  // no kind named = nothing offered
+    // ORDER BY c.id is PRESERVED across the whole list, which is why the SQL
+    // takes an IN clause rather than the caller concatenating one query per
+    // kind: two concatenated results would be in kind-then-id order, and the
+    // ordered assertions in testBardSelEligibleNewRoom pin id order.
+    std::string sql =
+        "SELECT c.handle, c.blurb, COALESCE(m.blurb, ''), "
+        "COALESCE(c.fact_archetype, ''), c.tier "
+        "FROM catalog c LEFT JOIN motive_catalog m ON m.motive = c.motive "
+        "WHERE c.entity IS NULL AND c.kind IN (";
+    for (size_t i = 0; i < kinds.size(); ++i) sql += (i == 0 ? "?" : ",?");
+    sql += ") ORDER BY c.id";
+    Stmt s = db.prepare(sql.c_str());
+    for (size_t i = 0; i < kinds.size(); ++i) {
+        s.bind(static_cast<int>(i) + 1, kinds[i]);
+    }
     while (s.step()) {
         CatalogRow row;
         row.handle = s.colText(0);
@@ -349,13 +361,13 @@ bool pairExists(Db& db, const char* sql, const std::string& a,
 // and only if some surviving entry actually carries a fact, so the common
 // (factless) catalog pays nothing for gate (d).
 template <typename NeighborhoodFn>
-std::vector<CatalogChoice> offerable(Db& db, const std::string& kind,
+std::vector<CatalogChoice> offerable(Db& db, const std::vector<std::string>& kinds,
                                      int64_t distance,
                                      NeighborhoodFn neighborhood) {
     std::vector<CatalogChoice> choices;
     std::set<std::string> live;
     bool liveKnown = false;
-    for (const CatalogRow& row : catalogRows(db, kind)) {
+    for (const CatalogRow& row : catalogRows(db, kinds)) {
         if (row.tier > distance) continue;  // gate (b)
         if (!row.factArchetype.empty()) {   // gate (d)
             if (!liveKnown) {
@@ -454,7 +466,7 @@ std::vector<CatalogChoice> eligibleCatalog(Db& db, int64_t room,
     // offers nothing, so story and combat agree on what "off the map" means.
     const int64_t distance = distanceFromSeed(db, room);
     if (distance == INT64_MAX) return {};
-    return offerable(db, kind, distance,
+    return offerable(db, {kind}, distance,
                      [&db, room] { return neighborhoodArchetypes(db, room); });
 }
 
@@ -519,11 +531,34 @@ Rules, absolute:
 - Contradict nothing already in the catalog or the setting. If you have changed your mind about an entry, write the new one and say so in the journal; nothing you have already written can be taken back.)";
 
 std::string buildOvertureContext(Db& db) {
-    // EXACTLY two keys and no ids ever (REQ-BARD-SEL-8, -9). Nothing else about
-    // world state goes in: at overture time none exists to describe.
+    // EXACTLY three keys and no ids ever (REQ-BARD-SEL-8, -9). It carried two
+    // until the hand-authored cast arrived (REQ-NPCSTORE-35); nothing else
+    // about world state goes in, because at overture time none exists to
+    // describe.
+    //
+    // The overture still cannot PLACE anyone — the map does not exist yet. It
+    // reads the cast so the story is authored AROUND the characters that were
+    // written by hand, rather than in ignorance of them.
     json payload;
     payload["setting"] = settingText(db);
     payload["motives"] = motiveVocabulary(db);
+
+    // Name plus profile, ordered by catalog.id — the order the profile files
+    // were loaded in. The key is assigned ONLY when the cast is non-empty, so a
+    // world with no majors produces a payload byte-identical to the two-key one
+    // this function produced before: absent, never present-and-empty.
+    json majors = json::array();
+    {
+        Stmt s = db.prepare(
+            "SELECT c.name, p.profile FROM catalog c "
+            "JOIN catalog_profile p ON p.catalog = c.id "
+            "WHERE c.kind = 'major' ORDER BY c.id");
+        while (s.step()) {
+            majors.push_back({{"name", s.colText(0)}, {"profile", s.colText(1)}});
+        }
+    }
+    if (!majors.empty()) payload["majors"] = std::move(majors);
+
     return payload.dump();
 }
 
@@ -793,6 +828,14 @@ std::string catalogEntryRefusal(Db& db, const CatalogEntryProposal& entry,
     // The order below mirrors writeCatalogEntry's, so a reader comparing the
     // two can walk them side by side. What matters for the equivalence test is
     // the SET of predicates, not the order.
+    //
+    // ONE PREDICATE DIVERGES, and it is deliberate (REQ-NPCSTORE-24): the
+    // helper admits kind = 'major', and this check does not. Majors are
+    // hand-authored and loaded at world creation; the bard authors characters
+    // and beats, so a 'major' arriving from the model stays a refusal. This is
+    // the wire's admission gate, not the engine's write path — the two are not
+    // meant to agree here, and the sentence above about the SET of predicates
+    // has exactly this exception.
     if (entry.kind != "character" && entry.kind != "beat") {
         return "kind must be 'character' or 'beat'";
     }
@@ -949,7 +992,14 @@ std::vector<CatalogChoice> eligibleCatalogForNewRoom(Db& db, int64_t originRoom)
     // prospective menu, plus the origin's — the origin is its only neighbour by
     // construction (combat says exactly this about the prospective room's one
     // initial link), so no exits read happens on this path.
-    return offerable(db, /*kind=*/"", newDist, [&db, originRoom] {
+    // The menu is a STATED PAIR, never a default (REQ-NPCSTORE-25). This call
+    // used to pass an empty kind, which meant "every kind" — and with
+    // catalog.kind = 'major' now in the schema, that would have silently
+    // started offering hand-authored major characters to the room generator.
+    // A major arrives when the bard decides it does, not because a room was
+    // generated near one. Adding a fourth kind later must be a decision made
+    // HERE, visibly, rather than something a new value inherits.
+    return offerable(db, {"character", "beat"}, newDist, [&db, originRoom] {
         std::set<std::string> live;
         for (const std::string& a : eligibleArchetypesForNewRoom(db, originRoom)) {
             live.insert(a);

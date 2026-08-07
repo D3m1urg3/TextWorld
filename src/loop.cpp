@@ -137,8 +137,18 @@ TurnResult runTurnCore(Db& db, const std::string& line) {
     // and delivered; the template renderer is the always-there fallback
     // (REQ-PROSE-3). Tier-a and tier-c paths above never reach this.
     // `narrate` is semantic too: AI prose and the template renderer alike.
+    //
+    // No AI narration on a talk turn (REQ-NPCTALK-27): the character's reply is
+    // the AI output and prints verbatim, so a narrator here would paraphrase
+    // the one thing this feature refuses to paraphrase. Refusals take the same
+    // branch — a talk turn has exactly one shape, and the template renderer
+    // prints the `failed` detail as it does everywhere else. aiRender is the
+    // only AiRole::Narrate call site in the binary and it is called exactly
+    // once, right here, so gating this one call gates every narrate request
+    // there is: that is what makes "no Narrate request on a talk turn"
+    // structural rather than something a test has to count.
     const ScopedStage narrateStage("narrate");
-    if (aiNarrationEnabled()) {
+    if (action->verb != Verb::Say && aiNarrationEnabled()) {
         if (auto prose = aiRender(db, currentTurn(db))) {
             return {TurnOutcome::Ticked, *prose};
         }

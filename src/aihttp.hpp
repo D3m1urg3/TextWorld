@@ -15,11 +15,16 @@
 
 #include "prose.hpp"  // HttpResponse / HttpTransport — the seam, UNCHANGED
 
-// The four AI call sites. The names are exactly the strings the profile
+// The five AI call sites. The names are exactly the strings the profile
 // records carry in their `role=` field. Bard is its own role rather than a
 // reuse of Generate precisely so a profile log can tell a bard wake from a
 // pregen room job — the two workloads with the most different shapes.
-enum class AiRole { Resolve, Narrate, Generate, Bard };
+//
+// Speak is likewise its own role rather than a reuse of Narrate (REQ-NPCTALK-16):
+// a talk turn issues NO narrate request, so the dialogue call occupies the very
+// slot narration would have used, and a profile log that could not tell the two
+// apart would show a talk turn as an ordinary narrated one.
+enum class AiRole { Resolve, Narrate, Generate, Bard, Speak };
 
 const char* roleName(AiRole role);
 

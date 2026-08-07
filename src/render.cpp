@@ -140,6 +140,15 @@ std::string render(Db& db, int64_t turn) {
             out += s.step() ? s.colText(0) + "\n"
                             : "You see nothing special about the " +
                                   nameOf(db, subject) + ".\n";
+        } else if (verb == "spoke") {
+            // The character's reply, VERBATIM (REQ-NPCTALK-25) — the treatment
+            // canon room descriptions already get. Nothing wraps or rewords it.
+            out += detail + "\n";
+        } else if (verb == "said") {
+            // Deliberately nothing: the player already saw what they typed
+            // (REQ-NPCTALK-26). Present as an explicit branch rather than
+            // falling through to the unrecognised-verb default, so the silence
+            // is a decision on the page instead of an accident.
         } else if (verb == "waited") {
             out += "Time passes.\n";
         } else if (verb == "failed") {

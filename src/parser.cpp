@@ -109,6 +109,23 @@ std::optional<Action> parse(Db& db, const std::string& line) {
         return a;
     }
 
+    // Speech (REQ-NPCTALK-8): the remainder of the line is the spoken text,
+    // taken VERBATIM from the raw input rather than from `lowered`, so the
+    // player's casing and punctuation survive into the `said` row. toLower is
+    // byte-length preserving and trim cuts the same positions on both, so the
+    // split offset computed above applies unchanged to trim(line). The target
+    // is NOT resolved here (REQ-NPCTALK-9): subject stays 0 and resolution
+    // finds the character in the room, the shape `attack` already uses. Nothing
+    // about AI availability is consulted (REQ-NPCTALK-10) — the parser is
+    // reached either way, and resolution decides what a `say` with no reachable
+    // model produces.
+    if (verbWord == "say") {
+        if (arg.empty()) return std::nullopt;  // bare verb, REQ-PROTO-6a
+        Action a{Verb::Say};
+        a.text = trim(trim(line).substr(split));
+        return a;
+    }
+
     // Bare spell word ("ward", "fire") → Cast, the natural shorthand.
     if (const std::string spell = lookupSpell(db, verbWord); !spell.empty()) {
         Action a{Verb::Cast};

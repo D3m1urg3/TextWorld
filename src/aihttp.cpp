@@ -170,6 +170,8 @@ const char* roleName(AiRole role) {
             return "generate";
         case AiRole::Bard:
             return "bard";
+        case AiRole::Speak:
+            return "speak";
     }
     return "unknown";
 }
@@ -184,12 +186,16 @@ std::string modelForRole(AiRole role) {
     // schema-gated classification — the cheap model does it, and a wrong answer
     // fails the same validation gate and falls back to the fixed-verb parser as
     // before. Narration and generation are prose quality; they stay on Opus.
+    // Speak is prose too — a character's reply is the one AI output of a talk
+    // turn and prints verbatim (REQ-NPCTALK-16, -25), so it takes the prose
+    // default rather than the resolver's cheap one.
     switch (role) {
         case AiRole::Resolve:
             return "claude-haiku-4-5";
         case AiRole::Narrate:
         case AiRole::Generate:
         case AiRole::Bard:
+        case AiRole::Speak:
             return "claude-opus-4-8";
     }
     return "claude-opus-4-8";

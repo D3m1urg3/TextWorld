@@ -2,11 +2,17 @@
 
 #include <cstdio>
 #include <fstream>
+#include <set>
 #include <sstream>
+#include <vector>
 #include <string>
 #include <utility>
 
 #include "log.hpp"  // logToTerminal — the REQ-LOG-2 schema-refusal exemption
+#include "mutations.hpp"  // writeCatalogEntry / writeCatalogProfile — the loader
+                          // writes majors through the SANCTIONED path, never raw
+                          // SQL, which is what keeps REQ-NPCSTORE-37 true of
+                          // this file without needing an exception for it
 
 namespace {
 
@@ -59,7 +65,10 @@ CREATE TABLE drop_table(archetype TEXT PRIMARY KEY, spell TEXT);                
 -- `entity` and `seeded` are one-way latches guarded in SQL (REQ-BARD-STORE-17).
 CREATE TABLE catalog(
   id      INTEGER PRIMARY KEY,          -- engine-minted; NEVER on the wire
-  kind    TEXT NOT NULL,                -- 'character' | 'beat'
+  kind    TEXT NOT NULL,                -- 'character' | 'beat' | 'major'
+                                        -- 'major' is HAND-AUTHORED and loaded at
+                                        -- world creation; it is never model-proposed
+                                        -- (REQ-NPCSTORE-23, -24)
   handle  TEXT NOT NULL UNIQUE,         -- the model-facing SELECTION token
   name    TEXT NOT NULL,                -- the in-world parser noun; becomes the
                                         -- minted entity's name row
@@ -81,13 +90,37 @@ CREATE TABLE catalog(
 -- sees `blurb`, never the key.
 CREATE TABLE motive_catalog(motive TEXT PRIMARY KEY, blurb TEXT);
 
+-- The authored identity of a character: who they are, how they talk, what they
+-- know, what they will not say. WRITE-ONCE — there is deliberately NO helper
+-- that edits a profile, so a character's identity cannot drift
+-- (REQ-NPCSTORE-11, -12). Asserted against the source text, not trusted.
+--
+-- Keyed by CATALOG id, not entity, because a hand-authored major character's
+-- profile exists from world creation, long before any entity does.
+CREATE TABLE catalog_profile(
+  catalog INTEGER PRIMARY KEY,        -- catalog.id
+  profile TEXT NOT NULL               -- the full character document, model-facing
+);
+
+-- What a character remembers, as it remembers it. Freely rewritten and CAPPED
+-- (REQ-NPCSTORE-15, -17) — memory is a reconstruction, and a character
+-- misremembering costs nothing mechanical. Keyed by ENTITY: memory exists only
+-- once the character does. Rows are NOT pre-created at materialisation; the
+-- write helper upserts, so there is no row to branch on (REQ-NPCSTORE-9).
+CREATE TABLE npc_memory(
+  entity       INTEGER PRIMARY KEY,
+  summary      TEXT NOT NULL DEFAULT '',
+  summary_turn INTEGER NOT NULL DEFAULT 0   -- the turn the summary last covered
+);
+
 -- the event log (append-only)
 CREATE TABLE events(
   id INTEGER PRIMARY KEY,
   turn INTEGER NOT NULL,
   actor INTEGER,            -- who did it (player entity for now)
   verb TEXT NOT NULL,       -- 'moved','took','dropped','looked','waited','failed'; combat: 'attacked','chip',…
-                            -- world-gen: 'generated'; story: 'materialized' (REQ-BARD-STORE-7)
+                            -- world-gen: 'generated'; story: 'materialized' (REQ-BARD-STORE-7);
+                            -- speech: 'said','spoke' (REQ-NPCSTORE-1)
   subject INTEGER,          -- primary entity acted on
   object INTEGER,           -- secondary entity (destination room, container…)
   detail TEXT               -- human-readable fragment or NULL
@@ -130,8 +163,83 @@ std::string readFileOrEmpty(const std::string& path) {
     return buf.str();
 }
 
+// Strip leading/trailing ASCII whitespace. A file-local copy: mutations.cpp has
+// one in its own anonymous namespace for the same reason, and world.cpp does not
+// otherwise depend on that unit's internals.
+std::string trimAscii(const std::string& s) {
+    const char* const ws = " \t\n\r\f\v";
+    const size_t first = s.find_first_not_of(ws);
+    if (first == std::string::npos) return "";
+    return s.substr(first, s.find_last_not_of(ws) - first + 1);
+}
+
+// The profile's BLURB is its first non-empty body line (REQ-NPCSTORE-29).
+// writeCatalogEntry requires a blurb and a major character is never selected
+// from a menu, so no second authoring surface is invented for a field nothing
+// reads. "First NON-EMPTY" rather than "first" so a body that opens with a
+// blank line still yields a usable one.
+std::string firstNonEmptyLine(const std::string& body) {
+    size_t pos = 0;
+    while (pos <= body.size()) {
+        const size_t nl = body.find('\n', pos);
+        std::string line = body.substr(pos, nl == std::string::npos
+                                                ? std::string::npos
+                                                : nl - pos);
+        const std::string trimmed = trimAscii(line);
+        if (!trimmed.empty()) return trimmed;
+        if (nl == std::string::npos) break;
+        pos = nl + 1;
+    }
+    return "";
+}
+
+// Write the hand-authored major cast, in the order the caller supplied
+// (REQ-NPCSTORE-33). Every failure THROWS with the file's name attached: these
+// are hand-authored seed files like base.sql, and a silently dropped major is a
+// world missing its most expensive content with nothing to show for it
+// (REQ-NPCSTORE-31). The throw reaches initialize()'s catch, which rolls the
+// whole transaction back — a half-seeded world is not one of the outcomes.
+void writeMajors(Db& db, const std::vector<MajorProfileFile>& files) {
+    std::set<std::string> handlesSoFar;
+    for (const MajorProfileFile& file : files) {
+        const auto fail = [&file](const std::string& why) {
+            throw std::runtime_error("major profile '" + file.name + "': " + why);
+        };
+
+        MajorProfile parsed;
+        const std::string reason = parseMajorProfile(file.text, parsed);
+        if (!reason.empty()) fail(reason);
+
+        // Scoped to the FILES, not the catalog (REQ-NPCSTORE-31b): the catalog
+        // is empty at this point, so there is nothing else to collide with. A
+        // collision with a handle the bard later proposes is the overture's
+        // case, handled by catalogEntryRefusal dropping that one entry.
+        if (!handlesSoFar.insert(parsed.handle).second) {
+            fail("handle '" + parsed.handle +
+                 "' duplicates an earlier profile file's handle");
+        }
+
+        int64_t id = 0;
+        try {
+            // The unknown-motive refusal comes free from writeCatalogEntry's
+            // existing motive_catalog check; it is caught here only so the
+            // message gains the file name the author needs to fix it.
+            id = writeCatalogEntry(db, "major", parsed.handle, parsed.name,
+                                   firstNonEmptyLine(parsed.profile),
+                                   parsed.motive, parsed.tier);
+        } catch (const std::runtime_error& e) {
+            fail(e.what());
+        }
+        // The body is stored BYTE-EXACT (REQ-NPCSTORE-28): nothing the engine
+        // owns is injected into it. The engine's rules live in the conversation
+        // prompt, not in a file an author can edit or forget.
+        writeCatalogProfile(db, id, parsed.profile);
+    }
+}
+
 void initialize(Db& db, const std::string& seedPath,
-                const std::string& settingPath) {
+                const std::string& settingPath,
+                const std::vector<MajorProfileFile>& majors) {
     const std::string seedSql = readFile(seedPath);
     // Read the setting tolerantly BEFORE opening the transaction; an absent
     // file is fine (empty setting), and this keeps any filesystem work out of
@@ -156,6 +264,13 @@ void initialize(Db& db, const std::string& seedPath,
         db.exec(
             "INSERT INTO meta(key, value) VALUES "
             "('bard_journal', ''), ('bard_focus', ''), ('bard_last_wake_turn', 0)");
+        // The hand-authored cast, LAST and inside this same transaction
+        // (REQ-NPCSTORE-33): major rows exist the instant openWorld returns and
+        // before any overture call is possible, and a malformed file rolls the
+        // whole world back rather than leaving it half-seeded. The empty case is
+        // the normal one and is silent — no cast is not a fault
+        // (REQ-NPCSTORE-32).
+        writeMajors(db, majors);
         db.commit();
     } catch (...) {
         db.rollback();
@@ -165,13 +280,99 @@ void initialize(Db& db, const std::string& seedPath,
 
 }  // namespace
 
+std::string parseMajorProfile(const std::string& text, MajorProfile& out) {
+    // The header ends at the FIRST blank line and never resumes
+    // (REQ-NPCSTORE-27). Finding that line first, before parsing anything,
+    // is what makes "a `key: value` line in the body is body text" structural
+    // rather than a rule the header parser has to remember.
+    size_t pos = 0;
+    size_t bodyStart = std::string::npos;
+    std::vector<std::string> headerLines;
+    // `pos < size`, not `<=`: a file's trailing newline must not be read as a
+    // phantom empty final line, or a header with no body at all would parse as
+    // "header, separator, empty body" instead of failing for what it is.
+    while (pos < text.size()) {
+        const size_t nl = text.find('\n', pos);
+        const bool lastLine = (nl == std::string::npos);
+        std::string line = text.substr(pos, lastLine ? std::string::npos : nl - pos);
+        if (!line.empty() && line.back() == '\r') line.pop_back();  // CRLF
+        if (trimAscii(line).empty()) {
+            // The separator. The body is everything AFTER this line's newline,
+            // byte for byte — including a leading blank line of its own.
+            bodyStart = lastLine ? text.size() : nl + 1;
+            break;
+        }
+        headerLines.push_back(std::move(line));
+        if (lastLine) break;
+        pos = nl + 1;
+    }
+    if (bodyStart == std::string::npos) {
+        return "no blank line separating the header from the body";
+    }
+
+    bool haveHandle = false, haveName = false, haveMotive = false, haveTier = false;
+    MajorProfile parsed;
+    for (const std::string& line : headerLines) {
+        const size_t colon = line.find(':');
+        if (colon == std::string::npos) {
+            return "header line does not parse (no colon): '" + line + "'";
+        }
+        const std::string key = trimAscii(line.substr(0, colon));
+        const std::string value = trimAscii(line.substr(colon + 1));
+        // An UNRECOGNISED key is a failure, not a silent skip
+        // (REQ-NPCSTORE-31a). The concrete case is an author writing `goal:` —
+        // a field this format deliberately does not carry (REQ-NPCSTORE-30) —
+        // and getting a world where the line quietly did nothing. A duplicate
+        // key is refused for the same reason: the first one would be what
+        // quietly did nothing.
+        if (value.empty()) return "header key '" + key + "' has an empty value";
+        if (key == "handle") {
+            if (haveHandle) return "duplicate header key 'handle'";
+            parsed.handle = value;
+            haveHandle = true;
+        } else if (key == "name") {
+            if (haveName) return "duplicate header key 'name'";
+            parsed.name = value;
+            haveName = true;
+        } else if (key == "motive") {
+            if (haveMotive) return "duplicate header key 'motive'";
+            parsed.motive = value;
+            haveMotive = true;
+        } else if (key == "tier") {
+            if (haveTier) return "duplicate header key 'tier'";
+            // Whole-string, so `tier: 2 or 3` is refused rather than read as 2.
+            size_t consumed = 0;
+            try {
+                parsed.tier = std::stoll(value, &consumed);
+            } catch (const std::exception&) {
+                return "header key 'tier' is not an integer: '" + value + "'";
+            }
+            if (consumed != value.size()) {
+                return "header key 'tier' is not an integer: '" + value + "'";
+            }
+            haveTier = true;
+        } else {
+            return "unrecognised header key '" + key + "'";
+        }
+    }
+    if (!haveHandle) return "missing required header key 'handle'";
+    if (!haveName) return "missing required header key 'name'";
+    if (!haveMotive) return "missing required header key 'motive'";
+    if (!haveTier) return "missing required header key 'tier'";
+
+    parsed.profile = text.substr(bodyStart);  // verbatim, to the last byte
+    out = std::move(parsed);
+    return "";
+}
+
 OpenedWorld openWorld(const std::string& path, const std::string& seedPath,
-                      const std::string& settingPath) {
+                      const std::string& settingPath,
+                      const std::vector<MajorProfileFile>& majors) {
     Db db(path);
 
     if (!hasMetaTable(db)) {
         // Absent, zero-byte, or otherwise uninitialized: build the world.
-        initialize(db, seedPath, settingPath);
+        initialize(db, seedPath, settingPath, majors);
         return {std::move(db), true};  // created THIS call (REQ-BARD-WAKE-1)
     }
 
