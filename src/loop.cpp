@@ -8,8 +8,10 @@
 #include <stdexcept>
 
 #include "action.hpp"
+#include "architect.hpp"  // architectEnabled() — the latent-exit gate the fallback shares
 #include "band.hpp"
 #include "combat.hpp"
+#include "log.hpp"       // the warn entry REQ-POLISH-6 adds to the band-failure path
 #include "nlresolve.hpp"
 #include "profile.hpp"
 #include "prose.hpp"
@@ -49,11 +51,51 @@ int64_t roomOf(Db& db, int64_t player) {
 // than failing"). A band that crashed the turn it was meant to explain would be
 // strictly worse than no band, so the failure is swallowed here rather than
 // propagated. The suite tests this path directly rather than trusting it.
+// REQ-POLISH-6: the last-resort exits line. Since step 5 the band is the ONLY
+// route the exits reach the player, so a band failure must not silently take
+// them with it. Same query shape as band.cpp's exitsRow and the roomBlock this
+// replaced — same ORDER BY, same latent-exit gate (REQ-UI-10) — so the fallback
+// says what the band would have said. Plain text at column 0: this path runs
+// when the styled composition has already failed.
+std::string fallbackExitsLine(Db& db) {
+    Stmt player = db.prepare("SELECT entity FROM player LIMIT 1");
+    if (!player.step()) return "";
+    Stmt loc = db.prepare("SELECT container FROM location WHERE entity = ?");
+    loc.bind(1, player.colInt(0));
+    if (!loc.step()) return "";
+
+    Stmt s = db.prepare(
+        "SELECT direction FROM exits WHERE room = ? "
+        "AND (dest IS NOT NULL OR ?) ORDER BY direction");
+    s.bind(1, loc.colInt(0));
+    s.bind(2, architectEnabled() ? 1 : 0);
+    std::string dirs;
+    while (s.step()) {
+        if (!dirs.empty()) dirs += ", ";
+        dirs += s.colText(0);
+    }
+    if (dirs.empty()) return "";
+    return "Exits: " + dirs + ".\n";
+}
+
 std::string bandOrEmpty(Db& db, int width) {
     try {
         return composeBand(db, width);
-    } catch (const std::exception&) {
-        return "";
+    } catch (const std::exception& e) {
+        // Today this logged nothing. REQ-POLISH-6: a band that fell over is now
+        // the difference between the player knowing the exits and not, so it is
+        // worth a line in the session log.
+        logEmitf(LogLevel::Warn, "band", "band composition failed: %s", e.what());
+        try {
+            return fallbackExitsLine(db);
+        } catch (const std::exception&) {
+            // REQ-POLISH-6a: the likely case, not the exotic one — a band that
+            // threw for want of a player or a location row will usually deny
+            // the fallback its room too. Nothing in this spec may turn a
+            // display failure into a failed turn, so the turn keeps its
+            // narration and the game continues.
+            return "";
+        }
     }
 }
 

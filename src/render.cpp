@@ -7,8 +7,6 @@
 #include <string>
 #include <vector>
 
-#include "architect.hpp"  // architectEnabled() — the latent-exit DISPLAY gate
-
 namespace {
 
 // --- read-only lookups ------------------------------------------------------
@@ -55,38 +53,23 @@ std::string joinList(const std::vector<std::string>& items) {
     return out;
 }
 
-// The full room description block: canon prose, exits, visible portables.
-// Every line here is sourced by the 'moved'/'looked' event that asked for it.
+// The room's canon prose and NOTHING else (REQ-POLISH-5).
+//
+// The `Exits:` and `You see:` lines used to live here. Both were printed again
+// by the status band one or two lines below, from queries this file and
+// band.cpp ran byte-identically — REQ-UI-10 and REQ-UI-11 say so outright, the
+// latent-exit gate included. The band is now the ONE place either fact reaches
+// the player, which is why loop.cpp's bandOrEmpty grew a fallback in the same
+// commit: with the duplicate gone, a band failure would otherwise take the
+// exits silently with it (REQ-POLISH-6).
+//
+// Every line here is still sourced by the 'moved'/'looked' event that asked
+// for it.
 std::string roomBlock(Db& db, int64_t room) {
-    std::string out;
-
-    {
-        Stmt s = db.prepare("SELECT prose FROM description WHERE entity = ?");
-        s.bind(1, room);
-        if (s.step()) out += s.colText(0) + "\n";
-    }
-
-    {
-        std::vector<std::string> dirs;
-        // Realized exits (dest non-NULL) always list; latent exits (dest NULL)
-        // list ONLY when the architect is enabled — walking one would wall
-        // otherwise (REQ-EXITS-4). A latent exit renders IDENTICALLY to a
-        // realized one: no marker distinguishes them.
-        Stmt s = db.prepare(
-            "SELECT direction FROM exits WHERE room = ? "
-            "AND (dest IS NOT NULL OR ?) ORDER BY direction");
-        s.bind(1, room);
-        s.bind(2, architectEnabled() ? 1 : 0);
-        while (s.step()) dirs.push_back(s.colText(0));
-        if (!dirs.empty()) out += "Exits: " + joinList(dirs) + ".\n";
-    }
-
-    {
-        const std::vector<std::string> items = portableNamesIn(db, room);
-        if (!items.empty()) out += "You see: " + joinList(items) + ".\n";
-    }
-
-    return out;
+    Stmt s = db.prepare("SELECT prose FROM description WHERE entity = ?");
+    s.bind(1, room);
+    if (!s.step()) return "";
+    return s.colText(0) + "\n";
 }
 
 // Inventory listing: portables whose container is the actor.

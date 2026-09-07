@@ -99,30 +99,18 @@ std::string joinList(const std::vector<std::string>& items) {
 
 // --- deterministic appends (REQ-PROSE-14) -----------------------------------
 // The mechanical tail glued after validated AI prose, in render.cpp's EXACT
-// line formats (its roomBlock minus the canon line — the canon rides INSIDE
-// the AI prose, verbatim-checked by clause c — and its inventoryBlock).
-
-// "Exits: …" and "You see: …" lines for one room, formats identical to
-// render.cpp's roomBlock tail.
-std::string exitsAndItemsLines(Db& db, int64_t room) {
-    std::string out;
-
-    {
-        std::vector<std::string> dirs;
-        Stmt s = db.prepare(
-            "SELECT direction FROM exits WHERE room = ? ORDER BY direction");
-        s.bind(1, room);
-        while (s.step()) dirs.push_back(s.colText(0));
-        if (!dirs.empty()) out += "Exits: " + joinList(dirs) + ".\n";
-    }
-
-    {
-        const std::vector<std::string> items = portableNamesIn(db, room);
-        if (!items.empty()) out += "You see: " + joinList(items) + ".\n";
-    }
-
-    return out;
-}
+// line formats (its inventoryBlock; the canon rides INSIDE the AI prose,
+// verbatim-checked by clause c).
+//
+// The "Exits: …" and "You see: …" lines used to be appended here too, mirroring
+// render.cpp's roomBlock tail. REQ-POLISH-5 deleted that tail from roomBlock,
+// and this copy of it with it: both facts now reach the player exactly once,
+// through the status band. REQ-PROSE-14 still holds — the band is
+// engine-composed and appended after the prose, which is what that requirement
+// asks for — and the spec says so in as many words.
+//
+// Inventory is deliberately NOT part of that move: the band has no inventory
+// row, so this stays the only place the carrying line is appended.
 
 // Inventory line, format identical to render.cpp's inventoryBlock.
 std::string inventoryLine(Db& db, int64_t actor) {
@@ -132,10 +120,9 @@ std::string inventoryLine(Db& db, int64_t actor) {
 }
 
 // The full appended block for one turn, from this unit's OWN fresh SELECTs:
-// per room-describing event ('moved', or 'looked' with NULL detail), the
-// exits + visible-items lines for the actor's CURRENT room (post-commit
-// state, so for 'moved' that is the destination); per 'looked' event with
-// detail='inventory', the carrying line.
+// per 'looked' event with detail='inventory', the carrying line. Room-describing
+// events ('moved', 'looked' with NULL detail) append nothing now — the band
+// carries their exits and objects (REQ-POLISH-5).
 std::string deterministicAppends(Db& db, int64_t turn) {
     std::string out;
 
@@ -149,9 +136,7 @@ std::string deterministicAppends(Db& db, int64_t turn) {
         const std::string detail = ev.colText(2);
         const bool detailIsNull = ev.colInt(3) != 0;
 
-        if (verb == "moved" || (verb == "looked" && detailIsNull)) {
-            out += exitsAndItemsLines(db, roomOf(db, actor));
-        } else if (verb == "looked" && detail == "inventory") {
+        if (verb == "looked" && detail == "inventory") {
             out += inventoryLine(db, actor);
         }
     }

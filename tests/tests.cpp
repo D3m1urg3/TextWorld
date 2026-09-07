@@ -1878,17 +1878,19 @@ static void testRender() {
     CHECK(render(db, 0).empty());
     CHECK(render(db, 999).empty());
 
-    // --- moved: full room block for the destination (garden) ---
+    // --- moved: the destination's canon prose, and NOTHING else
+    // (REQ-POLISH-5). The `Exits:` and `You see:` lines these three blocks used
+    // to assert on now reach the player only through the status band, which
+    // prints them from byte-identical queries (REQ-UI-10, REQ-UI-11). ---
     tick(db, Action{Verb::Go, 0, "north"});
     ++turn;
     {
         const std::string out = render(db, turn);
         // Canon prose from the seed's garden description.
         CHECK(contains(out, "An overgrown walled garden"));
-        // Exits list mentions the way back south.
-        CHECK(contains(out, "south"));
-        // The key (portable, in the garden) is visible by name.
-        CHECK(contains(out, "key"));
+        CHECK(!contains(out, "Exits: "));
+        // The key (portable, in the garden) is the band's business now.
+        CHECK(!contains(out, "You see: "));
     }
 
     // --- looked with NULL detail: room block for the actor's current room ---
@@ -1897,7 +1899,8 @@ static void testRender() {
     {
         const std::string out = render(db, turn);
         CHECK(contains(out, "An overgrown walled garden"));
-        CHECK(contains(out, "Exits: south."));
+        CHECK(!contains(out, "Exits: "));
+        CHECK(!contains(out, "You see: "));
     }
 
     // Back to the stone hall, where the lantern waits.
@@ -1906,8 +1909,8 @@ static void testRender() {
     {
         const std::string out = render(db, turn);
         CHECK(contains(out, "A vaulted hall of grey stone"));
-        CHECK(contains(out, "Exits: north."));
-        CHECK(contains(out, "lantern"));
+        CHECK(!contains(out, "Exits: "));
+        CHECK(!contains(out, "lantern"));
     }
 
     // --- inventory while empty-handed ---
@@ -2123,8 +2126,6 @@ static void testLoop() {
 }
 
 static const char* const kExamineGoldenSession = R"GOLDEN(  A bare stone cell.
-  Exits: down, north.
-  You see: wand.
 -- cell ------------------------------------------------------------------------
  Exits    down, north
  Objects  wand
@@ -2174,8 +2175,6 @@ ward — element: none, cooldown: 2, blocks one telegraphed strike
  Objects  wand
  You      HP: 12/12
   A long dim corridor.
-  Exits: east, south, up.
-  You see: key.
 -- corridor --------------------------------------------------------------------
  Exits    east, south, up
  Objects  key
@@ -2215,8 +2214,6 @@ ward — element: none, cooldown: 2, blocks one telegraphed strike
  Objects  key, fire grimoire
  You      HP: 10/12
   A bare stone cell.
-  Exits: down, north.
-  You see: wand.
 -- cell ------------------------------------------------------------------------
  Exits    down, north
  Objects  wand
@@ -2838,12 +2835,18 @@ struct ScopedEnvVar {
     }
 };
 
-// REQ-EXITS-4: the Exits line lists realized exits always, latent exits only
+// REQ-EXITS-4: the Exits row lists realized exits always, latent exits only
 // when the architect is enabled, and a latent exit renders IDENTICALLY to a
 // realized one (no marker). Build a room (stone hall, room 1) with one realized
 // exit (north→garden, from the fixture) and one latent exit (up, dest NULL),
 // then render it with the architect enabled vs disabled. Defined here, after
 // ScopedEnvVar, because it toggles ANTHROPIC_API_KEY under a guard.
+//
+// Re-pointed at the BAND by REQ-POLISH-5, which deleted roomBlock's duplicate
+// Exits line. The invariant REQ-EXITS-4 protects is unchanged; only the one
+// place it is now stated moved. This is spec check 6 — the regression the
+// deletion could plausibly have caused — asserted here rather than only in a
+// capture.
 static void testExitDisplayInvariant() {
     const TempDbFile worldPath("textworld_exitdisplay_tests.db");
     Db db = openWorld(worldPath.string(), "tests/fixture.sql").db;
@@ -2856,29 +2859,38 @@ static void testExitDisplayInvariant() {
     const ScopedEnvVar keyGuard("ANTHROPIC_API_KEY");
     const ScopedEnvVar aiGuard("TEXTWORLD_AI");
 
+    // Plain style, so the assertions read the text and not the escape bytes.
+    const TermStyle plain{false, false};
+
     // --- architect ENABLED: both the realized and the latent exit list ---
     setenv("ANTHROPIC_API_KEY", "test-key-never-used", 1);
     unsetenv("TEXTWORLD_AI");
     {
-        const std::string out = renderRoomOf(db, 3);
+        const std::string band = composeBand(db, 80, plain);
         // Both directions present, ORDER BY direction → north, up.
-        CHECK(contains(out, "Exits: north, up."));
+        CHECK(contains(band, " Exits    north, up"));
         // The latent 'up' carries NO marker distinguishing it from the realized
         // 'north' — both are bare direction words joined identically. The exact
-        // line above plus the absence of any decoration on 'up' proves it.
-        CHECK(!contains(out, "up*"));
-        CHECK(!contains(out, "up?"));
-        CHECK(!contains(out, "(up"));
+        // row above plus the absence of any decoration on 'up' proves it.
+        CHECK(!contains(band, "up*"));
+        CHECK(!contains(band, "up?"));
+        CHECK(!contains(band, "(up"));
+
+        // REQ-POLISH-5: and the room block says none of it. The band is the one
+        // place either fact reaches the player now.
+        const std::string block = renderRoomOf(db, 3);
+        CHECK(!contains(block, "Exits"));
+        CHECK(!contains(block, "You see"));
     }
 
     // --- architect DISABLED (key unset): only the realized exit lists ---
     unsetenv("ANTHROPIC_API_KEY");
     unsetenv("TEXTWORLD_AI");
     {
-        const std::string out = renderRoomOf(db, 3);
-        CHECK(contains(out, "Exits: north."));
-        // The latent 'up' is hidden entirely (room-1 prose contains no "up").
-        CHECK(!contains(out, "up"));
+        const std::string band = composeBand(db, 80, plain);
+        CHECK(contains(band, " Exits    north"));
+        // The latent 'up' is hidden entirely.
+        CHECK(!contains(band, "up"));
     }
 }
 
@@ -4682,7 +4694,14 @@ static void testProseAiRender() {
         return cannedResponse(cannedText);
     };
 
-    // --- moved turn: AI prose + the template's OWN Exits/You-see tail ---
+    // --- moved turn: AI prose and NOTHING appended (REQ-POLISH-5) ---
+    // This block used to assert that the AI path re-emitted roomBlock's own
+    // "Exits: " / "You see: " tail, character-identical. REQ-POLISH-5 deleted
+    // that tail from both emitters, so the two paths agree by having nothing to
+    // agree about: the exits and objects reach the player through the band,
+    // which runTurn appends to BOTH paths from one composition (REQ-UI-1).
+    // REQ-PROSE-14 is unaffected — the band is engine-composed and appended
+    // after the prose, which is what it asks for.
     CHECK(runTurn(db, "go north").outcome == TurnOutcome::Ticked);  // turn 1
     {
         cannedText = "You step through the archway. " + gardenProse +
@@ -4692,15 +4711,12 @@ static void testProseAiRender() {
         CHECK(calls == 1);
         CHECK(out.has_value());
 
-        // The appended tail must be CHARACTER-IDENTICAL to the tail of the
-        // template render for the same turn (everything from "Exits: " on).
         const std::string tmpl = render(db, 1);
-        const size_t tailPos = tmpl.find("Exits: ");
-        CHECK(tailPos != std::string::npos);
-        const std::string tail = tmpl.substr(tailPos);
-        CHECK(contains(tail, "Exits: south.\n"));
-        CHECK(contains(tail, "You see: key.\n"));
-        CHECK(*out == cannedText + "\n" + tail);
+        CHECK(!contains(tmpl, "Exits: "));
+        CHECK(!contains(tmpl, "You see: "));
+        CHECK(!contains(*out, "Exits: "));
+        CHECK(!contains(*out, "You see: "));
+        CHECK(*out == cannedText + "\n");
     }
 
     // --- inventory turn, empty-handed: the exact carrying line appended ---
@@ -9513,10 +9529,13 @@ static void testBandContent() {
         CHECK(!contains(band, "vaulted hall of grey stone"));
         CHECK(!contains(band, "flagstones"));
 
-        // The Exits and Objects lists match the room block's exactly.
+        // REQ-POLISH-5: the room block no longer states either fact. The band
+        // above is the one place both reach the player.
         const std::string block = renderRoomOf(db, 3);
-        CHECK(contains(block, "Exits: north."));
-        CHECK(contains(block, "You see: lantern."));
+        CHECK(contains(block, "vaulted hall of grey stone"));
+        CHECK(!contains(block, "Exits"));
+        CHECK(!contains(block, "You see"));
+        CHECK(!contains(block, "lantern"));
 
         // Check 17: moving to a room with neither drops BOTH rows entirely.
         db.exec("DELETE FROM location WHERE entity = 4");   // the lantern
@@ -10039,6 +10058,63 @@ static void testBandWiring() {
         CHECK(!contains(r.output, "-- "));  // no band, but no crash either
     }
 
+    // --- REQ-POLISH-6 / -6a: the fallback exits line, and its own failure ---
+    // Since REQ-POLISH-5 the band is the ONLY route the exits reach the player,
+    // so a band failure must not silently take them with it. Spec check 7.
+    {
+        const TempDbFile worldPath("textworld_band_fallback_tests.db");
+        Db db = openWorld(worldPath.string(), "tests/fixture.sql").db;
+
+        std::vector<std::string> logLines;
+        logSetSink([&logLines](const std::string& line) { logLines.push_back(line); });
+        const ScopedEnvVar levelGuard("TEXTWORLD_LOG_LEVEL");
+        setenv("TEXTWORLD_LOG_LEVEL", "info", 1);
+        logRefreshLevel();
+
+        // Make composeBand throw for a reason the FALLBACK does not share: the
+        // fallback needs player, location and exits, and nothing else. Dropping
+        // a table only the band reads separates the two paths, which the plan's
+        // "no player row" case cannot — that denies the fallback its room too.
+        db.exec("DROP TABLE barrier");
+        bool threw = false;
+        try {
+            (void)composeBand(db, 80, kBandPlain);
+        } catch (const std::exception&) {
+            threw = true;
+        }
+        CHECK(threw);  // the premise of everything below
+
+        const TurnResult r = runTurn(db, "look");
+        CHECK(r.outcome == TurnOutcome::Ticked);
+        // The narration is still there, and so are the exits — as plain text at
+        // column 0, since the styled composition is what just failed.
+        CHECK(contains(r.output, "vaulted hall of grey stone"));
+        CHECK(contains(r.output, "Exits: north.\n"));
+        CHECK(!contains(r.output, "-- "));  // no band
+
+        // REQ-POLISH-6: a warn entry naming the failure, which this path used
+        // to write nothing at all.
+        bool warned = false;
+        for (const std::string& line : logLines) {
+            if (contains(line, "WARN") && contains(line, "band")) warned = true;
+        }
+        CHECK(warned);
+
+        // REQ-POLISH-6a: now break the FALLBACK too. The turn still prints its
+        // narration and the game continues — nothing in this spec may turn a
+        // display failure into a failed turn.
+        logLines.clear();
+        db.exec("DROP TABLE exits");
+        const TurnResult r2 = runTurn(db, "look");
+        CHECK(r2.outcome == TurnOutcome::Ticked);
+        CHECK(contains(r2.output, "vaulted hall of grey stone"));
+        CHECK(!contains(r2.output, "Exits"));
+        CHECK(!contains(r2.output, "-- "));
+
+        logSetSink({});
+        logRefreshLevel();
+    }
+
     // --- REQ-UI-30: narration and template prose are wrapped ---------------
     {
         const TempDbFile worldPath("textworld_band_wrap_tests.db");
@@ -10443,9 +10519,11 @@ static void testBandProseUnstyled() {
     const size_t bandStart = r.output.find("-- ");
     CHECK(bandStart != std::string::npos);
     const std::string narration = r.output.substr(0, bandStart);
-    // The narration mentions entity names ("lantern") and carries NO escape
-    // byte — the band TU is the only styling site, and it never sees prose.
-    CHECK(contains(narration, "lantern"));
+    // The narration carries NO escape byte — the band TU is the only styling
+    // site, and it never sees prose. ("lantern" used to be asserted here as the
+    // narration's own entity name; REQ-POLISH-5 moved the objects line into the
+    // band, so the room's canon prose is what stands in for it.)
+    CHECK(contains(narration, "vaulted hall of grey stone"));
     CHECK(narration.find('\x1b') == std::string::npos);
     // The band below it IS styled, so the assertion above is not vacuous.
     CHECK(r.output.substr(bandStart).find('\x1b') != std::string::npos);
@@ -17103,8 +17181,6 @@ static const char* const kStoryGoldenSession = R"GOLDEN(  A narrow student's cel
   unfamiliar sheets, a desk, a trunk you have not finished
   unpacking. Moonlight through the single lancet window finds the
   door to the north, standing just ajar.
-  Exits: north.
-  You see: candle, wand.
 -- dormitory cell --------------------------------------------------------------
  Exits    north
  Objects  candle, wand
@@ -17118,8 +17194,6 @@ static const char* const kStoryGoldenSession = R"GOLDEN(  A narrow student's cel
   ceiling lost in the dark. Somewhere far off a stair creaks to
   itself. A lamp in a wall bracket kindles quietly as you
   approach, and the way south leads back to your cell.
-  Exits: south.
-  You see: key.
 -- corridor --------------------------------------------------------------------
  Exits    south
  Objects  key
@@ -17154,8 +17228,6 @@ static const char* const kStoryGoldenSession = R"GOLDEN(  A narrow student's cel
   ceiling lost in the dark. Somewhere far off a stair creaks to
   itself. A lamp in a wall bracket kindles quietly as you
   approach, and the way south leads back to your cell.
-  Exits: south.
-  You see: key, fire grimoire.
 -- corridor --------------------------------------------------------------------
  Exits    south
  Objects  key, fire grimoire
@@ -17169,8 +17241,6 @@ static const char* const kStoryGoldenSession = R"GOLDEN(  A narrow student's cel
   unfamiliar sheets, a desk, a trunk you have not finished
   unpacking. Moonlight through the single lancet window finds the
   door to the north, standing just ajar.
-  Exits: north.
-  You see: candle.
 -- dormitory cell --------------------------------------------------------------
  Exits    north
  Objects  candle
