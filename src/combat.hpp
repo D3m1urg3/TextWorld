@@ -103,6 +103,13 @@ std::string combatStatusLine(Db& db, int64_t player);
 // Read-only.
 int64_t distanceFromSeed(Db& db, int64_t room);
 
+// Whether `player` has `spell` in known_spells (REQ-COMBAT-7, -21). Exposed
+// alongside distanceFromSeed and for the same reason: the story arc's
+// `spell_learned` condition (REQ-ARC-STORE-5) asks exactly this, and one
+// function means combat and the story cannot disagree about what is known.
+// Read-only.
+bool knowsSpell(Db& db, int64_t player, const std::string& spell);
+
 // The engine-computed eligible archetype menu for `room` (REQ-COMBAT-32, -33,
 // -34), wholly deterministic — no RNG, no LLM. Returns the archetype names the
 // architect may select from when generating this room (Step 22), ordered by name

@@ -198,3 +198,17 @@ INSERT INTO motive_catalog(motive, blurb) VALUES
   ('appetite',     'wants to take and carry off'),
   ('pride',        'would rather be wrong than corrected'),
   ('homesickness', 'does not belong here yet, and feels it');
+
+-- The closed condition vocabulary (REQ-ARC-STORE-5), engine-owned constants
+-- like spell_catalog, bestiary and motive_catalog: seeded here, never written at
+-- runtime. writeStoryStep throws on a kind absent from this table, so a story
+-- step cannot promise a condition the engine has no way to check. The model
+-- sees `blurb`, never the key; `arg_kind` says what condition_arg may hold.
+--
+-- AUTHORED CONTENT, PROVISIONAL pending author approval. Changing the
+-- vocabulary is this one edit plus a world-file delete.
+INSERT INTO condition_catalog(kind, blurb, arg_kind) VALUES
+  ('enemies_defeated', 'when this many enemies have been put down', 'int'),
+  ('rooms_built',      'when this many new rooms have been discovered', 'int'),
+  ('spell_learned',    'when the player has learned this spell', 'spell'),
+  ('reached_depth',    'when the player has gone this many rooms deep from where they started', 'int');

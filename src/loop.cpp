@@ -124,6 +124,14 @@ TurnResult runTurnCore(Db& db, const std::string& line) {
             // The enemy-turn system fires after the player's action, in the SAME
             // transaction (REQ-COMBAT-2): the loop, not resolve, owns the tick.
             resolveCombat(db, player, startRoom);
+            // The story arc's advance rule (REQ-ARC-STORE-15): once per turn,
+            // inside the tick's transaction, after systems resolve and before
+            // commit — so a step advance and the change that caused it are one
+            // atomic fact, per mutations.hpp's "both or neither". It runs only
+            // on turns that actually tick: the tier-a renderError path,
+            // Verb::Spells and the cast-cooldown denial all return above,
+            // before db.begin(), and evaluate nothing.
+            evaluateStoryAdvance(db, player);
             db.commit();
         } catch (const std::exception& e) {
             // Tier c: engine error. Roll back — turn counter and world state as

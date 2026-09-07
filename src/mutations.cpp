@@ -758,6 +758,116 @@ void writeBardWakeTurn(Db& db, int64_t turn) {
     s.step();
 }
 
+// --- The story arc store (specs/story-arc-store.md) --------------------------
+
+void writeArc(Db& db, const std::string& premise, const std::string& goal,
+              const std::string& ending) {
+    // Three upserts in the order the arc reads, each the free-rewrite shape
+    // writeBardJournal already uses (REQ-ARC-STORE-9). No event: an arc is a
+    // fact ABOUT the world, not a thing that happened in it.
+    upsertMeta(db, "arc_premise", premise);
+    upsertMeta(db, "arc_goal", goal);
+    upsertMeta(db, "arc_ending", ending);
+}
+
+void writeStoryStep(Db& db, int64_t n, const std::string& kind,
+                    const std::string& arg, const std::string& prose) {
+    const auto refuse = [](const std::string& why) {
+        throw std::runtime_error("writeStoryStep: " + why);
+    };
+
+    // The condition vocabulary is CLOSED (REQ-ARC-STORE-5): the table is the
+    // enforcement, so a step cannot name a fifth kind. The row also says what
+    // `arg` may hold.
+    std::string argKind;
+    {
+        Stmt s = db.prepare(
+            "SELECT arg_kind FROM condition_catalog WHERE kind = ?");
+        s.bind(1, kind);
+        if (!s.step()) refuse("unknown condition kind '" + kind + "'");
+        argKind = s.colText(0);
+    }
+    if (argKind == "int") {
+        // Whole-string digits, the strict reading of "non-negative decimal
+        // integer": stricter than parseMajorProfile's stoll form, which would
+        // admit a leading sign or leading whitespace. "2 or 3" is refused
+        // rather than read as 2, which is the case that matters — the argument
+        // arrives from the model over the wire.
+        const bool allDigits =
+            !arg.empty() &&
+            arg.find_first_not_of("0123456789") == std::string::npos;
+        if (!allDigits) {
+            refuse("condition '" + kind + "' takes a non-negative integer, got '" +
+                   arg + "'");
+        }
+    } else if (argKind == "spell") {
+        if (!rowExists(db, "SELECT 1 FROM spell_catalog WHERE spell = ?", arg)) {
+            refuse("condition '" + kind + "' takes a spell, and '" + arg +
+                   "' is not in spell_catalog");
+        }
+    } else {
+        // Unreachable through the seeded vocabulary; an engine error if it ever
+        // fires, so it throws rather than admitting a step nothing can check.
+        refuse("condition kind '" + kind + "' has an unknown arg_kind '" +
+               argKind + "'");
+    }
+
+    // Trim first, then test: whitespace-only prose is empty (REQ-ARC-STORE-10).
+    const std::string trimmedProse = trimAscii(prose);
+    if (trimmedProse.empty()) refuse("prose is empty after trim");
+
+    {
+        Stmt s = db.prepare("SELECT 1 FROM story_step WHERE n = ?");
+        s.bind(1, n);
+        if (s.step()) refuse("step " + std::to_string(n) + " already exists");
+    }
+
+    Stmt ins = db.prepare(
+        "INSERT INTO story_step(n, condition_kind, condition_arg, prose) "
+        "VALUES (?, ?, ?, ?)");
+    ins.bind(1, n);
+    ins.bind(2, kind);
+    ins.bind(3, arg);
+    ins.bind(4, trimmedProse);
+    ins.step();
+    // No event: a step not yet reached has not happened. It becomes one when
+    // advanceStoryStep latches it.
+}
+
+bool advanceStoryStep(Db& db, int64_t actor) {
+    int64_t n = 0;
+    std::string prose;
+    bool latched = false;
+    {
+        // The one-way latch, guarded in SQL rather than by a prior read
+        // (REQ-ARC-STORE-11): reached_turn is stamped only where it is still
+        // NULL and only on the lowest such step. RETURNING hands back THAT
+        // row — the one this statement latched — so the event cannot describe
+        // a different step than the one that moved (REQ-ARC-STORE-11a).
+        //
+        // The loop runs at most once — `n` is INTEGER PRIMARY KEY and the
+        // WHERE matches a single row — but it is a loop rather than one step()
+        // on purpose: SQLite does not promise that a RETURNING statement
+        // abandoned before SQLITE_DONE has applied all of its changes, and this
+        // statement's change is the latch itself.
+        Stmt upd = db.prepare(
+            "UPDATE story_step "
+            "   SET reached_turn = (SELECT value FROM meta WHERE key='turn') "
+            " WHERE n = (SELECT MIN(n) FROM story_step WHERE reached_turn IS NULL) "
+            "RETURNING n, prose");
+        while (upd.step()) {
+            n = upd.colInt(0);
+            prose = upd.colText(1);
+            latched = true;
+        }
+    }
+    if (!latched) return false;  // every step reached, or the list is empty
+
+    // The latch and the event are ONE fact, the materializeCatalogEntry shape.
+    appendEvent(db, actor, "advanced", /*subj=*/0, /*obj=*/n, prose.c_str());
+    return true;
+}
+
 // --- The NPC memory store (specs/npc-memory-store.md) ------------------------
 
 bool writeCatalogProfile(Db& db, int64_t catalog, const std::string& profile) {

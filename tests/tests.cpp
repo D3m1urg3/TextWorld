@@ -8924,6 +8924,17 @@ static void testArchitectPrompt() {
     // Retained prohibitions: no arrival narration, no ids.
     CHECK(contains(p, "arrival"));
     CHECK(contains(p, "ids"));
+
+    // The prose may not promise a creature the engine did not place. The
+    // setting names the invaders and tells the model they may be met abroad,
+    // so without this the model writes goblins into rooms it was never offered
+    // an enemy for - and the player finds nothing to attack. Signs that they
+    // passed through are still allowed; a creature standing here is not.
+    CHECK(contains(p, "Name no creature you did not place"));
+    CHECK(contains(p, "never say a creature is HERE unless you placed it"));
+    CHECK(contains(p, "offers no enemy field, this room holds no creature"));
+    // It is the exit rule's twin, and both must survive together.
+    CHECK(contains(p, "name no opening you did not declare"));
 }
 
 // --- Brick 4 Step 4, design Decision 2: the story clause. STRUCTURE ONLY, by
@@ -10174,13 +10185,16 @@ static void testBandResistance() {
         // `catalog_profile` and `npc_memory` are the NPC memory store's
         // (REQ-NPCSTORE-6, -7), asserted in full by testNpcStoreSchema. This
         // list is also what keeps REQ-NPCSTORE-3 falsifiable: a table created
-        // to hold conversation lines would show up here.
+        // to hold conversation lines would show up here. `condition_catalog`
+        // and `story_step` are the story arc store's (REQ-ARC-STORE-3, -4),
+        // asserted in full by testStoryStoreSchema.
         const std::vector<std::string> expected = {
-            "barrier", "bestiary", "catalog", "catalog_profile", "cooldowns",
-            "description", "drop_table", "entities", "events", "exits",
-            "grimoire", "health", "hostile", "known_spells", "location", "meta",
-            "motive_catalog", "name", "npc_memory", "pending_strike", "player",
-            "portable", "resistance", "room", "spell_catalog", "status_effects"};
+            "barrier", "bestiary", "catalog", "catalog_profile",
+            "condition_catalog", "cooldowns", "description", "drop_table",
+            "entities", "events", "exits", "grimoire", "health", "hostile",
+            "known_spells", "location", "meta", "motive_catalog", "name",
+            "npc_memory", "pending_strike", "player", "portable", "resistance",
+            "room", "spell_catalog", "status_effects", "story_step"};
         CHECK(tables == expected);
         // And no DDL was added to the band or the mutation helper.
         CHECK(!contains(readFileBytes("src/band.cpp"), "CREATE TABLE"));
@@ -11001,8 +11015,13 @@ static void testNpcStoreSchema() {
         CHECK(queryText(db, "SELECT dflt_value FROM pragma_table_info('npc_memory') "
                             "WHERE name = 'summary_turn'") == "0");
 
-        // REQ-NPCSTORE-10: the bump landed.
-        CHECK(queryInt(db, "SELECT value FROM meta WHERE key='schema_version'") == 7);
+        // REQ-NPCSTORE-10: the bump landed. Tracks SCHEMA_VERSION rather than
+        // the literal 7 it was written with, for the reason testBardStoreVersionGate
+        // already gives: this is an NPC test, and every later brick that bumps
+        // the schema would otherwise have to edit it. The story arc store's
+        // 7 -> 8 bump is what made that concrete.
+        CHECK(queryInt(db, "SELECT value FROM meta WHERE key='schema_version'") ==
+              SCHEMA_VERSION);
     }
 
     // Spec check 2: a world file at the PREVIOUS version is refused, and the
@@ -11927,8 +11946,10 @@ static void testNpcStoreInvariants() {
     }
 
     // (3) REQ-NPCSTORE-4 / REQ-NPCTALK-37: speech does NOT wake the bard. The
-    // wake predicate still names exactly the four irreversible verbs, verbatim,
-    // and src/bard.cpp mentions neither speech verb. Asserted as source text
+    // wake predicate still names exactly the irreversible verbs, verbatim, and
+    // src/bard.cpp mentions neither speech verb. The list gained a FIFTH,
+    // 'advanced', with the story arc store (REQ-ARC-STORE-22); pinning it in
+    // full is also what asserts the other four survived (REQ-ARC-STORE-23). Asserted as source text
     // because hasTriggeringEvent is file-local and the behavioural surface needs
     // the bard enabled and a transport — the wrong price for a one-line
     // guarantee.
@@ -11941,7 +11962,7 @@ static void testNpcStoreInvariants() {
     {
         const std::string bard = readFileBytes("src/bard.cpp");
         CHECK(contains(bard,
-                       "verb IN ('generated','defeated','learned','materialized')"));
+                       "verb IN ('generated','defeated','learned','materialized','advanced')"));
         CHECK(!contains(bard, "'said'"));
         CHECK(!contains(bard, "'spoke'"));
     }
@@ -13209,7 +13230,7 @@ static void testSayInvariants() {
     // testNpcStoreInvariants, which the conversation brick is what finally made
     // reachable — that test asserts the predicate and the absence directly. ---
     CHECK(contains(readFileBytes("src/bard.cpp"),
-                   "verb IN ('generated','defeated','learned','materialized')"));
+                   "verb IN ('generated','defeated','learned','materialized','advanced')"));
 }
 
 // --- Brick 2: catalog selection (specs/bard-catalog-selection.md) -----------
@@ -16368,6 +16389,918 @@ static void testBardOvertureContract() {
     CHECK(contains(main_, "if (world.created) bardOverture(db, nullptr);"));
 }
 
+// --- The story arc store (specs/story-arc-store.md). Brick 1: schema, seed
+// content, mutation helpers, one evaluator, one call site. No AI call, no
+// network, no new translation unit — every test below runs offline. ---
+
+// How many story-step advances the world has recorded. One reader for the whole
+// story-arc block: three of these tests count 'advanced' rows, and a single
+// definition is what stops them drifting if the verb is ever renamed.
+static int64_t advancedCount(Db& db) {
+    return queryInt(db, "SELECT COUNT(*) FROM events WHERE verb = 'advanced'");
+}
+
+// Step 2: the two new tables and the SCHEMA_VERSION gate (REQ-ARC-STORE-1, -3,
+// -4). Modeled on testBardStoreSchema.
+static void testStoryStoreSchema() {
+    const TempDbFile worldPath("textworld_story_schema_tests.db");
+    Db db = openWorld(worldPath.string(), "tests/combat_fixture.sql").db;
+
+    // REQ-ARC-STORE-3: story_step, exactly five columns, exactly these names.
+    CHECK(queryInt(db, "SELECT COUNT(*) FROM sqlite_master "
+                       "WHERE type='table' AND name='story_step'") == 1);
+    CHECK(queryInt(db, "SELECT COUNT(*) FROM pragma_table_info('story_step')") == 5);
+    CHECK(queryInt(db, "SELECT COUNT(*) FROM pragma_table_info('story_step') "
+                       "WHERE name IN ('n','condition_kind','condition_arg',"
+                       "'prose','reached_turn')") == 5);
+
+    // REQ-ARC-STORE-4: condition_catalog, exactly three columns.
+    CHECK(queryInt(db, "SELECT COUNT(*) FROM sqlite_master "
+                       "WHERE type='table' AND name='condition_catalog'") == 1);
+    CHECK(queryInt(db, "SELECT COUNT(*) FROM pragma_table_info('condition_catalog')") == 3);
+    CHECK(queryInt(db, "SELECT COUNT(*) FROM pragma_table_info('condition_catalog') "
+                       "WHERE name IN ('kind','blurb','arg_kind')") == 3);
+
+    // REQ-ARC-STORE-2 is rows, not a shape: no arc TABLE ships through the bump.
+    CHECK(queryInt(db, "SELECT COUNT(*) FROM sqlite_master "
+                       "WHERE type='table' AND name='story_arc'") == 0);
+
+    // REQ-ARC-STORE-20: the verb vocabulary comment names 'advanced', so the
+    // DDL's one machine-checked piece of documentation stays honest.
+    CHECK(contains(readFileBytes("src/world.cpp"), "'advanced'"));
+}
+
+// REQ-ARC-STORE-1 (validation item 1): a world file written at the PREVIOUS
+// version is refused, and the refusal writes nothing. The literal 7 is the real
+// predecessor here — this brick is the 7 -> 8 bump — and testBardStoreVersionGate
+// keeps the "some other version" case with its own literal.
+static void testStoryStoreVersionGate() {
+    const TempDbFile worldPath("textworld_story_version_tests.db");
+    {
+        Db db = openWorld(worldPath.string(), "tests/combat_fixture.sql").db;
+        CHECK(queryInt(db, "SELECT value FROM meta WHERE key='schema_version'") ==
+              SCHEMA_VERSION);
+    }
+    {
+        Db db(worldPath.string());
+        db.exec("UPDATE meta SET value = 7 WHERE key = 'schema_version'");
+    }
+    const std::string bytesBefore = readFileBytes(worldPath);
+    CHECK(!bytesBefore.empty());
+
+    bool refused = false;
+    try {
+        Db db = openWorld(worldPath.string(), "tests/combat_fixture.sql").db;
+    } catch (const SchemaMismatch&) {
+        refused = true;
+    }
+    CHECK(refused);
+    CHECK(readFileBytes(worldPath) == bytesBefore);  // nothing written on refusal
+}
+
+// Step 3: the closed condition vocabulary (REQ-ARC-STORE-5), asserted against
+// BOTH seed files. The fixture half is what makes every later admission test
+// possible — writeStoryStep validates `kind` against this table, and the bard
+// store's testBardStoreShippedSeedMotives exists for the same divergence.
+static void testStoryStoreConditionCatalog() {
+    const auto checkVocabulary = [](Db& db) {
+        CHECK(queryInt(db, "SELECT COUNT(*) FROM condition_catalog") == 4);
+        CHECK(queryInt(db, "SELECT COUNT(*) FROM condition_catalog WHERE kind IN "
+                           "('enemies_defeated','rooms_built','spell_learned',"
+                           "'reached_depth')") == 4);
+        CHECK(queryInt(db, "SELECT COUNT(*) FROM condition_catalog "
+                           "WHERE blurb IS NULL OR blurb = ''") == 0);
+        CHECK(queryInt(db, "SELECT COUNT(*) FROM condition_catalog "
+                           "WHERE arg_kind NOT IN ('int','spell')") == 0);
+        // The two int/spell assignments the evaluator and the admission gate
+        // both read: a swap here would be invisible to the count above.
+        CHECK(queryText(db, "SELECT arg_kind FROM condition_catalog "
+                            "WHERE kind = 'spell_learned'") == "spell");
+        CHECK(queryInt(db, "SELECT COUNT(*) FROM condition_catalog "
+                           "WHERE arg_kind = 'int'") == 3);
+    };
+
+    {
+        const TempDbFile worldPath("textworld_story_vocab_seed_tests.db");
+        Db db = openWorld(worldPath.string(), "seed/base.sql").db;
+        checkVocabulary(db);
+    }
+    {
+        const TempDbFile worldPath("textworld_story_vocab_fixture_tests.db");
+        Db db = openWorld(worldPath.string(), "tests/combat_fixture.sql").db;
+        checkVocabulary(db);
+        // The fixture is the EMPTY-step-list world every other test runs in
+        // (REQ-ARC-STORE-19a gets exercised for free by the whole suite).
+        CHECK(queryInt(db, "SELECT COUNT(*) FROM story_step") == 0);
+    }
+}
+
+// Step 4: the three arc meta rows and writeArc (REQ-ARC-STORE-2, -6, -9) —
+// validation item 16, plus the arc half of item 2.
+static void testStoryStoreArc() {
+    // --- the HELPER, against a fixture world whose seed never wrote the rows,
+    // which is also what proves the upsert (rather than UPDATE) matters. ---
+    {
+        const TempDbFile worldPath("textworld_story_arc_tests.db");
+        Db db = openWorld(worldPath.string(), "tests/combat_fixture.sql").db;
+
+        const auto arcCount = [&db] {
+            return queryInt(db, "SELECT COUNT(*) FROM meta WHERE key LIKE 'arc\\_%' "
+                                "ESCAPE '\\'");
+        };
+        const auto eventCount = [&db] {
+            return queryInt(db, "SELECT COUNT(*) FROM events");
+        };
+        const auto arcValue = [&db](const char* key) {
+            Stmt s = db.prepare("SELECT value FROM meta WHERE key = ?");
+            s.bind(1, std::string(key));
+            CHECK(s.step());
+            return s.colText(0);
+        };
+
+        CHECK(arcCount() == 0);  // the fixture seeds no arc
+        const int64_t eventsBefore = eventCount();
+
+        writeArc(db, "a premise", "a goal", "an ending");
+        CHECK(arcCount() == 3);
+        CHECK(arcValue("arc_premise") == "a premise");
+        CHECK(arcValue("arc_goal") == "a goal");
+        CHECK(arcValue("arc_ending") == "an ending");
+        CHECK(eventCount() == eventsBefore);  // an arc has not HAPPENED
+
+        // A second call REPLACES; it never appends a fourth row or an event.
+        writeArc(db, "another premise", "another goal", "another ending");
+        CHECK(arcCount() == 3);
+        CHECK(arcValue("arc_premise") == "another premise");
+        CHECK(arcValue("arc_goal") == "another goal");
+        CHECK(arcValue("arc_ending") == "another ending");
+        CHECK(eventCount() == eventsBefore);
+    }
+
+    // --- the SHIPPED seed (REQ-ARC-STORE-6): all three rows present, none
+    // empty. Distinct from the helper test above, which never opens base.sql. ---
+    {
+        const TempDbFile worldPath("textworld_story_arc_seed_tests.db");
+        Db db = openWorld(worldPath.string(), "seed/base.sql").db;
+        CHECK(queryInt(db, "SELECT COUNT(*) FROM meta WHERE key IN "
+                           "('arc_premise','arc_goal','arc_ending')") == 3);
+        CHECK(queryInt(db, "SELECT COUNT(*) FROM meta WHERE key IN "
+                           "('arc_premise','arc_goal','arc_ending') "
+                           "AND (value IS NULL OR value = '')") == 0);
+    }
+}
+
+// Step 5: writeStoryStep's admission gate (REQ-ARC-STORE-10) — validation
+// item 3. A step may not promise a condition the engine cannot check.
+static void testStoryStoreWrite() {
+    const TempDbFile worldPath("textworld_story_write_tests.db");
+    Db db = openWorld(worldPath.string(), "tests/combat_fixture.sql").db;
+
+    const auto stepCount = [&db] {
+        return queryInt(db, "SELECT COUNT(*) FROM story_step");
+    };
+    const auto eventCount = [&db] {
+        return queryInt(db, "SELECT COUNT(*) FROM events");
+    };
+
+    CHECK(stepCount() == 0);
+    const int64_t eventsBefore = eventCount();
+
+    // Every refusal, and after each one the table is UNCHANGED — the checks
+    // all run before any write.
+    CHECK(threwRuntimeError([&db] {
+        writeStoryStep(db, 1, "phase_of_moon", "3", "the moon turns");
+    }));
+    CHECK(stepCount() == 0);
+    CHECK(threwRuntimeError([&db] {
+        writeStoryStep(db, 1, "enemies_defeated", "x", "they fall");
+    }));
+    CHECK(stepCount() == 0);
+    CHECK(threwRuntimeError([&db] {
+        writeStoryStep(db, 1, "enemies_defeated", "-1", "they fall");
+    }));
+    CHECK(stepCount() == 0);
+    CHECK(threwRuntimeError([&db] {
+        writeStoryStep(db, 1, "enemies_defeated", "2x", "they fall");
+    }));
+    CHECK(stepCount() == 0);
+    // Whole-string, so a leading number followed by prose is refused rather
+    // than silently read as 2.
+    CHECK(threwRuntimeError([&db] {
+        writeStoryStep(db, 1, "enemies_defeated", "2 or 3", "they fall");
+    }));
+    CHECK(stepCount() == 0);
+    CHECK(threwRuntimeError([&db] {
+        writeStoryStep(db, 1, "spell_learned", "levitate", "you learn it");
+    }));
+    CHECK(stepCount() == 0);
+    CHECK(threwRuntimeError([&db] {
+        writeStoryStep(db, 1, "enemies_defeated", "1", "   ");
+    }));
+    CHECK(stepCount() == 0);
+
+    // A valid call: exactly one row, reached_turn NULL, and NO event.
+    writeStoryStep(db, 1, "enemies_defeated", "1", "  word runs ahead of you  ");
+    CHECK(stepCount() == 1);
+    CHECK(queryInt(db, "SELECT COUNT(*) FROM story_step "
+                       "WHERE reached_turn IS NULL") == 1);
+    CHECK(queryText(db, "SELECT condition_kind FROM story_step WHERE n = 1") ==
+          "enemies_defeated");
+    CHECK(queryText(db, "SELECT condition_arg FROM story_step WHERE n = 1") == "1");
+    // The TRIMMED prose is what is stored.
+    CHECK(queryText(db, "SELECT prose FROM story_step WHERE n = 1") ==
+          "word runs ahead of you");
+    CHECK(eventCount() == eventsBefore);  // a step not yet reached has not HAPPENED
+
+    // A duplicate n is refused, and the existing row is untouched.
+    CHECK(threwRuntimeError([&db] {
+        writeStoryStep(db, 1, "rooms_built", "4", "the lamps go out");
+    }));
+    CHECK(stepCount() == 1);
+    CHECK(queryText(db, "SELECT condition_kind FROM story_step WHERE n = 1") ==
+          "enemies_defeated");
+
+    // The spell arm admits a spell that IS in the catalog.
+    writeStoryStep(db, 2, "spell_learned", "fire", "the stacks smell of smoke");
+    CHECK(stepCount() == 2);
+    CHECK(eventCount() == eventsBefore);
+}
+
+// Step 6: the five seeded steps (REQ-ARC-STORE-7, -8) — the step half of
+// validation item 2, plus the fixture divergence guard.
+static void testStoryStoreSeededSteps() {
+    {
+        const TempDbFile worldPath("textworld_story_steps_tests.db");
+        Db db = openWorld(worldPath.string(), "seed/base.sql").db;
+
+        CHECK(queryInt(db, "SELECT COUNT(*) FROM story_step") == 5);
+        // n is exactly 1..5, not merely five of something.
+        CHECK(queryInt(db, "SELECT COUNT(*) FROM story_step "
+                           "WHERE n IN (1,2,3,4,5)") == 5);
+        CHECK(queryInt(db, "SELECT COUNT(DISTINCT condition_kind) "
+                           "FROM story_step") >= 3);
+        // Every seeded kind is one the engine can actually check: the seed
+        // obeys the same closed vocabulary writeStoryStep enforces.
+        CHECK(queryInt(db, "SELECT COUNT(*) FROM story_step s "
+                           "LEFT JOIN condition_catalog c ON c.kind = s.condition_kind "
+                           "WHERE c.kind IS NULL") == 0);
+        CHECK(queryInt(db, "SELECT COUNT(*) FROM story_step "
+                           "WHERE prose IS NULL OR TRIM(prose) = ''") == 0);
+        CHECK(queryInt(db, "SELECT COUNT(*) FROM story_step "
+                           "WHERE condition_arg IS NULL OR condition_arg = ''") == 0);
+        // REQ-ARC-STORE-8: a fresh world is at step ZERO.
+        CHECK(queryInt(db, "SELECT COUNT(*) FROM story_step "
+                           "WHERE reached_turn IS NOT NULL") == 0);
+        // The two offline-reachable conditions the golden session depends on.
+        CHECK(queryText(db, "SELECT condition_kind FROM story_step WHERE n = 1") ==
+              "enemies_defeated");
+        CHECK(queryText(db, "SELECT condition_kind FROM story_step WHERE n = 2") ==
+              "spell_learned");
+    }
+    {
+        // The fixture stays the EMPTY-list world every other test runs in.
+        const TempDbFile worldPath("textworld_story_steps_fixture_tests.db");
+        Db db = openWorld(worldPath.string(), "tests/combat_fixture.sql").db;
+        CHECK(queryInt(db, "SELECT COUNT(*) FROM story_step") == 0);
+    }
+}
+
+// Step 7: stepConditionMet (REQ-ARC-STORE-12, -13, -14) — validation items 4,
+// 5, and the first half of 6. The combat fixture has rooms at depths 0 (cell 1),
+// 1 (corridor 2, library 11) and 2 (frost study 6, armory 9).
+static void testStoryConditions() {
+    const TempDbFile worldPath("textworld_story_conditions_tests.db");
+    Db db = openWorld(worldPath.string(), "tests/combat_fixture.sql").db;
+    const int64_t player = 3;
+
+    // --- item 4: every kind false, then made true by the SANCTIONED path ---
+    db.begin();
+
+    CHECK(!stepConditionMet(db, "enemies_defeated", "1", player));
+    defeatEnemy(db, /*enemy=*/7, /*droppedItem=*/0, player);
+    CHECK(stepConditionMet(db, "enemies_defeated", "1", player));
+    CHECK(!stepConditionMet(db, "enemies_defeated", "2", player));
+
+    CHECK(!stepConditionMet(db, "rooms_built", "1", player));
+    {
+        // Grown off the outer hall (15), the fixture's far edge, into a
+        // direction it has no exit for. Generating off the cell would REPLACE
+        // its north exit to the corridor and detach the rest of the graph,
+        // which would make every depth assertion below meaningless.
+        const RoomProposal proposal{"chapter house",
+                                    "A low vaulted room, its shelves bare.",
+                                    {"east"}};
+        writeGeneratedRoom(db, /*originRoom=*/15, "north", proposal, player);
+    }
+    CHECK(stepConditionMet(db, "rooms_built", "1", player));
+    CHECK(!stepConditionMet(db, "rooms_built", "2", player));
+
+    CHECK(!stepConditionMet(db, "spell_learned", "fire", player));
+    learnSpell(db, player, "fire");
+    CHECK(stepConditionMet(db, "spell_learned", "fire", player));
+    CHECK(!stepConditionMet(db, "spell_learned", "frost", player));
+
+    // The player starts in the cell, which IS the seed room: depth 0.
+    CHECK(!stepConditionMet(db, "reached_depth", "2", player));
+    moveEntity(db, player, /*toContainer=*/6, player, "moved");  // frost study
+    CHECK(stepConditionMet(db, "reached_depth", "2", player));
+    CHECK(!stepConditionMet(db, "reached_depth", "3", player));
+    // Zero always holds, wherever the player stands.
+    CHECK(stepConditionMet(db, "reached_depth", "0", player));
+
+    db.commit();
+
+    // --- item 5 (REQ-ARC-STORE-13): a bogus kind THROWS. Written in by raw
+    // SQL, because no sanctioned path can produce one — writeStoryStep refuses
+    // it at admission. A silent `false` here would hide an engine bug. ---
+    db.exec("INSERT INTO story_step(n, condition_kind, condition_arg, prose) "
+            "VALUES (99, 'phase_of_moon', '3', 'the moon turns')");
+    CHECK(threwRuntimeError([&db, player] {
+        stepConditionMet(db, queryText(db, "SELECT condition_kind FROM story_step "
+                                           "WHERE n = 99"),
+                         "3", player);
+    }));
+
+    // --- item 6, first half (REQ-ARC-STORE-14): no clock, as a FUNCTION-scoped
+    // source check. A file-wide grep would fail on correct code, because
+    // advanceStoryStep legitimately reads meta.turn to stamp reached_turn. ---
+    {
+        const std::string src = readFileBytes("src/systems.cpp");
+        const size_t begin = src.find("bool stepConditionMet(");
+        CHECK(begin != std::string::npos);
+        // The function's body ends at the first line that is exactly "}".
+        const size_t end = src.find("\n}\n", begin);
+        CHECK(end != std::string::npos);
+        const std::string body = src.substr(begin, end - begin);
+        CHECK(!body.empty());          // the extracted range is not vacuous
+        CHECK(body.size() > 200);      // …and is the whole function, not a stub
+        CHECK(!contains(body, "meta.turn"));
+        CHECK(!contains(body, "key='turn'"));
+        CHECK(!contains(body, "key = 'turn'"));
+    }
+}
+
+// Step 8: advanceStoryStep (REQ-ARC-STORE-11, -11a, -19, -20) — validation
+// items 7, 8 and 13.
+static void testStoryAdvance() {
+    const TempDbFile worldPath("textworld_story_advance_tests.db");
+    Db db = openWorld(worldPath.string(), "tests/combat_fixture.sql").db;
+    const int64_t player = 3;
+
+    const auto eventCount = [&db] {
+        return queryInt(db, "SELECT COUNT(*) FROM events");
+    };
+
+    // --- the EMPTY table: no row to latch, so nothing happens and nothing
+    // throws (REQ-ARC-STORE-19a, reached through the helper). ---
+    db.begin();
+    CHECK(queryInt(db, "SELECT COUNT(*) FROM story_step") == 0);
+    {
+        const int64_t before = eventCount();
+        CHECK(!advanceStoryStep(db, player));
+        CHECK(eventCount() == before);
+    }
+
+    writeStoryStep(db, 1, "enemies_defeated", "1",
+                   "Word of the fight runs ahead of you.");
+    db.commit();
+
+    // Move the world off turn 0 so the stamped turn is distinguishable from
+    // "never reached" by value as well as by NULL-ness.
+    CHECK(runTurn(db, "wait").outcome == TurnOutcome::Ticked);
+    CHECK(runTurn(db, "wait").outcome == TurnOutcome::Ticked);
+    const int64_t turnNow = queryInt(db, "SELECT value FROM meta WHERE key='turn'");
+    CHECK(turnNow > 0);
+
+    // --- item 7: the latch fires ONCE and is one-way. ---
+    db.begin();
+    const int64_t eventsBefore = eventCount();
+    CHECK(advanceStoryStep(db, player));
+    CHECK(advancedCount(db) == 1);
+    CHECK(queryInt(db, "SELECT reached_turn FROM story_step WHERE n = 1") == turnNow);
+
+    // --- item 13: the event's columns. `detail` is byte-identical to the
+    // prose read back out of story_step, not to the string passed in. ---
+    CHECK(queryInt(db, "SELECT actor FROM events WHERE verb = 'advanced'") == player);
+    CHECK(queryInt(db, "SELECT subject FROM events WHERE verb = 'advanced'") == 0);
+    CHECK(queryInt(db, "SELECT object FROM events WHERE verb = 'advanced'") == 1);
+    CHECK(queryText(db, "SELECT detail FROM events WHERE verb = 'advanced'") ==
+          queryText(db, "SELECT prose FROM story_step WHERE n = 1"));
+
+    // A second call latches nothing, appends nothing, and leaves the FIRST
+    // call's turn in place.
+    const int64_t afterFirst = eventCount();
+    CHECK(!advanceStoryStep(db, player));
+    CHECK(advancedCount(db) == 1);
+    CHECK(eventCount() == afterFirst);
+    CHECK(queryInt(db, "SELECT reached_turn FROM story_step WHERE n = 1") == turnNow);
+    CHECK(afterFirst == eventsBefore + 1);  // exactly one event for one advance
+
+    // --- item 8 (REQ-ARC-STORE-19): exhaustion is terminal and silent. Ten
+    // further calls each return false, append nothing, and throw nothing. ---
+    for (int i = 0; i < 10; ++i) {
+        CHECK(!advanceStoryStep(db, player));
+    }
+    CHECK(advancedCount(db) == 1);
+    CHECK(eventCount() == afterFirst);
+    db.commit();
+
+    // --- REQ-ARC-STORE-11a, the case a prior-read implementation gets wrong:
+    // two calls inside ONE transaction latch and describe DIFFERENT steps. ---
+    db.begin();
+    writeStoryStep(db, 2, "rooms_built", "4", "The Vigil Lamps no longer kindle.");
+    writeStoryStep(db, 3, "enemies_defeated", "5", "The breach stands open.");
+    CHECK(advanceStoryStep(db, player));
+    CHECK(advanceStoryStep(db, player));
+    CHECK(advancedCount(db) == 3);
+    CHECK(queryInt(db, "SELECT COUNT(*) FROM events "
+                       "WHERE verb = 'advanced' AND object = 2") == 1);
+    CHECK(queryInt(db, "SELECT COUNT(*) FROM events "
+                       "WHERE verb = 'advanced' AND object = 3") == 1);
+    // Each event carries ITS OWN step's prose, not the other's.
+    CHECK(queryText(db, "SELECT detail FROM events "
+                        "WHERE verb = 'advanced' AND object = 2") ==
+          queryText(db, "SELECT prose FROM story_step WHERE n = 2"));
+    CHECK(queryText(db, "SELECT detail FROM events "
+                        "WHERE verb = 'advanced' AND object = 3") ==
+          queryText(db, "SELECT prose FROM story_step WHERE n = 3"));
+    db.commit();
+}
+
+// Step 9: evaluateStoryAdvance (REQ-ARC-STORE-15a, -16, -16a, -17, -19, -19a).
+// Driven DIRECTLY inside a manual transaction — there is no call site yet, so
+// runTurn cannot reach it. Validation items 10, 17 and 8, in their direct form.
+static void testStoryEvaluate() {
+    const int64_t player = 3;
+
+    // --- item 17 (REQ-ARC-STORE-19a): an EMPTY step list is a silent no-op. ---
+    {
+        const TempDbFile worldPath("textworld_story_eval_empty_tests.db");
+        Db db = openWorld(worldPath.string(), "tests/combat_fixture.sql").db;
+        db.begin();
+        const int64_t before = queryInt(db, "SELECT COUNT(*) FROM events");
+        for (int i = 0; i < 10; ++i) evaluateStoryAdvance(db, player);
+        CHECK(queryInt(db, "SELECT COUNT(*) FROM events") == before);
+        CHECK(advancedCount(db) == 0);
+        db.commit();
+    }
+
+    // --- item 10 (REQ-ARC-STORE-16, -16a): it does NOT scan ahead. Step 1's
+    // condition is false and step 3's is true; an evaluator that looked past
+    // step 1 would fire step 3. ---
+    {
+        const TempDbFile worldPath("textworld_story_eval_scan_tests.db");
+        Db db = openWorld(worldPath.string(), "tests/combat_fixture.sql").db;
+        db.begin();
+        writeStoryStep(db, 1, "enemies_defeated", "1", "they know we are awake");
+        writeStoryStep(db, 2, "rooms_built", "4", "the lamps go out");
+        writeStoryStep(db, 3, "reached_depth", "0", "the index is read");  // TRUE
+        // Step 3's condition holds right now; step 1's does not.
+        CHECK(stepConditionMet(db, "reached_depth", "0", player));
+        CHECK(!stepConditionMet(db, "enemies_defeated", "1", player));
+        for (int i = 0; i < 10; ++i) evaluateStoryAdvance(db, player);
+        CHECK(advancedCount(db) == 0);
+        CHECK(queryInt(db, "SELECT COUNT(*) FROM story_step "
+                           "WHERE reached_turn IS NOT NULL") == 0);
+        db.commit();
+    }
+
+    // --- the happy path, and item 8 (REQ-ARC-STORE-19) reached through THIS
+    // function rather than through advanceStoryStep. ---
+    {
+        const TempDbFile worldPath("textworld_story_eval_advance_tests.db");
+        Db db = openWorld(worldPath.string(), "tests/combat_fixture.sql").db;
+        db.begin();
+        writeStoryStep(db, 1, "reached_depth", "0", "they know we are awake");
+        writeStoryStep(db, 2, "enemies_defeated", "9", "the breach stands open");
+        evaluateStoryAdvance(db, player);
+        CHECK(advancedCount(db) == 1);
+        CHECK(queryInt(db, "SELECT COUNT(*) FROM events "
+                           "WHERE verb = 'advanced' AND object = 1") == 1);
+        // Step 2's condition is false, so further calls do nothing…
+        for (int i = 0; i < 10; ++i) evaluateStoryAdvance(db, player);
+        CHECK(advancedCount(db) == 1);
+        // …and once every step IS reached, the rule is a no-op that neither
+        // writes nor throws.
+        db.exec("UPDATE story_step SET reached_turn = 0 WHERE reached_turn IS NULL");
+        const int64_t before = queryInt(db, "SELECT COUNT(*) FROM events");
+        for (int i = 0; i < 10; ++i) evaluateStoryAdvance(db, player);
+        CHECK(queryInt(db, "SELECT COUNT(*) FROM events") == before);
+        db.commit();
+    }
+}
+
+// Step 10: 'advanced' is renderer-invisible (REQ-ARC-STORE-21) — the mechanism
+// behind validation item 14, modeled on the REQ-ARCH-10 test. It is excluded at
+// BOTH buildFacts sites, and render() gains no branch for it.
+static void testStoryRendererInvisible() {
+    const TempDbFile worldPath("textworld_story_invisible_tests.db");
+    Db db = openWorld(worldPath.string(), "tests/combat_fixture.sql").db;
+    const int64_t player = 3;
+
+    // A turn carrying BOTH an 'advanced' event and an ordinary one, sharing the
+    // same turn number — the load-bearing case. The step is written AFTER the
+    // wait turn and latched by hand, so the two events land on the same turn
+    // without depending on when the tick's own rule would have fired.
+    CHECK(runTurn(db, "wait").outcome == TurnOutcome::Ticked);
+    const int64_t turn = queryInt(db, "SELECT value FROM meta WHERE key='turn'");
+    db.begin();
+    writeStoryStep(db, 1, "reached_depth", "0", "Word runs ahead of you.");
+    CHECK(advanceStoryStep(db, player));
+    db.commit();
+    CHECK(queryInt(db, ("SELECT COUNT(*) FROM events WHERE turn = " +
+                        std::to_string(turn) + " AND verb = 'advanced'").c_str()) == 1);
+    CHECK(queryInt(db, ("SELECT COUNT(*) FROM events WHERE turn = " +
+                        std::to_string(turn) + " AND verb = 'waited'").c_str()) == 1);
+
+    // The template render of that turn is byte-identical to its render with the
+    // 'advanced' row deleted: the verb produces no output of its own.
+    const std::string withAdvance = render(db, turn);
+
+    // Current-turn payload key `events`: 'advanced' absent, 'waited' present.
+    {
+        const TurnFacts facts = buildFacts(db, turn);
+        const nlohmann::json j = nlohmann::json::parse(facts.payload);
+        bool sawAdvanced = false, sawWaited = false;
+        for (const auto& e : j["events"]) {
+            if (e.value("verb", "") == "advanced") sawAdvanced = true;
+            if (e.value("verb", "") == "waited") sawWaited = true;
+        }
+        CHECK(!sawAdvanced);
+        CHECK(sawWaited);
+    }
+
+    // recent-events payload key (turn < ?): 'advanced' absent there too. Doing
+    // only the current-turn site would leak the prose into the narrator's
+    // context for the next six turns.
+    CHECK(runTurn(db, "wait").outcome == TurnOutcome::Ticked);
+    {
+        const TurnFacts facts = buildFacts(db, turn + 1);
+        const nlohmann::json j = nlohmann::json::parse(facts.payload);
+        bool sawAdvanced = false, sawWaited = false;
+        for (const auto& e : j["recent_events"]) {
+            if (e.value("verb", "") == "advanced") sawAdvanced = true;
+            if (e.value("verb", "") == "waited") sawWaited = true;
+        }
+        CHECK(!sawAdvanced);
+        CHECK(sawWaited);  // the other verb of the same turn DID make it through
+    }
+
+    db.exec("DELETE FROM events WHERE verb = 'advanced'");
+    CHECK(render(db, turn) == withAdvance);
+    CHECK(!withAdvance.empty());
+
+    // render.cpp gains no branch for the verb: unrecognized verbs already
+    // render nothing, and how an advance is TOLD is a later brick's decision.
+    CHECK(!contains(readFileBytes("src/render.cpp"), "advanced"));
+}
+
+// Step 10: the bard's fifth wake verb (REQ-ARC-STORE-22, -23) — validation
+// item 15. The predicate is asserted as SOURCE TEXT, which is the precedent
+// testNpcStoreInvariants already set and gives its reason for: hasTriggeringEvent
+// is file-local, and reaching it for real needs the bard enabled plus a live
+// transport. What IS checked behaviourally is the row that predicate selects.
+static void testStoryWakeTrigger() {
+    // The five-verb list, verbatim. This asserts the fifth verb AND that the
+    // other four survived — narrowing to 'advanced' alone is a later brick.
+    CHECK(contains(readFileBytes("src/bard.cpp"),
+                   "verb IN ('generated','defeated','learned','materialized','advanced')"));
+
+    const TempDbFile worldPath("textworld_story_wake_tests.db");
+    Db db = openWorld(worldPath.string(), "tests/combat_fixture.sql").db;
+    const int64_t player = 3;
+
+    // A world whose bard is idle: bard_last_wake_turn is 0 at init.
+    CHECK(queryInt(db, "SELECT value FROM meta WHERE key='bard_last_wake_turn'") == 0);
+
+    CHECK(runTurn(db, "wait").outcome == TurnOutcome::Ticked);
+    db.begin();
+    writeStoryStep(db, 1, "reached_depth", "0", "Word runs ahead of you.");
+    CHECK(advanceStoryStep(db, player));
+    db.commit();
+
+    // Exactly the row the predicate's query selects: verb 'advanced', at a turn
+    // strictly greater than the last queued wake.
+    CHECK(queryInt(db, "SELECT COUNT(*) FROM events WHERE verb = 'advanced' "
+                       "AND turn > (SELECT value FROM meta "
+                       "            WHERE key = 'bard_last_wake_turn')") == 1);
+}
+
+// The pre-arc golden session (spec AI-Validation item 14, REQ-ARC-STORE-21).
+// A fixed script over the SHIPPED seed, run through the TEMPLATE path with AI
+// disabled, with every turn's output concatenated and compared to one literal.
+// Captured BEFORE the story arc existed, so it is the byte-identity baseline
+// for narrated output: this brick adds storage and a rule, and must not change
+// one byte of what the player reads. If it stops matching once the rule is
+// wired into the tick, something is PRINTING the advance — find that. Do NOT
+// re-capture the literal; re-capturing hides the bug the test exists to catch.
+//
+// It opens seed/base.sql, not tests/combat_fixture.sql: the five story steps
+// are seeded in the shipped seed, and a fixture world's story_step table is
+// empty, which would make this gate vacuous.
+//
+// The script has to reach an advance with AI OFF, and that is a constraint
+// rather than a preference: with aiNarrationEnabled() false a latent exit is a
+// wall (systems.cpp), so no room is ever generated and neither rooms_built nor
+// reached_depth can ever become true. Only enemies_defeated and spell_learned
+// are reachable offline — which is what fixes the seeded conditions of steps 1
+// and 2.
+//
+// Re-capture (only when a verb's template output changes ON PURPOSE):
+//   TW_DUMP_GOLDEN=1 ./build/tests
+// and paste the printed block back into kStoryGoldenSession.
+static const char* const kStoryGoldenSession = R"GOLDEN(A narrow student's cell under a sloped ceiling: a bed with unfamiliar sheets, a
+desk, a trunk you have not finished unpacking. Moonlight through the single
+lancet window finds the door to the north, standing just ajar.
+Exits: north.
+You see: candle, wand.
+-- dormitory cell --------------------------------------------------------------
+ Exits    north
+ Objects  candle, wand
+ You      HP: 12/12
+You take the wand.
+-- dormitory cell --------------------------------------------------------------
+ Exits    north
+ Objects  candle
+ You      HP: 12/12
+A long panelled corridor, doors shut on either side and the ceiling lost in the
+dark. Somewhere far off a stair creaks to itself. A lamp in a wall bracket
+kindles quietly as you approach, and the way south leads back to your cell.
+Exits: south.
+You see: key.
+-- corridor --------------------------------------------------------------------
+ Exits    south
+ Objects  key
+ Enemy    goblin grunt  HP: 8/8
+ You      HP: 12/12  Stun: ready  Ward: ready
+You strike the goblin grunt for 4 damage.
+The goblin grunt winds up a heavy blow — strike it down or brace!
+The goblin grunt wounds you for 1 damage.
+-- corridor --------------------------------------------------------------------
+ Exits    south
+ Objects  key
+ Enemy    goblin grunt  HP: 4/8  [WINDING UP]
+ You      HP: 11/12  Stun: ready  Ward: ready
+You strike the goblin grunt for 4 damage.
+The goblin grunt falls. It drops the fire grimoire.
+-- corridor --------------------------------------------------------------------
+ Exits    south
+ Objects  key, fire grimoire
+ You      HP: 11/12
+You study the fire grimoire and learn to cast fire.
+-- corridor --------------------------------------------------------------------
+ Exits    south
+ Objects  key, fire grimoire
+ You      HP: 11/12
+Time passes.
+-- corridor --------------------------------------------------------------------
+ Exits    south
+ Objects  key, fire grimoire
+ You      HP: 11/12
+A long panelled corridor, doors shut on either side and the ceiling lost in the
+dark. Somewhere far off a stair creaks to itself. A lamp in a wall bracket
+kindles quietly as you approach, and the way south leads back to your cell.
+Exits: south.
+You see: key, fire grimoire.
+-- corridor --------------------------------------------------------------------
+ Exits    south
+ Objects  key, fire grimoire
+ You      HP: 11/12
+You can't go that way.
+-- corridor --------------------------------------------------------------------
+ Exits    south
+ Objects  key, fire grimoire
+ You      HP: 11/12
+A narrow student's cell under a sloped ceiling: a bed with unfamiliar sheets, a
+desk, a trunk you have not finished unpacking. Moonlight through the single
+lancet window finds the door to the north, standing just ajar.
+Exits: north.
+You see: candle.
+-- dormitory cell --------------------------------------------------------------
+ Exits    north
+ Objects  candle
+ You      HP: 11/12
+)GOLDEN";
+
+// The script itself, hoisted so testStoryEmptyStepList can run it VERBATIM
+// against the same literal. That the two tests share one array is what makes
+// "the same session" structural rather than a pair of lists kept in step by
+// hand.
+static const char* const kStoryGoldenScript[] = {
+    "look",                // looked
+    "take wand",           // took
+    "go north",            // moved, into the corridor and the goblin
+    "attack",              // attacked + the enemy's turn
+    "attack",              // defeated -> drops the fire grimoire  [step 1]
+    "read fire grimoire",  // learned fire                         [step 2]
+    "wait",                // waited: a quiet turn right after an advance
+    "look",                // looked
+    "go up",               // failed: a latent exit is a wall with AI off
+    "go south",            // moved, back through a realized exit
+};
+
+static void testStoryGoldenSession() {
+    const TempDbFile worldPath("textworld_story_golden_tests.db");
+    Db db = openWorld(worldPath.string(), "seed/base.sql").db;
+
+    std::string actual;
+    for (const char* line : kStoryGoldenScript) actual += runTurn(db, line).output;
+
+    if (std::getenv("TW_DUMP_GOLDEN") != nullptr) {
+        std::printf("--- story golden session ---\n%s--- end ---\n",
+                    actual.c_str());
+        return;
+    }
+
+    CHECK(actual == kStoryGoldenSession);
+
+    // The gate is worthless unless the script really does defeat the goblin and
+    // learn fire: those two events are what the seeded steps 1 and 2 hang on,
+    // and without them no advance can ever fire on this transcript.
+    CHECK(contains(actual, "The goblin grunt falls."));
+    CHECK(contains(actual, "and learn to cast fire"));
+
+    // …and, now that the rule is wired into the tick, the run genuinely
+    // advances TWO steps while producing those identical bytes. Without this
+    // the byte-identity above would be satisfied by a rule that never fired.
+    CHECK(queryInt(db, "SELECT COUNT(*) FROM events WHERE verb = 'advanced'") == 2);
+    CHECK(queryInt(db, "SELECT COUNT(*) FROM story_step "
+                       "WHERE reached_turn IS NOT NULL") == 2);
+    CHECK(queryInt(db, "SELECT COUNT(*) FROM story_step "
+                       "WHERE n IN (1,2) AND reached_turn IS NOT NULL") == 2);
+    // One per turn (REQ-ARC-STORE-17): the two advances landed on DIFFERENT
+    // turns — the defeat turn and the read turn.
+    CHECK(queryInt(db, "SELECT COUNT(DISTINCT turn) FROM events "
+                       "WHERE verb = 'advanced'") == 2);
+}
+
+// Step 11: the rule as it behaves through WHOLE TURNS (REQ-ARC-STORE-15, -16,
+// -17, -18) — validation items 9, 10, 11, 12, and the second half of 6.
+static void testStoryAdvanceRule() {
+
+    // --- item 9 (REQ-ARC-STORE-16, -17): steps 1, 2 and 3 all satisfied, and
+    // still AT MOST ONE advances per turn, in order. ---
+    {
+        const TempDbFile worldPath("textworld_story_rule_one_tests.db");
+        Db db = openWorld(worldPath.string(), "tests/combat_fixture.sql").db;
+        db.begin();
+        writeStoryStep(db, 1, "reached_depth", "0", "they know we are awake");
+        writeStoryStep(db, 2, "reached_depth", "0", "the stacks smell of smoke");
+        writeStoryStep(db, 3, "reached_depth", "0", "the lamps go out");
+        db.commit();
+
+        CHECK(runTurn(db, "wait").outcome == TurnOutcome::Ticked);
+        CHECK(advancedCount(db) == 1);
+        CHECK(queryInt(db, "SELECT object FROM events WHERE verb = 'advanced'") == 1);
+
+        CHECK(runTurn(db, "wait").outcome == TurnOutcome::Ticked);
+        CHECK(advancedCount(db) == 2);
+        CHECK(queryInt(db, "SELECT COUNT(*) FROM events "
+                           "WHERE verb = 'advanced' AND object = 2") == 1);
+        CHECK(queryInt(db, "SELECT COUNT(*) FROM events "
+                           "WHERE verb = 'advanced' AND object = 3") == 0);
+        // Every advance sits on its own turn.
+        CHECK(queryInt(db, "SELECT COUNT(DISTINCT turn) FROM events "
+                           "WHERE verb = 'advanced'") == 2);
+    }
+
+    // --- item 10 end to end (REQ-ARC-STORE-16a): step 1 false, step 3 true,
+    // driven through ten REAL turns rather than by direct calls. An evaluator
+    // that scanned ahead would fire step 3. ---
+    {
+        const TempDbFile worldPath("textworld_story_rule_scan_tests.db");
+        Db db = openWorld(worldPath.string(), "tests/combat_fixture.sql").db;
+        db.begin();
+        writeStoryStep(db, 1, "enemies_defeated", "1", "they know we are awake");
+        writeStoryStep(db, 2, "rooms_built", "4", "the lamps go out");
+        writeStoryStep(db, 3, "reached_depth", "0", "the index is read");
+        db.commit();
+        for (int i = 0; i < 10; ++i) {
+            CHECK(runTurn(db, "wait").outcome == TurnOutcome::Ticked);
+        }
+        CHECK(advancedCount(db) == 0);
+        CHECK(queryInt(db, "SELECT COUNT(*) FROM story_step "
+                           "WHERE reached_turn IS NOT NULL") == 0);
+    }
+
+    // --- item 11 (REQ-ARC-STORE-18): a turn whose only event is waited, looked
+    // or failed never advances a step. Asserted as BEHAVIOUR — it follows from
+    // the four conditions, not from a verb filter. The world here is one event
+    // short of step 1's condition. ---
+    {
+        const TempDbFile worldPath("textworld_story_rule_quiet_tests.db");
+        Db db = openWorld(worldPath.string(), "tests/combat_fixture.sql").db;
+        db.begin();
+        writeStoryStep(db, 1, "enemies_defeated", "1", "they know we are awake");
+        db.commit();
+        CHECK(runTurn(db, "wait").outcome == TurnOutcome::Ticked);
+        CHECK(advancedCount(db) == 0);
+        CHECK(runTurn(db, "look").outcome == TurnOutcome::Ticked);
+        CHECK(advancedCount(db) == 0);
+        CHECK(runTurn(db, "take key").outcome == TurnOutcome::Ticked);  // fails: not here
+        CHECK(queryInt(db, "SELECT COUNT(*) FROM events WHERE verb = 'failed'") >= 1);
+        CHECK(advancedCount(db) == 0);
+        CHECK(queryInt(db, "SELECT COUNT(*) FROM story_step "
+                           "WHERE reached_turn IS NOT NULL") == 0);
+
+        // --- item 6, second half (REQ-ARC-STORE-14): 50 turns of waiting leave
+        // reached_turn NULL on every step. Waiting is not a way to advance,
+        // because nothing here reads a clock. ---
+        for (int i = 0; i < 50; ++i) {
+            CHECK(runTurn(db, "wait").outcome == TurnOutcome::Ticked);
+        }
+        CHECK(advancedCount(db) == 0);
+        CHECK(queryInt(db, "SELECT COUNT(*) FROM story_step "
+                           "WHERE reached_turn IS NOT NULL") == 0);
+    }
+
+    // --- item 12 (REQ-ARC-STORE-15): ATOMICITY. A throw on the advance path
+    // rolls the whole tick back — the turn counter, the event, and the latch. ---
+    {
+        const TempDbFile worldPath("textworld_story_rule_atomic_tests.db");
+        Db db = openWorld(worldPath.string(), "tests/combat_fixture.sql").db;
+        db.begin();
+        writeStoryStep(db, 1, "reached_depth", "0", "they know we are awake");
+        db.commit();
+        // Fault the advance itself: Stmt::step turns the SQLite error into a
+        // std::runtime_error, which the tick's catch turns into a rollback.
+        db.exec("CREATE TRIGGER story_boom AFTER INSERT ON events "
+                "WHEN NEW.verb = 'advanced' "
+                "BEGIN SELECT RAISE(ABORT, 'boom'); END");
+
+        const int64_t turnBefore =
+            queryInt(db, "SELECT value FROM meta WHERE key = 'turn'");
+        const int64_t eventsBefore = queryInt(db, "SELECT COUNT(*) FROM events");
+
+        const TurnResult r = runTurn(db, "wait");
+        CHECK(r.outcome == TurnOutcome::EngineError);
+        CHECK(queryInt(db, "SELECT value FROM meta WHERE key = 'turn'") == turnBefore);
+        CHECK(queryInt(db, "SELECT COUNT(*) FROM events") == eventsBefore);
+        CHECK(advancedCount(db) == 0);
+        // The latch rolled back with everything else — this is the assertion a
+        // read-then-write implementation could still fail.
+        CHECK(queryInt(db, "SELECT COUNT(*) FROM story_step "
+                           "WHERE reached_turn IS NOT NULL") == 0);
+
+        // The connection is still usable: with the trigger gone the same turn
+        // ticks and advances, so the rollback left no transaction dangling.
+        db.exec("DROP TRIGGER story_boom");
+        CHECK(runTurn(db, "wait").outcome == TurnOutcome::Ticked);
+        CHECK(advancedCount(db) == 1);
+    }
+}
+
+// Step 11: validation item 17 (REQ-ARC-STORE-19a), the half testStoryEvaluate
+// cannot reach — an EMPTY story_step table produces byte-identical narrated
+// output. The literal it is compared against was captured on a tree where the
+// table did not exist at all, so the same bytes are now pinned from BOTH
+// directions: with the five seeded steps present (two advances) and with the
+// table emptied (none).
+static void testStoryEmptyStepList() {
+    const TempDbFile worldPath("textworld_story_empty_tests.db");
+    Db db = openWorld(worldPath.string(), "seed/base.sql").db;
+    db.exec("DELETE FROM story_step");
+    CHECK(queryInt(db, "SELECT COUNT(*) FROM story_step") == 0);
+
+    std::string actual;
+    for (const char* line : kStoryGoldenScript) actual += runTurn(db, line).output;
+
+    CHECK(actual == kStoryGoldenSession);
+    CHECK(queryInt(db, "SELECT COUNT(*) FROM events WHERE verb = 'advanced'") == 0);
+}
+
+// Step 11: validation item 18 (REQ-ARC-STORE-15a) — the rule has exactly ONE
+// call site, in loop.cpp, inside the tick's transaction.
+static void testStoryOneCallSite() {
+    // Not in any other production unit. systems.{hpp,cpp} is where it is
+    // DEFINED, so those two are the exemption, not a second caller.
+    for (const char* file : {"src/prose.cpp", "src/bard.cpp", "src/render.cpp",
+                             "src/combat.cpp", "src/architect.cpp",
+                             "src/npc.cpp", "src/pregen.cpp", "src/main.cpp",
+                             "src/mutations.cpp"}) {
+        CHECK(!contains(readFileBytes(file), "evaluateStoryAdvance"));
+    }
+
+    const std::string loop = readFileBytes("src/loop.cpp");
+    const size_t call = loop.find("evaluateStoryAdvance(db, player);");
+    CHECK(call != std::string::npos);
+    // Exactly one call, not two.
+    CHECK(loop.find("evaluateStoryAdvance", call + 1) == std::string::npos);
+    // …and it sits between the tick's begin and its commit.
+    const size_t begin = loop.find("db.begin();");
+    const size_t commit = loop.find("db.commit();", begin);
+    CHECK(begin != std::string::npos);
+    CHECK(commit != std::string::npos);
+    CHECK(begin < call);
+    CHECK(call < commit);
+    // After the enemy turn, so a step advance and the change that caused it
+    // are one atomic fact.
+    const size_t combat = loop.find("resolveCombat(db, player, startRoom);");
+    CHECK(combat != std::string::npos);
+    CHECK(combat < call);
+}
+
+
 int main() {
     // libcurl init/shutdown for the whole run (REQ-LAT-7), ABOVE the live
     // smokes: they use the production transports and must run with libcurl
@@ -16587,6 +17520,22 @@ int main() {
     testBardSelGateWake();
     testBardSelAdmit();
     testBardSelContract();
+
+    testStoryStoreSchema();
+    testStoryStoreConditionCatalog();
+    testStoryStoreArc();
+    testStoryStoreWrite();
+    testStoryStoreSeededSteps();
+    testStoryConditions();
+    testStoryAdvance();
+    testStoryEvaluate();
+    testStoryRendererInvisible();
+    testStoryWakeTrigger();
+    testStoryAdvanceRule();
+    testStoryEmptyStepList();
+    testStoryOneCallSite();
+    testStoryStoreVersionGate();
+    testStoryGoldenSession();
 
     std::printf("%d checks, %d failures\n", g_checks, g_failures);
     return g_failures == 0 ? 0 : 1;

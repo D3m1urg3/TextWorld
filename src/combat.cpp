@@ -218,16 +218,6 @@ bool knowsSpellOfElement(Db& db, int64_t player, const std::string& element) {
     return s.step();
 }
 
-// Whether `player` has `spell` in known_spells — the canon of what they can cast
-// (REQ-COMBAT-7) and the "already learned" test for a re-read (REQ-COMBAT-21).
-bool knowsSpell(Db& db, int64_t player, const std::string& spell) {
-    Stmt s = db.prepare(
-        "SELECT 1 FROM known_spells WHERE entity = ? AND spell = ?");
-    s.bind(1, player);
-    s.bind(2, spell);
-    return s.step();
-}
-
 // Whether `player` knows EVERY key `archetype`'s lock requires (REQ-COMBAT-32): a
 // dispel for a barrier, and a spell of each weakness element. A basic-soluble
 // archetype requires none, so this is trivially true for it.
@@ -274,6 +264,20 @@ std::string blurbOf(Db& db, const std::string& archetype) {
 }
 
 }  // namespace
+
+// Whether `player` has `spell` in known_spells — the canon of what they can cast
+// (REQ-COMBAT-7) and the "already learned" test for a re-read (REQ-COMBAT-21).
+// Public for the same reason distanceFromSeed is: the story arc's
+// `spell_learned` condition asks this exact question (REQ-ARC-STORE-5), and a
+// second copy of the query in systems.cpp is the drift REQ-BARD-SEL-3 forbids.
+// Read-only.
+bool knowsSpell(Db& db, int64_t player, const std::string& spell) {
+    Stmt s = db.prepare(
+        "SELECT 1 FROM known_spells WHERE entity = ? AND spell = ?");
+    s.bind(1, player);
+    s.bind(2, spell);
+    return s.step();
+}
 
 // BFS hop-distance from the seed room (kDormitoryCell) to `room` over REALIZED
 // exits (dest non-NULL), or a large sentinel if unreachable — the deterministic

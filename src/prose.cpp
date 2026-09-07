@@ -20,6 +20,20 @@
 
 namespace {
 
+// The verbs the narrator NEVER sees, as one SQL tuple used by BOTH event
+// queries in buildFacts. One definition, because these two sites must agree:
+// excluding a verb from the current turn but not from recent_events would still
+// leak it into the narrator's context for the following six turns, which is the
+// half-fix neither REQ-ARCH-10 nor REQ-ARC-STORE-21 would survive.
+//
+//   'generated' (REQ-ARCH-10) — a world-gen turn narrates as the 'moved' block,
+//     never the room's birth; both share that turn number, the load-bearing case.
+//   'advanced'  (REQ-ARC-STORE-21) — brick 1 of the story arc adds storage and a
+//     rule and must not change one byte of narrated output. How an advance is
+//     told to the player is a later brick's decision, and this is where that
+//     decision gets made when it is taken.
+constexpr const char* kRendererInvisibleVerbs = "('generated','advanced')";
+
 using nlohmann::json;
 
 // The player entity (singleton by convention). Read-only.
@@ -294,13 +308,11 @@ TurnFacts buildFacts(Db& db, int64_t turn) {
     json events = json::array();
     int64_t actor = 0;
     {
-        Stmt ev = db.prepare(
+        const std::string sql =
             "SELECT actor, verb, subject, detail, detail IS NULL "
-            // The 'generated' verb is renderer-invisible (REQ-ARCH-10): exclude
-            // it here so a world-gen turn narrates as the 'moved' block, never
-            // the room's birth (both share this turn number — the load-bearing
-            // case).
-            "FROM events WHERE turn = ? AND verb <> 'generated' ORDER BY id");
+            "FROM events WHERE turn = ? AND verb NOT IN " +
+            std::string(kRendererInvisibleVerbs) + " ORDER BY id";
+        Stmt ev = db.prepare(sql.c_str());
         ev.bind(1, turn);
         while (ev.step()) {
             if (actor == 0) actor = ev.colInt(0);
@@ -386,11 +398,10 @@ TurnFacts buildFacts(Db& db, int64_t turn) {
     json recents = json::array();
     {
         std::vector<json> rows;
-        Stmt s = db.prepare(
-            "SELECT turn, verb, subject FROM events "
-            // 'generated' excluded here too (REQ-ARCH-10): it never enters
-            // recent_events context either.
-            "WHERE turn < ? AND verb <> 'generated' ORDER BY id DESC LIMIT 6");
+        const std::string sql =
+            "SELECT turn, verb, subject FROM events WHERE turn < ? AND verb NOT IN " +
+            std::string(kRendererInvisibleVerbs) + " ORDER BY id DESC LIMIT 6";
+        Stmt s = db.prepare(sql.c_str());
         s.bind(1, turn);
         while (s.step()) {
             json e;

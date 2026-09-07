@@ -1,7 +1,7 @@
 ---
 title: "Story arc store: the arc, the steps, and the advance rule"
 date: 2026-09-06
-status: draft
+status: implemented
 tags: [bard, story-arc, steps, advance-rule, schema, mutations, append-only, ledger, condition-vocabulary, evolving-setting]
 modules: [world, mutations, loop, bard, seed]
 related: [.lore/work/brainstorm/story-arc-and-evolving-setting.md, .lore/work/design/bard-fact-store.md, .lore/work/specs/bard-fact-store.md, .lore/work/specs/bard-overture-and-scheduling.md, .lore/work/brainstorm/dungeon-master.md, .lore/vision.md]
@@ -18,13 +18,13 @@ binary; nothing here needs a transport, a canned response, or an API key.
 This is the brick that fills the hole found in
 [the brainstorm](../brainstorm/story-arc-and-evolving-setting.md): the arc, the
 antagonist force, and the ending were designed in `dungeon-master.md` §13 and
-never built, because the first bard design was scoped as a schema and an arc is
-not a row shape.
+never built, because the first bard design was scoped as a schema, and an arc is
+one fact about the whole world rather than a table of similar rows.
 
-It follows the method of [bard-fact-store](bard-fact-store.md) deliberately, and
-reuses three of its patterns without change: a closed vocabulary seeded as a
-table, admission validation in the write helper, and a one-way latch expressed as
-a `WHERE` clause rather than a prior read.
+It deliberately works the way [bard-fact-store](bard-fact-store.md) did, and
+reuses three things from it unchanged: a closed vocabulary seeded as a table,
+validation done by the write helper before it inserts anything, and a one-way
+latch written as a `WHERE` clause rather than as a read followed by a write.
 
 ## A. Context
 
@@ -36,11 +36,12 @@ Each carries a **condition** the engine can check and a line of **prose**
 describing the world once that step is reached. The bard writes them; the engine
 walks them.
 
-**Boundary declaration (vision principle 1).** The prose of each step and the
-choice of which condition guards it are AI-driven — flavor and selection from a
-closed set, with no mechanical consequence at write time. Which step is current,
-whether a condition holds, when an advance fires, and the one-way latch are
-deterministic (engine). The bard never advances anything and is never told to.
+**What the model decides, and what the engine decides (vision principle 1).**
+The prose of each step, and which condition guards it, are chosen by the model —
+flavor, and a pick from a closed set, with nothing mechanical decided at write
+time. Which step is current, whether a condition holds, when an advance fires,
+and the one-way latch are all decided by the engine. The bard never advances
+anything and is never told to.
 
 **No clock, still.** `bard-fact-store.md:108` killed the clock deliberately —
 *"there is no clock column and no urgency column, and that absence is
@@ -54,18 +55,18 @@ steps advance on *irreversible player events*. Two of the four conditions —
 `reached_depth` most obviously — can be momentarily true and then false again if
 the player walks back. What makes an advance irreversible is not the condition but
 **the latch**: `reached_turn` is set once and never cleared, so the step means
-*"this was true at least once"*. That is a strictly simpler rule than gating
-evaluation on a verb list, and it keeps the no-clock property intact.
+*"this was true at least once"*. That is a simpler rule than filtering
+evaluation by a verb list, and nothing about it reads a clock.
 
 ## B. Schema
 
 **REQ-ARC-STORE-1.** `SCHEMA_VERSION` is raised from 7 to 8. An existing world
 file at version 7 produces the current `SchemaMismatch` diagnostic and refuses to
-open; no migration is written. (The `bard-fact-store` precedent, REQ-BARD-STORE-1.)
+open; no migration is written. (`bard-fact-store` did the same, REQ-BARD-STORE-1.)
 
 **REQ-ARC-STORE-2.** The arc is three new rows in `meta` — `arc_premise`,
 `arc_goal`, `arc_ending` — each a freeform string. New **rows**, not a new
-**shape**: zero DDL, following the `meta.setting` precedent. They are separate
+**table**: zero DDL, the same way `meta.setting` was added. They are separate
 rows rather than one blob so that a later consumer can send the architect the
 premise without the ending leaking into every room build.
 
@@ -75,7 +76,7 @@ premise without the ending leaking into every room build.
 CREATE TABLE story_step(
   n              INTEGER PRIMARY KEY,  -- 1-based; the list is walked in this order
   condition_kind TEXT NOT NULL,        -- condition_catalog.kind (closed vocabulary)
-  condition_arg  TEXT NOT NULL,        -- shape governed by condition_catalog.arg_kind
+  condition_arg  TEXT NOT NULL,        -- what may go here: see condition_catalog.arg_kind
   prose          TEXT NOT NULL,        -- what the world looks like once reached
   reached_turn   INTEGER               -- NULL = not yet reached; set once, never cleared
 );
@@ -106,9 +107,9 @@ CREATE TABLE condition_catalog(
 | `spell_learned` | `spell` | the player has a `known_spells` row for that spell |
 | `reached_depth` | `int` | `distanceFromSeed` of the player's room is >= the argument |
 
-`reached_depth` reuses the spatial metric `tier` already gates on
-(`combat.cpp:284`), so escalation stays spatial rather than inventing a second
-measure of progress.
+`reached_depth` reuses the same distance measure `tier` is already compared
+against (`combat.cpp:284`), so the threat still grows with distance rather than
+against a second, separate measure of progress.
 
 ## C. Seed content
 
@@ -127,9 +128,9 @@ A freshly initialized world is at step zero — nothing reached.
 
 ## D. Write helpers
 
-All three live in `mutations.{hpp,cpp}` and follow that file's stated contract:
-they never begin, commit, or roll back, and systems code never writes these
-tables directly.
+All three live in `mutations.{hpp,cpp}` and follow the rule stated at the top
+of that file: they never begin, commit, or roll back, and systems code never
+writes these tables directly.
 
 **REQ-ARC-STORE-9.** `writeArc(db, premise, goal, ending)` upserts the three
 `meta` rows. Free rewrite, like `writeBardJournal`. Event-free — an arc is not
@@ -144,9 +145,9 @@ and **validates at admission**, throwing `std::runtime_error` on any of:
 - `prose` empty after trimming
 - `n` already present
 
-This is `writeCatalogEntry`'s motive gate applied to conditions: **a step may not
-promise a condition the engine cannot check.** Event-free — a step not yet
-reached has not happened.
+`writeCatalogEntry` already refuses a motive with no `motive_catalog` row. This
+does the same for conditions: **a step may not promise a condition the engine
+cannot check.** Event-free — a step not yet reached has not happened.
 
 **REQ-ARC-STORE-11.** `advanceStoryStep(db, actor)` → `bool` latches the lowest
 unreached step and appends its event, both in the caller's ambient transaction:
@@ -156,10 +157,10 @@ UPDATE story_step SET reached_turn = (SELECT value FROM meta WHERE key='turn')
  WHERE n = (SELECT MIN(n) FROM story_step WHERE reached_turn IS NULL)
 ```
 
-The latch is the `WHERE` clause, never a prior read (the
-`materializeCatalogEntry` shape, REQ-BARD-STORE-13). It returns `false` and
-appends nothing when every step is already reached. It is the **sole writer** of
-the `advanced` verb.
+The latch is the `WHERE` clause, never a read done first
+(`materializeCatalogEntry` works this way, REQ-BARD-STORE-13). It returns
+`false` and appends nothing when every step is already reached. It is the
+**sole writer** of the `advanced` verb.
 
 **REQ-ARC-STORE-11a.** The helper returns `true` if and only if it latched
 exactly one row, and the event it appends describes **that same row** — the `n`
@@ -180,10 +181,11 @@ no writes, no mutation, one query per kind — implementing the four semantics i
 cannot occur through any sanctioned path — [REQ-ARC-STORE-10](#d-write-helpers)
 rejects it at admission and [REQ-ARC-STORE-1](#b-schema) refuses world files from
 an earlier vocabulary — so reaching it is an engine error, and a silent `false`
-would hide a real bug. The `moveEntity` discipline.
+would hide a real bug. `moveEntity` throws for the same reason when an entity
+has no location row.
 
-**REQ-ARC-STORE-14.** No condition reads `meta.turn` or any wall clock. This is
-mechanically checkable and is the requirement that keeps
+**REQ-ARC-STORE-14.** No condition reads `meta.turn` or any wall clock. A grep
+can check this, and it is the requirement that keeps
 `bard-fact-store.md:108`'s decision intact.
 
 ## F. The advance rule
@@ -197,12 +199,12 @@ neither".
 actor)`, called once per tick from `loop.cpp`. It reads the lowest unreached
 step, calls `stepConditionMet`, and calls `advanceStoryStep` when that holds.
 
-File discipline, so no new translation unit is needed and each piece sits with
-its own kind of work:
+Where each piece goes, so that no new translation unit is needed and each one
+sits with code of its own kind:
 
 | Piece | Home | Why |
 |---|---|---|
-| `advanceStoryStep` | `mutations.{hpp,cpp}` | it writes, and that file is the only sanctioned write path |
+| `advanceStoryStep` | `mutations.{hpp,cpp}` | it writes, and that file is the only place allowed to write |
 | `stepConditionMet` | `systems.{hpp,cpp}` | a pure rule over world state |
 | `evaluateStoryAdvance` | `systems.{hpp,cpp}` | the rule that ties them together |
 | the call site | `loop.cpp` | the tick owns the transaction |
@@ -241,14 +243,16 @@ rather than discovered there.
 
 **REQ-ARC-STORE-20.** The `advanced` verb is written with `actor` = the player,
 `subject` = 0 (there is no entity — the zero-id rule of REQ-PROSE-6), `object` =
-the step's `n`, and `detail` = the step's `prose`. `prose` is a model-facing
-fragment, not an engine tag, so the row is already the right shape for brick 3.
+the step's `n`, and `detail` = the step's `prose`. `prose` is text meant for
+the model, not an internal tag, so the row already carries what brick 3 will
+need.
 
 **REQ-ARC-STORE-21.** `advanced` is **renderer-invisible in this brick**. It is
 excluded from `buildFacts` exactly as `generated` is (`prose.cpp:303`,
 REQ-ARCH-10), and `render.cpp` gains no branch for it. **Brick 1 must not change
 one byte of narrated output** — how an advance is told to the player is brick 3's
-decision, and making it here would smuggle a design choice into a storage brick.
+decision, and settling it here would put that choice inside a change that is
+only supposed to add storage.
 
 ## H. The bard wake trigger
 
@@ -274,8 +278,9 @@ length of the build for no gain.
   unanswered and predates this feature (`ai-integration-points.md`, April).
 - **More than one list of steps.** The emergence argument in the brainstorm needs
   several running at once. The schema does not forbid it — `story_step` could
-  gain a list id later — but one list is what this brick builds and the honest
-  expectation is that it feels like a fuse, not a world.
+  gain a list id later — but one list is what this brick builds, and the
+  expectation, stated plainly, is that it will feel like a fuse rather than a
+  world.
 - **Regions.** A world unfolding through space that does not exist yet. Parked in
   the brainstorm; the step's own prose carries the geography instead.
 - **Rewriting anything.** `meta.setting` is untouched, and no room description
@@ -290,15 +295,15 @@ API key.
 
 1. **Version refusal** (1). Open a world file stamped `schema_version = 7`;
    assert the `SchemaMismatch` diagnostic and that the process refuses to open it.
-2. **Fresh world shape** (2, 3, 4, 6, 7, 8). Create a world; assert via SQL that
-   the three `arc_*` meta rows are non-empty, `condition_catalog` holds exactly
-   four kinds, `story_step` holds five rows numbered 1–5 using at least three
-   distinct kinds, and `SELECT COUNT(*) FROM story_step WHERE reached_turn IS NOT
-   NULL` is 0.
-3. **Admission gate** (10). Assert `writeStoryStep` throws on each of: an unknown
-   kind, `arg = "x"` for an `int` kind, `arg = "levitate"` for `spell_learned`,
-   empty prose, a duplicate `n`. Assert a valid call inserts exactly one row and
-   appends **no** event row.
+2. **What a fresh world contains** (2, 3, 4, 6, 7, 8). Create a world; assert
+   via SQL that the three `arc_*` meta rows are non-empty, `condition_catalog`
+   holds exactly four kinds, `story_step` holds five rows numbered 1–5 using at
+   least three distinct kinds, and `SELECT COUNT(*) FROM story_step WHERE
+   reached_turn IS NOT NULL` is 0.
+3. **What `writeStoryStep` refuses** (10). Assert it throws on each of: an
+   unknown kind, `arg = "x"` for an `int` kind, `arg = "levitate"` for
+   `spell_learned`, empty prose, a duplicate `n`. Assert a valid call inserts
+   exactly one row and appends **no** event row.
 4. **Each condition** (5, 12). For all four kinds, build a world where the
    condition is false, assert `stepConditionMet` is false; make it true by the
    sanctioned path (defeat an enemy, generate a room, `learnSpell`, move the
@@ -329,15 +334,15 @@ API key.
     of them.
 12. **Atomicity** (15). Force a throw after the advance but before the tick
     commits; assert the transaction rolled back and no `advanced` row survives.
-13. **Event shape** (20). Assert the row's `actor` is the player, `subject` is 0,
-    `object` is the step number, and `detail` is byte-identical to that step's
-    `prose`.
+13. **The event's columns** (20). Assert the row's `actor` is the player,
+    `subject` is 0, `object` is the step number, and `detail` is byte-identical
+    to that step's `prose`.
 14. **Narrated output is unchanged** (21). Record a golden session against the
     seeded world *before* the change, following the `kExamineGoldenSession`
     pattern (`tests/tests.cpp:2125`, `TW_DUMP_GOLDEN=1`), driving it far enough
     that at least one step advances. After the change, assert the transcript is
-    **byte-identical**. This is the brick's non-regression gate and the single
-    most important item in this list.
+    **byte-identical**. This is what catches a change in narrated
+    output, and it is the most important item in this list.
 15. **The wake trigger fires** (22, 23). With a world whose bard is idle, cause one
     step to advance and assert a wake is queued — and assert the other four verbs
     still trigger, so nothing was narrowed early (23).
