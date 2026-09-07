@@ -10130,6 +10130,72 @@ static void testBandWiring() {
     }
 }
 
+// Step 6 / REQ-POLISH-7, -7a: a refusal is dimmed, and still indented. Spec
+// check 8, driven through runTurn so the assertion is on what the player sees.
+static void testErrorStyling() {
+    const TempDbFile worldPath("textworld_error_style_tests.db");
+    Db db = openWorld(worldPath.string(), "tests/fixture.sql").db;
+
+    // The band is styled too, so every assertion below reads the NARRATION —
+    // everything above the header rule.
+    const auto narrationOf = [](const std::string& out) {
+        const size_t bandStart = out.find("-- ");
+        CHECK(bandStart != std::string::npos);
+        return out.substr(0, bandStart);
+    };
+
+    std::string colored;
+    std::string noColor;
+    std::string dumb;
+
+    // The three captures are taken inside the guards' scope; the assertions are
+    // made outside it, with the developer's environment already restored.
+    {
+        const ScopedEnvVar termGuard("TERM");
+        const ScopedEnvVar forceGuard("CLICOLOR_FORCE");
+        const ScopedEnvVar noColorGuard("NO_COLOR");
+
+        setenv("TERM", "xterm", 1);
+        setenv("CLICOLOR_FORCE", "1", 1);
+        unsetenv("NO_COLOR");
+        termRefreshStyle();
+        CHECK(currentStyle().color);
+        colored = narrationOf(runTurn(db, "xyzzy the frobnitz").output);
+
+        setenv("NO_COLOR", "1", 1);
+        termRefreshStyle();
+        CHECK(!currentStyle().color);
+        noColor = narrationOf(runTurn(db, "xyzzy the frobnitz").output);
+
+        unsetenv("NO_COLOR");
+        setenv("TERM", "dumb", 1);
+        termRefreshStyle();
+        CHECK(!currentStyle().color);
+        CHECK(!currentStyle().attrs);
+        dumb = narrationOf(runTurn(db, "xyzzy the frobnitz").output);
+    }
+    termRefreshStyle();
+
+    // REQ-POLISH-7: dimmed with BrightBlack under colour.
+    CHECK(contains(colored, "\x1b[90m"));
+    // Suppressed means the plain bytes, not an empty sequence (REQ-UI-22).
+    CHECK(noColor.find('\x1b') == std::string::npos);
+    CHECK(dumb.find('\x1b') == std::string::npos);
+    CHECK(noColor == dumb);
+
+    // The escape bytes sit OUTSIDE the two-space indent, so stripSgr yields the
+    // same string in all three — which is also what keeps the wrap honest, since
+    // wrapProse would have counted those bytes as columns.
+    CHECK(stripSgr(colored) == noColor);
+    CHECK(contains(colored, "  \x1b[90m"));
+
+    // REQ-POLISH-7a: indented like prose in all three.
+    for (const std::string& capture : {colored, noColor, dumb}) {
+        CHECK(capture.rfind("  ", 0) == 0);
+        CHECK(contains(stripSgr(capture), "  I don't understand that."));
+    }
+}
+
 // Check 22 / REQ-UI-5: the band is printed once at startup too, after the
 // read-only room render and before the first prompt.
 static void testBandStartup() {
@@ -17633,6 +17699,7 @@ int main() {
     testBandGoldens();
     testBandColor();
     testBandWiring();
+    testErrorStyling();
     testBandStartup();
     testSpellsVerb();
     testBandResistance();

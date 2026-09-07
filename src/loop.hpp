@@ -20,6 +20,7 @@ enum class TurnOutcome {
 enum class TurnPresentation {
     Prose,      // the world talking: wrapped to proseWidth, indented
     Reference,  // a reference table (`spells`): full width, column 0, like the band
+    Error,      // a refusal: wrapped and indented as prose, then dimmed
 };
 
 struct TurnResult {

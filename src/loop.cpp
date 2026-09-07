@@ -99,6 +99,38 @@ std::string bandOrEmpty(Db& db, int width) {
     }
 }
 
+// Dim every non-empty line of `text` independently, preserving the newlines.
+// Per line rather than around the whole block, because one SGR pair spanning a
+// newline leaves the colour set across the line break on some terminals, and
+// because the indent must stay outside the escape bytes.
+std::string dimEachLine(const std::string& text, TermStyle style) {
+    std::string out;
+    size_t pos = 0;
+    while (pos <= text.size()) {
+        const size_t nl = text.find('\n', pos);
+        const size_t end = nl == std::string::npos ? text.size() : nl;
+        const std::string line = text.substr(pos, end - pos);
+        if (line.empty()) {
+            out += line;
+        } else {
+            // The indent stays plain: style the text, not the leading spaces.
+            // indentProse never emits a whitespace-only line (REQ-POLISH-3a),
+            // but npos here would throw, so it is handled rather than assumed.
+            const size_t firstText = line.find_first_not_of(' ');
+            if (firstText == std::string::npos) {
+                out += line;
+            } else {
+                out += line.substr(0, firstText);
+                out += colorize(line.substr(firstText), Color::BrightBlack, style);
+            }
+        }
+        if (nl == std::string::npos) break;
+        out += "\n";
+        pos = nl + 1;
+    }
+    return out;
+}
+
 // The turn proper: resolution, the tick, and narration. Wrapped by runTurn
 // below, which owns wrapping and the status band — so every return path here
 // picks both up without this function knowing they exist.
@@ -115,7 +147,8 @@ TurnResult runTurnCore(Db& db, const std::string& line) {
         action = aiNarrationEnabled() ? resolveOrParse(db, line) : parse(db, line);
     }
     if (!action) {
-        return {TurnOutcome::NoTick, renderError("I don't understand that.")};
+        return {TurnOutcome::NoTick, renderError("I don't understand that."),
+                TurnPresentation::Error};
     }
 
     // Quit is handled before any transaction opens; it never reaches resolve.
@@ -148,7 +181,7 @@ TurnResult runTurnCore(Db& db, const std::string& line) {
     // availability; it never costs the player a turn.
     if (action->verb == Verb::Cast) {
         if (const auto reason = castDenialReason(db, playerId(db), action->spell)) {
-            return {TurnOutcome::NoTick, renderError(*reason)};
+            return {TurnOutcome::NoTick, renderError(*reason), TurnPresentation::Error};
         }
     }
 
@@ -183,7 +216,8 @@ TurnResult runTurnCore(Db& db, const std::string& line) {
             // Tier c: engine error. Roll back — turn counter and world state as
             // if the prompt never happened.
             db.rollback();
-            return {TurnOutcome::EngineError, renderError(e.what())};
+            return {TurnOutcome::EngineError, renderError(e.what()),
+                    TurnPresentation::Error};
         }
     }
 
@@ -247,6 +281,20 @@ TurnResult runTurn(Db& db, const std::string& line) {
         r.output = wrapProse(r.output, w);
     } else {
         r.output = indentProse(wrapProse(r.output, proseWidth(w)), kProseIndent);
+        // REQ-POLISH-7: a refusal is the game speaking, not the world, and it
+        // should not read with the same weight as prose. BrightBlack is the
+        // colour band.cpp:28 already gives a spell that has receded out of
+        // reach, so no new colour enters the vocabulary.
+        //
+        // Applied HERE, per line, AFTER the width arithmetic — never inside
+        // renderError. wrapProse measures with utf8Length, which counts escape
+        // bytes as columns, so styling upstream of the wrap would corrupt the
+        // layout of any refusal long enough to wrap. It also keeps the escape
+        // bytes OUTSIDE the two-space indent, so stripSgr yields the same
+        // string styled or not, and render.cpp stays free of TermStyle.
+        if (r.presentation == TurnPresentation::Error) {
+            r.output = dimEachLine(r.output, currentStyle());
+        }
     }
     r.output += bandOrEmpty(db, w);
     return r;
