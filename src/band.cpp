@@ -28,6 +28,10 @@ constexpr Color kSpellReadyColor = Color::BrightBlue;  // 94 — available actio
 constexpr Color kSpellCoolColor = Color::BrightBlack;  // 90 — recedes
 constexpr Color kStatusColor = Color::Magenta;         // 35 — active magic
 constexpr Color kResistColor = Color::BrightMagenta;   // 95 — knowledge of state
+// Background only, and only for the player's health bar when health is fine —
+// the one place the band needs a colour meaning "this much is left" rather than
+// a colour meaning a role. See the note at its use site in playerRow.
+constexpr Color kHealthyColor = Color::Green;          // 42 as a BACKGROUND
 // The room-name header is BOLD with no color, so it survives NO_COLOR
 // (REQ-UI-23); it is the band's anchor.
 
@@ -275,6 +279,23 @@ std::vector<BandSpan> healthBarSpans(int64_t current, int64_t max, Color fill,
 
 namespace {
 
+// Append a health bar after the "HP: n/m" span that must already be the last
+// one in `spans`.
+//
+// REQ-POLISH-10 buys the bar ten columns plus ONE space of separation, and
+// REQ-POLISH-10a caps its whole cost to a row at eleven. The band's usual gap
+// between fields is TWO spaces, which would make it twelve — so the preceding
+// span's pad is narrowed to one space for exactly this join. The bar's own
+// trailing pad stays the band's usual two, so whatever follows it (a
+// [WINDING UP], a resistance, a spell) sits where every other field does.
+void appendHealthBar(std::vector<BandSpan>& spans, int64_t current, int64_t max,
+                     Color fill, TermStyle style) {
+    const std::vector<BandSpan> bar = healthBarSpans(current, max, fill, style);
+    if (bar.empty()) return;
+    if (!spans.empty()) spans.back().pad = " ";
+    for (const BandSpan& span : bar) spans.push_back(span);
+}
+
 // --- row builders -----------------------------------------------------------
 
 // A comma-separated list row. The last item carries no separator, so the row
@@ -339,7 +360,7 @@ void appendStatusSpans(Db& db, int64_t entity, std::vector<BandSpan>& spans) {
 // and maximum HP. The query reuses resolveCombat's swarm shape
 // (combat.cpp:525-529) so band order and combat order are the same order by
 // construction.
-std::vector<BandRow> hostileRows(Db& db, int64_t room) {
+std::vector<BandRow> hostileRows(Db& db, int64_t room, TermStyle style) {
     std::vector<int64_t> bodies;
     {
         Stmt s = db.prepare(
@@ -370,6 +391,13 @@ std::vector<BandRow> hostileRows(Db& db, int64_t room) {
         row.spans.push_back({"HP: " + std::to_string(current) + "/" +
                                  std::to_string(max),
                              kHostileColor, false, "  "});
+        // REQ-POLISH-8: ALONGSIDE the numbers, never instead of them — a bar
+        // alone cannot tell 3 HP from 4, and carrying numbers the player can
+        // trust over the prose is the band's job. Immediately after HP: n/m,
+        // and BEFORE [WINDING UP], so the loudest thing in the row stays the
+        // last thing the eye lands on (REQ-UI-34). It takes the row's own
+        // colour, so bar and number read as one fact.
+        appendHealthBar(row.spans, current, max, kHostileColor, style);
 
         // REQ-UI-34: a pending strike is the loudest thing in the band. Text
         // alone identifies it, which is what keeps it legible under TERM=dumb
@@ -398,7 +426,7 @@ std::vector<BandRow> hostileRows(Db& db, int64_t room) {
 }
 
 // REQ-UI-15/-16/-17: HP unconditionally; spell readiness only in combat.
-BandRow playerRow(Db& db, int64_t player, int64_t room) {
+BandRow playerRow(Db& db, int64_t player, int64_t room, TermStyle style) {
     BandRow row{"You", {}};
 
     {
@@ -407,9 +435,26 @@ BandRow playerRow(Db& db, int64_t player, int64_t room) {
         if (s.step()) {
             const int64_t current = s.colInt(0);
             const int64_t max = s.colInt(1);
+            const bool low = hpIsLow(current, max);
             row.spans.push_back(
                 {"HP: " + std::to_string(current) + "/" + std::to_string(max),
-                 hpIsLow(current, max) ? kLowHpColor : Color::None, false, "  "});
+                 low ? kLowHpColor : Color::None, false, "  "});
+            // REQ-POLISH-8, same placement as the hostile rows.
+            //
+            // The bar's fill is NOT the HP number's own colour, which is
+            // Color::None while health is fine (REQ-UI-16). bgColorize with
+            // Color::None emits nothing, and a bar with no colour is not a bar —
+            // seen directly in a real fight, where a healthy player's bar came
+            // out as ten plain spaces. So a healthy bar is green and a low one
+            // takes the number's yellow, which is the one case where the two
+            // must agree.
+            //
+            // Green here does not collide with kObjectColor under REQ-UI-24's
+            // one-role-one-colour rule: this is a BACKGROUND, a channel nothing
+            // else in the band uses, and a solid block of colour is not read as
+            // coloured text. That separation is the same one REQ-POLISH-13 makes.
+            appendHealthBar(row.spans, current, max,
+                            low ? kLowHpColor : kHealthyColor, style);
         }
     }
 
@@ -498,8 +543,8 @@ std::string composeBand(Db& db, int width, TermStyle style) {
     std::vector<BandRow> rows;
     rows.push_back(exitsRow(db, room));
     rows.push_back(objectsRow(db, room));
-    for (BandRow& row : hostileRows(db, room)) rows.push_back(std::move(row));
-    rows.push_back(playerRow(db, player, room));
+    for (BandRow& row : hostileRows(db, room, style)) rows.push_back(std::move(row));
+    rows.push_back(playerRow(db, player, room, style));
 
     // REQ-UI-14: the room's NAME, never its description — the band repeats the
     // name and leaves the prose to its existing move/look trigger.

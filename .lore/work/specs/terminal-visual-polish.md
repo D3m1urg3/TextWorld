@@ -345,9 +345,16 @@ Each item is a command to run and an observation to make.
 
 ## Open questions
 
-- **Where the bar sits in the row.** Before or after the numbers changes how the
-  eye scans a hostile row that also carries `[WINDING UP]`. Worth deciding by
-  looking at a real fight rather than in the spec.
+- ~~**Where the bar sits in the row.**~~ **Settled during implementation,
+  2026-09-07, by looking at a real fight.** Immediately after `HP: n/m`, bound to
+  it by a single space, with the band's usual two-space gap before whatever
+  follows. `[WINDING UP]` therefore stays the last and loudest thing in a hostile
+  row (REQ-UI-34). The one cost is that `[########]` and `[WINDING UP]` are
+  adjacent bracketed tokens without colour; under colour they are a solid block
+  and bold bright-red text and do not compete, and without colour the words
+  inside the second one distinguish it. Moving the bar to the end of the row was
+  rejected: it would separate the bar from the number REQ-POLISH-8 says it stands
+  alongside.
 - **Whether the title screen should be suppressible.** REQ-POLISH-29 prints it
   every launch. If it grows past a few lines, an env switch in the shape of
   `TEXTWORLD_AI` may be wanted. Not built until it is.

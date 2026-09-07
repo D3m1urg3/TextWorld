@@ -2129,57 +2129,57 @@ static const char* const kExamineGoldenSession = R"GOLDEN(  A bare stone cell.
 -- cell ------------------------------------------------------------------------
  Exits    down, north
  Objects  wand
- You      HP: 12/12
+ You      HP: 12/12 [########]
   You are carrying nothing.
 -- cell ------------------------------------------------------------------------
  Exits    down, north
  Objects  wand
- You      HP: 12/12
+ You      HP: 12/12 [########]
   You take the wand.
 -- cell ------------------------------------------------------------------------
  Exits    down, north
- You      HP: 12/12
+ You      HP: 12/12 [########]
   You are carrying: wand.
 -- cell ------------------------------------------------------------------------
  Exits    down, north
- You      HP: 12/12
+ You      HP: 12/12 [########]
   There's nothing to read there.
 -- cell ------------------------------------------------------------------------
  Exits    down, north
- You      HP: 12/12
+ You      HP: 12/12 [########]
   You drop the wand.
 -- cell ------------------------------------------------------------------------
  Exits    down, north
  Objects  wand
- You      HP: 12/12
+ You      HP: 12/12 [########]
   Time passes.
 -- cell ------------------------------------------------------------------------
  Exits    down, north
  Objects  wand
- You      HP: 12/12
+ You      HP: 12/12 [########]
 Spells you know:
 stun — element: none, cooldown: 3, interrupts a winding-up strike
 ward — element: none, cooldown: 2, blocks one telegraphed strike
 -- cell ------------------------------------------------------------------------
  Exits    down, north
  Objects  wand
- You      HP: 12/12
+ You      HP: 12/12 [########]
   I don't understand that.
 -- cell ------------------------------------------------------------------------
  Exits    down, north
  Objects  wand
- You      HP: 12/12
+ You      HP: 12/12 [########]
   You don't see that here.
 -- cell ------------------------------------------------------------------------
  Exits    down, north
  Objects  wand
- You      HP: 12/12
+ You      HP: 12/12 [########]
   A long dim corridor.
 -- corridor --------------------------------------------------------------------
  Exits    east, south, up
  Objects  key
- Enemy    goblin grunt  HP: 8/8
- You      HP: 12/12  Stun: ready  Ward: ready
+ Enemy    goblin grunt  HP: 8/8 [########]
+ You      HP: 12/12 [########]  Stun: ready  Ward: ready
   You strike the goblin grunt for 4 damage.
   The goblin grunt winds up a heavy blow — strike it down or
   brace!
@@ -2187,37 +2187,37 @@ ward — element: none, cooldown: 2, blocks one telegraphed strike
 -- corridor --------------------------------------------------------------------
  Exits    east, south, up
  Objects  key
- Enemy    goblin grunt  HP: 4/8  [WINDING UP]
- You      HP: 11/12  Stun: ready  Ward: ready
+ Enemy    goblin grunt  HP: 4/8 [####....]  [WINDING UP]
+ You      HP: 11/12 [#######.]  Stun: ready  Ward: ready
   You cast ward.
   The goblin grunt's strike breaks against your ward.
   The goblin grunt wounds you for 1 damage.
 -- corridor --------------------------------------------------------------------
  Exits    east, south, up
  Objects  key
- Enemy    goblin grunt  HP: 4/8
- You      HP: 10/12  Stun: ready  Ward: 2
+ Enemy    goblin grunt  HP: 4/8 [####....]
+ You      HP: 10/12 [#######.]  Stun: ready  Ward: 2
   You strike the goblin grunt for 4 damage.
   The goblin grunt falls. It drops the fire grimoire.
 -- corridor --------------------------------------------------------------------
  Exits    east, south, up
  Objects  key, fire grimoire
- You      HP: 10/12
+ You      HP: 10/12 [#######.]
   You study the fire grimoire and learn to cast fire.
 -- corridor --------------------------------------------------------------------
  Exits    east, south, up
  Objects  key, fire grimoire
- You      HP: 10/12
+ You      HP: 10/12 [#######.]
   You study the fire grimoire, but you already know fire.
 -- corridor --------------------------------------------------------------------
  Exits    east, south, up
  Objects  key, fire grimoire
- You      HP: 10/12
+ You      HP: 10/12 [#######.]
   A bare stone cell.
 -- cell ------------------------------------------------------------------------
  Exits    down, north
  Objects  wand
- You      HP: 10/12
+ You      HP: 10/12 [#######.]
 )GOLDEN";
 
 // The pre-examine golden session (spec AI-Validation item 17, REQ-EXAMINE-23).
@@ -9814,7 +9814,7 @@ static void testBandGoldens() {
     db.exec("UPDATE location SET container = 99 WHERE entity = 3");
     golden("empty room", composeBand(db, 60, kBandPlain),
            "-- empty vault ---------------------------------------------\n"
-           " You      HP: 12/12\n");
+           " You      HP: 12/12 [########]\n");
 
     // 2. A room with objects (the cell holds the wand).
     db.exec("UPDATE location SET container = 1 WHERE entity = 3");
@@ -9822,7 +9822,7 @@ static void testBandGoldens() {
            "-- cell ----------------------------------------------------\n"
            " Exits    down, north\n"
            " Objects  wand\n"
-           " You      HP: 12/12\n");
+           " You      HP: 12/12 [########]\n");
 
     // 3. One hostile (the corridor).
     db.exec("UPDATE location SET container = 2 WHERE entity = 3");
@@ -9830,18 +9830,18 @@ static void testBandGoldens() {
            "-- corridor ------------------------------------------------\n"
            " Exits    east, south, up\n"
            " Objects  key\n"
-           " Enemy    goblin grunt  HP: 8/8\n"
-           " You      HP: 12/12  Stun: ready  Ward: ready\n");
+           " Enemy    goblin grunt  HP: 8/8 [########]\n"
+           " You      HP: 12/12 [########]  Stun: ready  Ward: ready\n");
 
     // 4. Three hostiles (the library swarm), one row each in entity order.
     db.exec("UPDATE location SET container = 11 WHERE entity = 3");
     golden("three hostiles", composeBand(db, 60, kBandPlain),
            "-- library -------------------------------------------------\n"
            " Exits    up\n"
-           " Enemy    snapping folio  HP: 10/10\n"
-           " Enemy    snapping folio  HP: 10/10\n"
-           " Enemy    snapping folio  HP: 10/10\n"
-           " You      HP: 12/12  Stun: ready  Ward: ready\n");
+           " Enemy    snapping folio  HP: 10/10 [########]\n"
+           " Enemy    snapping folio  HP: 10/10 [########]\n"
+           " Enemy    snapping folio  HP: 10/10 [########]\n"
+           " You      HP: 12/12 [########]  Stun: ready  Ward: ready\n");
 
     // 5. Mid-telegraph: the loudest element in the band.
     db.exec("UPDATE location SET container = 2 WHERE entity = 3");
@@ -9850,8 +9850,8 @@ static void testBandGoldens() {
            "-- corridor ------------------------------------------------\n"
            " Exits    east, south, up\n"
            " Objects  key\n"
-           " Enemy    goblin grunt  HP: 8/8  [WINDING UP]\n"
-           " You      HP: 12/12  Stun: ready  Ward: ready\n");
+           " Enemy    goblin grunt  HP: 8/8 [########]  [WINDING UP]\n"
+           " You      HP: 12/12 [########]  Stun: ready  Ward: ready\n");
     db.exec("DELETE FROM pending_strike WHERE entity = 7");
 
     // 6. A barriered hostile (the armory's ironhide brute).
@@ -9859,8 +9859,8 @@ static void testBandGoldens() {
     golden("barrier", composeBand(db, 60, kBandPlain),
            "-- armory --------------------------------------------------\n"
            " Exits    down\n"
-           " Enemy    ironhide brute  HP: 14/14  barrier\n"
-           " You      HP: 12/12  Stun: ready  Ward: ready\n");
+           " Enemy    ironhide brute  HP: 14/14 [########]  barrier\n"
+           " You      HP: 12/12 [########]  Stun: ready  Ward: ready\n");
 
     // 7. A warded player: the state that decides whether a telegraphed strike
     // lands (REQ-UI-36).
@@ -9871,8 +9871,9 @@ static void testBandGoldens() {
            "-- corridor ------------------------------------------------\n"
            " Exits    east, south, up\n"
            " Objects  key\n"
-           " Enemy    goblin grunt  HP: 8/8\n"
-           " You      HP: 12/12  ward 1  Stun: ready  Ward: ready\n");
+           " Enemy    goblin grunt  HP: 8/8 [########]\n"
+           " You      HP: 12/12 [########]  ward 1  Stun: ready  Ward:\n"
+           "          ready\n");
 }
 
 // Color, applied per role (REQ-UI-19, -22, -24, -25). Runs AFTER the plain-text
@@ -9963,9 +9964,32 @@ static void testBandColor() {
     // --- suppression (check 22 / REQ-UI-22) --------------------------------
     // The colorless run is byte-for-byte the colored run with its sequences
     // stripped — no empty sequences, no stray resets, nothing lost.
+    //
+    // With ONE deliberate exception, REQ-POLISH-12's two-step degrade: a health
+    // bar is ten background-coloured SPACES under colour and `[####....]`
+    // without it, so the colourless bar is not the coloured bar stripped. Both
+    // occupy the same ten columns (REQ-POLISH-10), which is the property that
+    // matters, so the plain band's bars are mapped back to ten spaces and the
+    // byte-for-byte identity is asserted on everything else.
+    const auto barsToSpaces = [](const std::string& band) {
+        std::string out;
+        size_t i = 0;
+        while (i < band.size()) {
+            if (band[i] == '[' && i + kHealthBarWidth <= band.size() &&
+                band[i + kHealthBarWidth - 1] == ']' &&
+                band.find_first_not_of("#.", i + 1) == i + kHealthBarWidth - 1) {
+                out.append(static_cast<size_t>(kHealthBarWidth), ' ');
+                i += kHealthBarWidth;
+                continue;
+            }
+            out += band[i];
+            ++i;
+        }
+        return out;
+    };
     for (const int width : {20, 40, 60, 80, 200}) {
         CHECK(stripSgr(composeBand(db, width, kBandColor)) ==
-              composeBand(db, width, kBandPlain));
+              barsToSpaces(composeBand(db, width, kBandPlain)));
     }
     // And a suppressed run carries no escape byte at all.
     CHECK(composeBand(db, 60, kBandPlain).find('\x1b') == std::string::npos);
@@ -10296,6 +10320,160 @@ static void testBandHealthBar() {
             }
         }
         CHECK(found);
+    }
+}
+
+// Step 9 / REQ-POLISH-8, -8a, -10a, -11: the bar inside a real band row. Spec
+// checks 9 and 10, driven through composeBand rather than the pure builder.
+static void testBandBarsInRows() {
+    const TempDbFile worldPath("textworld_band_bars_tests.db");
+    Db db = openWorld(worldPath.string(), "tests/combat_fixture.sql").db;
+    db.exec("UPDATE location SET container = 2 WHERE entity = 3");  // the corridor
+
+    const TermStyle colored{true, true};
+    const TermStyle plain{false, false};
+
+    // The column count of every row, after stripSgr.
+    const auto rowWidths = [](const std::string& band) {
+        std::vector<size_t> widths;
+        for (const std::string& line : splitOnNewline(band)) {
+            if (!line.empty()) widths.push_back(utf8Length(stripSgr(line)));
+        }
+        return widths;
+    };
+
+    // Spec check 9: every row has an identical column count at full health and
+    // at low health — the BAR's width never moves as health drops. Compared at
+    // two values with the same digit count, so the only thing that could differ
+    // is the bar; "12/12" against "1/12" would differ by the number itself,
+    // which is not what this asserts.
+    db.exec("UPDATE health SET current = 12, max = 12 WHERE entity = 3");
+    db.exec("UPDATE health SET current = 10, max = 10 WHERE entity = 7");
+    const std::vector<size_t> full = rowWidths(composeBand(db, 80, colored));
+    db.exec("UPDATE health SET current = 11 WHERE entity = 3");
+    db.exec("UPDATE health SET current = 10 WHERE entity = 7");
+    const std::vector<size_t> hurt = rowWidths(composeBand(db, 80, colored));
+    CHECK(full == hurt);
+    CHECK(full.size() >= 4);  // header, exits, objects, enemy, you
+
+    // And the same across the whole range, with the number's own width taken
+    // out: a row's width is the bar's ten columns plus the digits, never more.
+    {
+        size_t baseline = 0;
+        for (const int64_t hp : {12, 10, 6, 3, 1}) {
+            const std::string sql = "UPDATE health SET current = " +
+                                    std::to_string(hp) + " WHERE entity = 3";
+            db.exec(sql.c_str());
+            for (const std::string& line :
+                 splitOnNewline(composeBand(db, 80, colored))) {
+                const std::string bare = stripSgr(line);
+                if (bare.rfind(" You", 0) != 0) continue;
+                const size_t normalized =
+                    utf8Length(bare) - std::to_string(hp).size();
+                if (baseline == 0) baseline = normalized;
+                CHECK(normalized == baseline);
+            }
+        }
+        CHECK(baseline > 0);
+        db.exec("UPDATE health SET current = 1 WHERE entity = 3");
+    }
+
+    // A living enemy at 1/10 shows ONE filled column, never zero.
+    {
+        db.exec("UPDATE health SET current = 1, max = 10 WHERE entity = 7");
+        const std::string band = composeBand(db, 80, plain);
+        CHECK(contains(band, "HP: 1/10 [#.......]"));
+    }
+
+    // REQ-POLISH-8: alongside the numbers, never instead of them.
+    {
+        const std::string band = composeBand(db, 80, plain);
+        CHECK(contains(band, "HP: 1/10"));
+        CHECK(contains(band, "HP: 1/12"));
+    }
+
+    // No bar byte is outside ASCII, in either mode.
+    for (const TermStyle style : {colored, plain}) {
+        const std::string band = stripSgr(composeBand(db, 80, style));
+        for (const char ch : band) {
+            if (static_cast<unsigned char>(ch) >= 0x80) {
+                // The only non-ASCII the band may carry is a room NAME or an
+                // enemy name from the world, never a framing or bar byte.
+                CHECK(false);
+            }
+        }
+    }
+
+    // Spec check 10: health is readable with colour and without, the plain form
+    // carries `[` and `#`, and neither contains reverse video.
+    {
+        const std::string lit = composeBand(db, 80, colored);
+        const std::string ascii = composeBand(db, 80, plain);
+        CHECK(contains(stripSgr(lit), "HP: 1/10"));
+        CHECK(contains(ascii, "HP: 1/10"));
+        CHECK(contains(ascii, "["));
+        CHECK(contains(ascii, "#"));
+        CHECK(!contains(lit, "\x1b[7m"));
+        CHECK(!contains(ascii, "\x1b[7m"));
+        // Under colour the bar is background SGR around spaces.
+        CHECK(contains(lit, "\x1b[41m"));  // the hostile's, red
+    }
+
+    // A HEALTHY player's bar must still be a bar. The HP number is Color::None
+    // while health is fine (REQ-UI-16), and bgColorize with Color::None emits
+    // nothing — so a bar that borrowed the number's colour came out as ten plain
+    // spaces. Found in a real fight; pinned here.
+    {
+        db.exec("UPDATE health SET current = 12, max = 12 WHERE entity = 3");
+        const std::string lit = composeBand(db, 80, colored);
+        CHECK(contains(lit, "\x1b[42m          \x1b[0m"));  // ten green columns
+        // And when health IS low it turns yellow, agreeing with the number.
+        db.exec("UPDATE health SET current = 3 WHERE entity = 3");
+        const std::string low = composeBand(db, 80, colored);
+        CHECK(contains(low, "\x1b[43m"));   // the bar
+        CHECK(contains(low, "\x1b[33m"));   // the number
+        CHECK(!contains(low, "\x1b[42m"));
+        // The empty remainder is BrightBlack in both.
+        CHECK(contains(low, "\x1b[100m"));
+    }
+
+    // REQ-POLISH-8a: cooldowns get NO bar. The spell spans are text only, so a
+    // band in combat carries exactly as many bars as it has health rows.
+    {
+        db.exec("UPDATE cooldowns SET ready_turn = 999 WHERE entity = 3");
+        const std::string ascii = composeBand(db, 80, plain);
+        size_t bars = 0;
+        for (size_t i = 0; i + 1 < ascii.size(); ++i) {
+            if (ascii[i] == '[' && (ascii[i + 1] == '#' || ascii[i + 1] == '.')) ++bars;
+        }
+        CHECK(bars == 2);  // one enemy, one player — and none for the two spells
+        CHECK(contains(ascii, "Stun: "));
+    }
+
+    // REQ-POLISH-10a: the bar costs a row at most eleven columns. Measured as
+    // the difference the bar makes to the widest row, not asserted by eye.
+    {
+        const std::string with = stripSgr(composeBand(db, 200, plain));
+        size_t widest = 0;
+        for (const std::string& line : splitOnNewline(with)) {
+            const size_t n = utf8Length(line);
+            if (line.rfind(" Enemy", 0) == 0 && n > widest) widest = n;
+        }
+        // Remove each bar AND the single space REQ-POLISH-10 buys it. Anchored
+        // on "HP: n/m" so a two-space gap here would leave one behind and the
+        // arithmetic below would come out at 12, not 11 — this must not pass
+        // whichever separator was used.
+        std::string without = with;
+        for (size_t i = 0; (i = without.find(" [")) != std::string::npos;) {
+            CHECK(without[i - 1] != ' ');  // exactly ONE space before the bar
+            without.erase(i, kHealthBarWidth + 1);
+        }
+        size_t widestWithout = 0;
+        for (const std::string& line : splitOnNewline(without)) {
+            const size_t n = utf8Length(line);
+            if (line.rfind(" Enemy", 0) == 0 && n > widestWithout) widestWithout = n;
+        }
+        CHECK(widest - widestWithout == static_cast<size_t>(kHealthBarWidth) + 1);
     }
 }
 
@@ -17417,12 +17595,12 @@ static const char* const kStoryGoldenSession = R"GOLDEN(  A narrow student's cel
 -- dormitory cell --------------------------------------------------------------
  Exits    north
  Objects  candle, wand
- You      HP: 12/12
+ You      HP: 12/12 [########]
   You take the wand.
 -- dormitory cell --------------------------------------------------------------
  Exits    north
  Objects  candle
- You      HP: 12/12
+ You      HP: 12/12 [########]
   A long panelled corridor, doors shut on either side and the
   ceiling lost in the dark. Somewhere far off a stair creaks to
   itself. A lamp in a wall bracket kindles quietly as you
@@ -17430,8 +17608,8 @@ static const char* const kStoryGoldenSession = R"GOLDEN(  A narrow student's cel
 -- corridor --------------------------------------------------------------------
  Exits    south
  Objects  key
- Enemy    goblin grunt  HP: 8/8
- You      HP: 12/12  Stun: ready  Ward: ready
+ Enemy    goblin grunt  HP: 8/8 [########]
+ You      HP: 12/12 [########]  Stun: ready  Ward: ready
   You strike the goblin grunt for 4 damage.
   The goblin grunt winds up a heavy blow — strike it down or
   brace!
@@ -17439,24 +17617,24 @@ static const char* const kStoryGoldenSession = R"GOLDEN(  A narrow student's cel
 -- corridor --------------------------------------------------------------------
  Exits    south
  Objects  key
- Enemy    goblin grunt  HP: 4/8  [WINDING UP]
- You      HP: 11/12  Stun: ready  Ward: ready
+ Enemy    goblin grunt  HP: 4/8 [####....]  [WINDING UP]
+ You      HP: 11/12 [#######.]  Stun: ready  Ward: ready
   You strike the goblin grunt for 4 damage.
   The goblin grunt falls. It drops the fire grimoire.
 -- corridor --------------------------------------------------------------------
  Exits    south
  Objects  key, fire grimoire
- You      HP: 11/12
+ You      HP: 11/12 [#######.]
   You study the fire grimoire and learn to cast fire.
 -- corridor --------------------------------------------------------------------
  Exits    south
  Objects  key, fire grimoire
- You      HP: 11/12
+ You      HP: 11/12 [#######.]
   Time passes.
 -- corridor --------------------------------------------------------------------
  Exits    south
  Objects  key, fire grimoire
- You      HP: 11/12
+ You      HP: 11/12 [#######.]
   A long panelled corridor, doors shut on either side and the
   ceiling lost in the dark. Somewhere far off a stair creaks to
   itself. A lamp in a wall bracket kindles quietly as you
@@ -17464,12 +17642,12 @@ static const char* const kStoryGoldenSession = R"GOLDEN(  A narrow student's cel
 -- corridor --------------------------------------------------------------------
  Exits    south
  Objects  key, fire grimoire
- You      HP: 11/12
+ You      HP: 11/12 [#######.]
   You can't go that way.
 -- corridor --------------------------------------------------------------------
  Exits    south
  Objects  key, fire grimoire
- You      HP: 11/12
+ You      HP: 11/12 [#######.]
   A narrow student's cell under a sloped ceiling: a bed with
   unfamiliar sheets, a desk, a trunk you have not finished
   unpacking. Moonlight through the single lancet window finds the
@@ -17477,7 +17655,7 @@ static const char* const kStoryGoldenSession = R"GOLDEN(  A narrow student's cel
 -- dormitory cell --------------------------------------------------------------
  Exits    north
  Objects  candle
- You      HP: 11/12
+ You      HP: 11/12 [#######.]
 )GOLDEN";
 
 // The script itself, hoisted so testStoryEmptyStepList can run it VERBATIM
@@ -17868,6 +18046,7 @@ int main() {
     testBandColor();
     testBandWiring();
     testBandHealthBar();
+    testBandBarsInRows();
     testErrorStyling();
     testBandStartup();
     testSpellsVerb();
