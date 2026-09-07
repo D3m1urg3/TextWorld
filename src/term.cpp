@@ -45,6 +45,34 @@ const char* sgrParam(Color color) {
     return nullptr;
 }
 
+// The BACKGROUND SGR parameter for each of the basic 16 (REQ-POLISH-13): the
+// 40-47 range and its bright 100-107 counterpart, mirroring sgrParam's 30-37 /
+// 90-97 exactly. Kept as its own switch rather than derived by arithmetic from
+// sgrParam, so the two tables are independently readable and a missed case is a
+// compiler warning rather than an off-by-ten.
+const char* bgSgrParam(Color color) {
+    switch (color) {
+        case Color::None: return nullptr;
+        case Color::Black: return "40";
+        case Color::Red: return "41";
+        case Color::Green: return "42";
+        case Color::Yellow: return "43";
+        case Color::Blue: return "44";
+        case Color::Magenta: return "45";
+        case Color::Cyan: return "46";
+        case Color::White: return "47";
+        case Color::BrightBlack: return "100";
+        case Color::BrightRed: return "101";
+        case Color::BrightGreen: return "102";
+        case Color::BrightYellow: return "103";
+        case Color::BrightBlue: return "104";
+        case Color::BrightMagenta: return "105";
+        case Color::BrightCyan: return "106";
+        case Color::BrightWhite: return "107";
+    }
+    return nullptr;
+}
+
 // Wrap `text` in one SGR sequence carrying `params`, plus the reset. Callers
 // have already decided the sequence is wanted; this never inspects a TermStyle.
 std::string sgrWrap(std::string_view text, const std::string& params) {
@@ -165,6 +193,13 @@ void termRefreshStyle() {
 std::string colorize(std::string_view text, Color color, TermStyle style) {
     const char* param = sgrParam(color);
     // REQ-UI-22: suppressed means the plain bytes, not an empty sequence.
+    if (!style.color || param == nullptr) return std::string(text);
+    return sgrWrap(text, param);
+}
+
+std::string bgColorize(std::string_view text, Color color, TermStyle style) {
+    const char* param = bgSgrParam(color);
+    // Same gate and same suppression rule as colorize (REQ-UI-22).
     if (!style.color || param == nullptr) return std::string(text);
     return sgrWrap(text, param);
 }

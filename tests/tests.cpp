@@ -9230,6 +9230,54 @@ static void testTermProseWidth() {
 
 // Step 3 / REQ-POLISH-3, -3a: the indent. A normal line, a blank line between
 // paragraphs, the trailing newline wrapProse preserves, and the empty string.
+// Step 7 / REQ-POLISH-13: background colour, gated exactly as colorize is.
+static void testTermBackgroundColor() {
+    const TermStyle full{true, true};
+    const TermStyle noColorAttrs{false, true};
+    const TermStyle nothing{false, false};
+
+    // The shape the research verified: escape bytes around the spaces, and the
+    // spaces alone once they are stripped.
+    CHECK(bgColorize("   ", Color::Red, full) == "\x1b[41m   \x1b[0m");
+    CHECK(stripSgr(bgColorize("   ", Color::Red, full)) == "   ");
+    CHECK(utf8Length(stripSgr(bgColorize("   ", Color::Red, full))) == 3);
+
+    // REQ-UI-22: suppressed means the plain bytes, never an empty sequence and
+    // never a bare reset. Both suppressed styles, and Color::None under colour.
+    CHECK(bgColorize("   ", Color::Red, noColorAttrs) == "   ");
+    CHECK(bgColorize("   ", Color::Red, nothing) == "   ");
+    CHECK(bgColorize("   ", Color::Red, noColorAttrs).find('\x1b') ==
+          std::string::npos);
+    CHECK(bgColorize("   ", Color::Red, nothing).find('\x1b') == std::string::npos);
+    CHECK(bgColorize("   ", Color::None, full) == "   ");
+
+    // It is a COLOUR effect, so it follows style.color and not style.attrs —
+    // the opposite of bolden, which survives NO_COLOR.
+    CHECK(bgColorize("x", Color::Red, TermStyle{true, false}) == "\x1b[41mx\x1b[0m");
+
+    // REQ-UI-19: all sixteen, each a DISTINCT parameter in the 40-47 / 100-107
+    // ranges. No 256-colour, no truecolor — nothing here emits a 38 or 48.
+    const Color all[] = {Color::Black,        Color::Red,         Color::Green,
+                         Color::Yellow,       Color::Blue,        Color::Magenta,
+                         Color::Cyan,         Color::White,       Color::BrightBlack,
+                         Color::BrightRed,    Color::BrightGreen, Color::BrightYellow,
+                         Color::BrightBlue,   Color::BrightMagenta,
+                         Color::BrightCyan,   Color::BrightWhite};
+    std::vector<std::string> seen;
+    for (const Color c : all) {
+        const std::string out = bgColorize("x", c, full);
+        CHECK(stripSgr(out) == "x");
+        CHECK(!contains(out, "\x1b[38"));
+        CHECK(!contains(out, "\x1b[48"));
+        for (const std::string& prior : seen) CHECK(prior != out);
+        seen.push_back(out);
+    }
+    CHECK(seen.size() == 16);
+
+    // No reverse video anywhere in the module (REQ-POLISH-12).
+    CHECK(!contains(readFileBytes("src/term.cpp"), "\x1b[7m"));
+}
+
 static void testTermIndent() {
     CHECK(indentProse("hello", 2) == "  hello");
 
@@ -17693,6 +17741,7 @@ int main() {
     testTermWidth();
     testTermProseWidth();
     testTermIndent();
+    testTermBackgroundColor();
     testTermWrap();
     testBandLayout();
     testBandContent();

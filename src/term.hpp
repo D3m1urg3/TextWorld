@@ -98,6 +98,21 @@ std::string bolden(std::string_view text, TermStyle style);
 // its text alone under TERM=dumb.
 std::string boldColor(std::string_view text, Color color, TermStyle style);
 
+// Wrap `text` in the BACKGROUND-colour SGR sequence for `color`, or return it
+// UNCHANGED when color is suppressed — gated exactly as colorize is, so a bar
+// degrades to its plain bytes under NO_COLOR, under TERM=dumb, and in a pipe
+// (REQ-UI-22, REQ-POLISH-13).
+//
+// Basic 16 only (REQ-UI-19): the 40-47 and 100-107 parameters, no 256-color and
+// no truecolor, so a bar resolves through the user's terminal theme and stays
+// readable on a light background.
+//
+// This is a COLOR effect, not an attribute: it follows style.color, not
+// style.attrs. Reverse video (\x1b[7m) is deliberately not offered — it swaps
+// foreground and background and is therefore a colour effect too, so emitting
+// it under NO_COLOR would stretch REQ-UI-23 past what it says (REQ-POLISH-12).
+std::string bgColorize(std::string_view text, Color color, TermStyle style);
+
 // Strip every SGR sequence from `s`. Used by the tests to compare a colored
 // run against a colorless one, and by the width arithmetic's assertions.
 std::string stripSgr(std::string_view s);
