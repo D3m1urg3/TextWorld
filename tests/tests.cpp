@@ -10291,6 +10291,74 @@ static void testRoomSeen() {
 // Steps 12 + 13 / REQ-POLISH-14, -16, -17, -18: first sight. Spec checks 11
 // (first three clauses), 12 and 13, driven through runTurn over the combat
 // fixture so respawn is reachable.
+// Step 14 / REQ-POLISH-14 (explicit request), REQ-POLISH-19, and the amendment
+// to REQ-EXAMINE-7. Spec check 11's last clause.
+static void testExamineRoom() {
+    const TempDbFile worldPath("textworld_examine_room_tests.db");
+    Db db = openWorld(worldPath.string(), "tests/combat_fixture.sql").db;
+
+    const std::string cellProse =
+        queryText(db, "SELECT prose FROM description WHERE entity = 1");
+    const std::string cellName = queryText(db, "SELECT value FROM name WHERE entity = 1");
+
+    // A `look` in the starting room prints its NAME alone (REQ-POLISH-17)...
+    {
+        const TurnResult r = runTurn(db, "look");
+        CHECK(!contains(r.output, cellProse.substr(0, 30)));
+    }
+
+    // ...and `x <room name>` then prints the FULL paragraph. This is the clause
+    // that makes REQ-POLISH-17 acceptable: the reread is always one command away.
+    {
+        const int64_t before = queryInt(db, "SELECT COUNT(*) FROM events "
+                                            "WHERE verb = 'examined'");
+        const TurnResult r = runTurn(db, "x " + cellName);
+        CHECK(r.outcome == TurnOutcome::Ticked);
+        CHECK(contains(r.output, cellProse.substr(0, 30)));
+        // One `examined` event, naming the room — no new verb (REQ-POLISH-19).
+        CHECK(queryInt(db, "SELECT COUNT(*) FROM events WHERE verb = 'examined'") ==
+              before + 1);
+        CHECK(queryInt(db, "SELECT subject FROM events WHERE verb = 'examined' "
+                           "ORDER BY id DESC LIMIT 1") == 1);
+    }
+
+    // The `examined` branch prints the description row verbatim, which after
+    // REQ-POLISH-5 is byte-identical to what roomBlock emits for an UNSEEN room.
+    // Confirmed rather than assumed, which is what lets that branch stay as it is.
+    {
+        const int64_t turn = queryInt(db, "SELECT value FROM meta WHERE key = 'turn'");
+        CHECK(render(db, turn) == renderRoomOf(db, 3, false));
+    }
+
+    // A room the player is NOT in stays out of scope and keeps the existing
+    // refusal — no new wording enters the game (REQ-EXAMINE-8).
+    {
+        const std::string other = queryText(db, "SELECT value FROM name WHERE entity = 2");
+        const TurnResult r = runTurn(db, "x " + other);
+        CHECK(contains(r.output, "You don't see that here."));
+    }
+
+    // REQ-POLISH-19: no new verb and no two-word command form. The reread is
+    // the EXISTING Examine verb with the room's name as its single argument —
+    // a name that happens to contain a space is an argument, not a second verb
+    // word. Asserted behaviourally, and against the verb list itself.
+    {
+        CHECK(!contains(readFileBytes("src/action.hpp"), "Room"));
+
+        // combat_fixture names room 1 "cell"; base.sql names it "dormitory
+        // cell". The two-word case is the one that would tempt a two-word verb.
+        const TempDbFile seedPath("textworld_examine_room_seed_tests.db");
+        Db seeded = openWorld(seedPath.string(), "seed/base.sql").db;
+        const std::string twoWord =
+            queryText(seeded, "SELECT value FROM name WHERE entity = 1");
+        CHECK(contains(twoWord, " "));  // the premise
+        const std::optional<Action> a = parse(seeded, "x " + twoWord);
+        CHECK(a.has_value());
+        CHECK(a->verb == Verb::Examine);
+        CHECK(a->subject == 1);
+    }
+}
+
 static void testFirstSight() {
     const TempDbFile worldPath("textworld_first_sight_tests.db");
     Db db = openWorld(worldPath.string(), "tests/combat_fixture.sql").db;
@@ -18246,6 +18314,7 @@ int main() {
     testWorldStartRoom();
     testRoomSeen();
     testFirstSight();
+    testExamineRoom();
     testBandHealthBar();
     testBandBarsInRows();
     testErrorStyling();

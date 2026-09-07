@@ -179,13 +179,23 @@ void resolveTake(Db& db, const Action& action, int64_t player) {
 }
 
 // Perception (REQ-EXAMINE-7): in scope iff the subject stands in the player's
-// room or is carried by the player. Deliberately NO isPortable check — that is
-// the whole difference from take, and it is what makes enemies, characters, and
-// fixed scenery examinable. No description is read here: the text is the
-// renderer's job (REQ-EXAMINE-10/-11), so this writes one event row and nothing
-// else (REQ-EXAMINE-28).
+// room, is carried by the player, or IS the player's room. Deliberately NO
+// isPortable check — that is the whole difference from take, and it is what
+// makes enemies, characters, and fixed scenery examinable. No description is
+// read here: the text is the renderer's job (REQ-EXAMINE-10/-11), so this
+// writes one event row and nothing else (REQ-EXAMINE-28).
+//
+// The room case is REQ-POLISH-14's explicit reread and it is checked FIRST,
+// ahead of containerOf, which cannot answer for it: a room has no `location`
+// row, so containerOf returns nullopt and the room fell out of scope entirely —
+// `x cell` answered "You don't see that here." No new verb and no two-word
+// command form (REQ-POLISH-19); `x <room name>` is the reread.
 void resolveExamine(Db& db, const Action& action, int64_t player) {
     const int64_t room = roomOf(db, player);
+    if (action.subject == room) {
+        appendEvent(db, player, "examined", action.subject, 0, nullptr);
+        return;
+    }
     const std::optional<int64_t> where = containerOf(db, action.subject);
     if (!where || (*where != room && *where != player)) {
         // The string resolveTake already uses (REQ-EXAMINE-8) — no new refusal

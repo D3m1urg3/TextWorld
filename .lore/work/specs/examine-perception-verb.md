@@ -71,9 +71,20 @@ resolution's decision, not the parser's.
 ### Scope
 
 **REQ-EXAMINE-7** — `resolveExamine` accepts the subject when its
-`location.container` is either the player's current room or the player entity.
-It does **not** additionally require `portable` — that is the difference from
-`take`, and it is what makes enemies, characters, and fixed scenery examinable.
+`location.container` is either the player's current room or the player entity,
+**or when the subject IS the player's current room**. It does **not**
+additionally require `portable` — that is the difference from `take`, and it is
+what makes enemies, characters, and fixed scenery examinable.
+
+*Amended 2026-09-07 by [terminal-visual-polish](.lore/work/specs/terminal-visual-polish.md),
+REQ-POLISH-14.* The room clause is new. A room has no `location` row, so
+`containerOf` returns `nullopt` for it and `x cell` answered
+`You don't see that here.` — which was fine while `look` reread the room every
+time, and is not fine now that REQ-POLISH-17 makes a repeat `look` print the
+room's name alone. `examine <room>` is the full reread, so the room must be in
+scope. The room case is checked BEFORE the `containerOf` test, which cannot
+answer for an entity with no `location` row. A room the player is NOT in stays
+out of scope and still answers `You don't see that here.`
 
 **REQ-EXAMINE-8** — A subject that is neither in the room nor carried, or that
 has no `location` row at all, produces a `failed` event whose detail is exactly
@@ -291,7 +302,9 @@ where a model is involved — the standard the existing suite already meets.
 ## Out of scope
 
 - Generating descriptions for entities that lack them.
-- `examine` on a room by name (`look` describes the room; a room is not in
-  itself, so REQ-EXAMINE-7 refuses it).
+- ~~`examine` on a room by name.~~ **Brought INTO scope 2026-09-07 by
+  REQ-POLISH-14** — see the amendment on REQ-EXAMINE-7. `look` no longer
+  describes the room every time, so `examine <room>` is now the full reread.
+  Examining a room the player is not in remains out of scope.
 - Any NPC behaviour: conversation, memory, profiles, movement.
 - A player self-description row, which REQ-EXAMINE-9 deliberately leaves absent.
