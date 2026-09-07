@@ -10208,6 +10208,66 @@ static void testBandWiring() {
 // checks 9 and 10, at the level where the arithmetic lives.
 // Step 10 / REQ-POLISH-15's anchor: meta.start_room, the row the derivation in
 // step 11 needs because the starting room never gets a `moved` event.
+// Step 11 / REQ-POLISH-15: "have I been here", derived from the transcript.
+// Driven against a hand-built events table so every clause is exercised
+// directly rather than through a turn.
+static void testRoomSeen() {
+    const TempDbFile worldPath("textworld_room_seen_tests.db");
+    Db db = openWorld(worldPath.string(), "tests/fixture.sql").db;
+
+    const int64_t start = queryInt(db, "SELECT value FROM meta WHERE key = 'start_room'");
+    CHECK(start == 1);
+
+    // The starting room is seen at turn 0, with no events at all — the whole
+    // reason meta.start_room exists.
+    CHECK(queryInt(db, "SELECT COUNT(*) FROM events") == 0);
+    CHECK(roomSeen(db, 1, 0));
+
+    // A room with no `moved` event naming it is unseen.
+    CHECK(!roomSeen(db, 2, 0));
+    CHECK(!roomSeen(db, 2, 5));
+
+    // A `moved` at an EARLIER turn makes it seen.
+    db.exec("INSERT INTO events(turn, actor, verb, subject, object, detail) "
+            "VALUES (3, 3, 'moved', 0, 2, NULL)");
+    CHECK(roomSeen(db, 2, 4));
+    CHECK(roomSeen(db, 2, 99));
+
+    // A `moved` at the SAME turn does NOT: the arrival turn's own event must
+    // not mark the room seen before the turn reporting it has printed.
+    CHECK(!roomSeen(db, 2, 3));
+    // Nor does one at a later turn.
+    CHECK(!roomSeen(db, 2, 2));
+
+    // A different verb naming the room does not count, and neither does a
+    // `moved` naming a different room.
+    db.exec("INSERT INTO events(turn, actor, verb, subject, object, detail) "
+            "VALUES (3, 3, 'downed', 3, 7, NULL)");
+    CHECK(!roomSeen(db, 7, 9));
+
+    // READ-ONLY: twenty calls move neither the turn counter nor the event count.
+    {
+        const int64_t turnBefore =
+            queryInt(db, "SELECT value FROM meta WHERE key = 'turn'");
+        const int64_t eventsBefore = queryInt(db, "SELECT COUNT(*) FROM events");
+        for (int i = 0; i < 20; ++i) {
+            (void)roomSeen(db, 1, 5);
+            (void)roomSeen(db, 2, 5);
+            (void)roomSeen(db, 99, 5);
+        }
+        CHECK(queryInt(db, "SELECT value FROM meta WHERE key = 'turn'") == turnBefore);
+        CHECK(queryInt(db, "SELECT COUNT(*) FROM events") == eventsBefore);
+    }
+
+    // A world with NO start_room row answers from `moved` events alone and does
+    // not throw — the pre-existing-world case REQ-POLISH-15's amendment names.
+    {
+        db.exec("DELETE FROM meta WHERE key = 'start_room'");
+        CHECK(!roomSeen(db, 1, 0));   // the starting room reads as unseen
+        CHECK(roomSeen(db, 2, 4));    // and the events still answer
+    }
+}
+
 static void testWorldStartRoom() {
     // Derived from the seed's own location row, so it is right for every seed
     // and fixture without any of them naming a number.
@@ -18088,6 +18148,7 @@ int main() {
     testBandColor();
     testBandWiring();
     testWorldStartRoom();
+    testRoomSeen();
     testBandHealthBar();
     testBandBarsInRows();
     testErrorStyling();

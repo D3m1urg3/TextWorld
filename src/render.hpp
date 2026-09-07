@@ -21,6 +21,20 @@ std::string render(Db& db, int64_t turn);
 // happened, so this output lives outside the turn contract entirely.
 std::string renderError(const std::string& msg);
 
+// Has the player already seen `room`, as of turn `turn` (REQ-POLISH-15)?
+//
+// DERIVED, never stored: true when `meta.start_room` names this room, or when a
+// `moved` event with `object = room` exists at a turn STRICTLY EARLIER than
+// `turn`. No cache, no shadow table, no new column — the posture
+// discoveredResistances (REQ-UI-46) already established, so the fact cannot
+// drift from the transcript or be lost across a restart.
+//
+// "Strictly earlier" is what stops the arrival turn's OWN `moved` event from
+// marking the room seen before the turn that reports the arrival has printed.
+//
+// Read-only, like everything else in this unit.
+bool roomSeen(Db& db, int64_t room, int64_t turn);
+
 // The room description block for `actor`'s current room. Read-only, like all
 // of render. Exists for the startup courtesy render (show the room before the
 // first prompt WITHOUT a tick or a 'looked' event); it reuses the exact block

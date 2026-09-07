@@ -219,6 +219,25 @@ std::string render(Db& db, int64_t turn) {
     return out;
 }
 
+bool roomSeen(Db& db, int64_t room, int64_t turn) {
+    // The starting room, which no `moved` event will ever name (REQ-POLISH-15).
+    // A world file created before that row existed simply has no match here and
+    // answers from the events alone, which is the right degrade.
+    {
+        Stmt s = db.prepare("SELECT value FROM meta WHERE key = 'start_room'");
+        if (s.step() && s.colInt(0) == room) return true;
+    }
+
+    // Strictly earlier: the arrival turn's own event must not mark the room
+    // seen before the turn reporting that arrival has printed.
+    Stmt s = db.prepare(
+        "SELECT 1 FROM events WHERE verb = 'moved' AND object = ? AND turn < ? "
+        "LIMIT 1");
+    s.bind(1, room);
+    s.bind(2, turn);
+    return s.step();
+}
+
 std::string renderError(const std::string& msg) {
     return msg + "\n";
 }
