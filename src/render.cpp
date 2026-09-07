@@ -65,7 +65,15 @@ std::string joinList(const std::vector<std::string>& items) {
 //
 // Every line here is still sourced by the 'moved'/'looked' event that asked
 // for it.
-std::string roomBlock(Db& db, int64_t room) {
+// `seen` is REQ-POLISH-14/-17: on FIRST SIGHT the canon paragraph, and on every
+// later visit the room's NAME and nothing else. Exits, objects and hostiles come
+// from the band on every turn either way, so a repeat `look` still tells the
+// player everything mechanical about where they are.
+std::string roomBlock(Db& db, int64_t room, bool seen) {
+    if (seen) {
+        const std::string name = nameOf(db, room);
+        return name + "\n";
+    }
     Stmt s = db.prepare("SELECT prose FROM description WHERE entity = ?");
     s.bind(1, room);
     if (!s.step()) return "";
@@ -98,14 +106,15 @@ std::string render(Db& db, int64_t turn) {
         const bool detailIsNull = ev.colInt(5) != 0;
 
         if (verb == "moved") {
-            out += roomBlock(db, object);
+            out += roomBlock(db, object, roomSeen(db, object, turn));
         } else if (verb == "took") {
             out += "You take the " + nameOf(db, subject) + ".\n";
         } else if (verb == "dropped") {
             out += "You drop the " + nameOf(db, subject) + ".\n";
         } else if (verb == "looked") {
             if (detailIsNull) {
-                out += roomBlock(db, roomOf(db, actor));
+                const int64_t here = roomOf(db, actor);
+                out += roomBlock(db, here, roomSeen(db, here, turn));
             } else if (detail == "inventory") {
                 out += inventoryBlock(db, actor);
             }
@@ -205,7 +214,11 @@ std::string render(Db& db, int64_t turn) {
             // subject = player, object = the dormitory cell they wake in.
             out += "The world tips and goes black. You wake on the cold floor "
                    "of the dormitory cell.\n";
-            out += roomBlock(db, object);
+            // The site meta.start_room exists for: respawn writes `downed`, not
+            // `moved` (mutations.cpp:429), and the cell it returns you to is the
+            // room the seed started you in — so nothing in the events table
+            // would ever mark it seen.
+            out += roomBlock(db, object, roomSeen(db, object, turn));
         }
         // Unrecognized verbs (e.g. the architect's 'generated', REQ-ARCH-10)
         // render nothing: the template emits output only for the verbs it knows,
@@ -242,6 +255,6 @@ std::string renderError(const std::string& msg) {
     return msg + "\n";
 }
 
-std::string renderRoomOf(Db& db, int64_t actor) {
-    return roomBlock(db, roomOf(db, actor));
+std::string renderRoomOf(Db& db, int64_t actor, bool seen) {
+    return roomBlock(db, roomOf(db, actor), seen);
 }

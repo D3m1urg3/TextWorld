@@ -35,8 +35,14 @@ std::string renderError(const std::string& msg);
 // Read-only, like everything else in this unit.
 bool roomSeen(Db& db, int64_t room, int64_t turn);
 
-// The room description block for `actor`'s current room. Read-only, like all
-// of render. Exists for the startup courtesy render (show the room before the
-// first prompt WITHOUT a tick or a 'looked' event); it reuses the exact block
-// the 'moved'/'looked' templates emit.
-std::string renderRoomOf(Db& db, int64_t actor);
+// The room block for `actor`'s current room. Read-only, like all of render.
+// Exists for the startup courtesy render (show the room before the first prompt
+// WITHOUT a tick or a 'looked' event); it reuses the exact block the
+// 'moved'/'looked' templates emit.
+//
+// `seen` is supplied by the CALLER rather than asked of roomSeen, because the
+// startup render needs a different answer: the starting room is always seen by
+// REQ-POLISH-15, so the courtesy render asks whether the events table is empty
+// instead (REQ-POLISH-16) — empty means world creation, the one launch where
+// the player has never seen the room.
+std::string renderRoomOf(Db& db, int64_t actor, bool seen);

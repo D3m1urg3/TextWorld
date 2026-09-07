@@ -1893,23 +1893,26 @@ static void testRender() {
         CHECK(!contains(out, "You see: "));
     }
 
-    // --- looked with NULL detail: room block for the actor's current room ---
+    // --- looked with NULL detail: the actor's current room. REQ-POLISH-17 —
+    // the garden was arrived in LAST turn, so this second sight of it prints
+    // the room's NAME and nothing else. Exits and objects come from the band on
+    // every turn either way. ---
     tick(db, Action{Verb::Look, 0, ""});
     ++turn;
     {
         const std::string out = render(db, turn);
-        CHECK(contains(out, "An overgrown walled garden"));
-        CHECK(!contains(out, "Exits: "));
-        CHECK(!contains(out, "You see: "));
+        CHECK(out == "garden\n");
+        CHECK(!contains(out, "An overgrown walled garden"));
     }
 
-    // Back to the stone hall, where the lantern waits.
+    // Back to the stone hall — which is meta.start_room, so it is seen from
+    // turn zero (REQ-POLISH-15) and prints its name even on ARRIVAL.
     tick(db, Action{Verb::Go, 0, "south"});
     ++turn;
     {
         const std::string out = render(db, turn);
-        CHECK(contains(out, "A vaulted hall of grey stone"));
-        CHECK(!contains(out, "Exits: "));
+        CHECK(out == "stone hall\n");
+        CHECK(!contains(out, "A vaulted hall of grey stone"));
         CHECK(!contains(out, "lantern"));
     }
 
@@ -2125,7 +2128,7 @@ static void testLoop() {
     }
 }
 
-static const char* const kExamineGoldenSession = R"GOLDEN(  A bare stone cell.
+static const char* const kExamineGoldenSession = R"GOLDEN(  cell
 -- cell ------------------------------------------------------------------------
  Exits    down, north
  Objects  wand
@@ -2213,7 +2216,7 @@ ward — element: none, cooldown: 2, blocks one telegraphed strike
  Exits    east, south, up
  Objects  key, fire grimoire
  You      HP: 10/12 [#######.]
-  A bare stone cell.
+  cell
 -- cell ------------------------------------------------------------------------
  Exits    down, north
  Objects  wand
@@ -2878,7 +2881,7 @@ static void testExitDisplayInvariant() {
 
         // REQ-POLISH-5: and the room block says none of it. The band is the one
         // place either fact reaches the player now.
-        const std::string block = renderRoomOf(db, 3);
+        const std::string block = renderRoomOf(db, 3, false);
         CHECK(!contains(block, "Exits"));
         CHECK(!contains(block, "You see"));
     }
@@ -5278,13 +5281,18 @@ static void testArchitectLiveSmoke() {
     // exercised by the chain above (shown latent → generates/moves); a shown
     // direction that walls while KEEPING its row is a conforming transient
     // failure (REQ-EXITS-3), so shown directions are deliberately not walked here.
-    auto parseExits = [](const std::string& block) {
+    // Sourced from the BAND since REQ-POLISH-5 made it the one place the exits
+    // are stated; the invariant this asserts (displayed == walkable) is
+    // unchanged, only where the displayed set is read from.
+    auto parseExits = [](const std::string& band) {
         std::vector<std::string> out;
-        const size_t p = block.find("Exits: ");
+        const size_t p = band.find(" Exits ");
         if (p == std::string::npos) return out;
-        size_t e = block.find(".\n", p);
-        if (e == std::string::npos) e = block.size();
-        const std::string list = block.substr(p + 7, e - (p + 7));
+        const size_t listStart = band.find_first_not_of(' ', p + 7);
+        if (listStart == std::string::npos) return out;
+        size_t e = band.find('\n', listStart);
+        if (e == std::string::npos) e = band.size();
+        const std::string list = band.substr(listStart, e - listStart);
         size_t start = 0;
         while (start <= list.size()) {
             const size_t comma = list.find(", ", start);
@@ -5300,7 +5308,8 @@ static void testArchitectLiveSmoke() {
 
     const int64_t here =
         queryInt(db, "SELECT container FROM location WHERE entity = 3");
-    const std::vector<std::string> shown = parseExits(renderRoomOf(db, 3));
+    const std::vector<std::string> shown =
+        parseExits(stripSgr(composeBand(db, 200, TermStyle{false, false})));
     const int64_t exitsBefore = queryInt(db, "SELECT COUNT(*) FROM exits");
     auto isShown = [&](const std::string& d) {
         return std::find(shown.begin(), shown.end(), d) != shown.end();
@@ -7145,16 +7154,21 @@ static void testPlayerRoom() {
     CHECK(playerRoom(db) == 1);
     CHECK(playerRoom(db) ==
           queryInt(db, "SELECT container FROM location WHERE entity = 3"));
+    // REQ-POLISH-16: with an EMPTY events table this is world creation, the one
+    // launch where the player has never seen the room, so the paragraph prints.
+    CHECK(queryInt(db, "SELECT COUNT(*) FROM events") == 0);
     CHECK(contains(renderStartup(db), "vaulted hall of grey stone"));
 
     // It TRACKS the player: after a move it names the new room, and still
-    // agrees with what startup would render.
+    // agrees with what startup would render. The events table is no longer
+    // empty, so the startup render is now the room NAME and the band.
     const TurnResult r = runTurn(db, "go north");
     CHECK(r.outcome == TurnOutcome::Ticked);
     CHECK(playerRoom(db) == 2);
     CHECK(playerRoom(db) ==
           queryInt(db, "SELECT container FROM location WHERE entity = 3"));
-    CHECK(contains(renderStartup(db), "overgrown walled garden"));
+    CHECK(contains(renderStartup(db), "garden"));
+    CHECK(!contains(renderStartup(db), "overgrown walled garden"));
 
     // Read-only: naming the room neither ticks nor writes an event.
     const int64_t turn = queryInt(db, "SELECT value FROM meta WHERE key = 'turn'");
@@ -9579,7 +9593,7 @@ static void testBandContent() {
 
         // REQ-POLISH-5: the room block no longer states either fact. The band
         // above is the one place both reach the player.
-        const std::string block = renderRoomOf(db, 3);
+        const std::string block = renderRoomOf(db, 3, false);
         CHECK(contains(block, "vaulted hall of grey stone"));
         CHECK(!contains(block, "Exits"));
         CHECK(!contains(block, "You see"));
@@ -10158,9 +10172,11 @@ static void testBandWiring() {
 
         const TurnResult r = runTurn(db, "look");
         CHECK(r.outcome == TurnOutcome::Ticked);
-        // The narration is still there, and so are the exits — as plain text at
-        // column 0, since the styled composition is what just failed.
-        CHECK(contains(r.output, "vaulted hall of grey stone"));
+        // The narration is still there (the room NAME — the stone hall is
+        // meta.start_room, so REQ-POLISH-17 applies from turn zero), and so are
+        // the exits, as plain text at column 0 since the styled composition is
+        // what just failed.
+        CHECK(contains(r.output, "stone hall"));
         CHECK(contains(r.output, "Exits: north.\n"));
         CHECK(!contains(r.output, "-- "));  // no band
 
@@ -10179,7 +10195,7 @@ static void testBandWiring() {
         db.exec("DROP TABLE exits");
         const TurnResult r2 = runTurn(db, "look");
         CHECK(r2.outcome == TurnOutcome::Ticked);
-        CHECK(contains(r2.output, "vaulted hall of grey stone"));
+        CHECK(contains(r2.output, "stone hall"));
         CHECK(!contains(r2.output, "Exits"));
         CHECK(!contains(r2.output, "-- "));
 
@@ -10192,11 +10208,15 @@ static void testBandWiring() {
         const TempDbFile worldPath("textworld_band_wrap_tests.db");
         Db db = openWorld(worldPath.string(), "tests/fixture.sql").db;
         termSetWidthOverride(40);
-        const TurnResult r = runTurn(db, "look");
+        // FIRST sight of the garden, so the canon paragraph is what is wrapped.
+        // A repeat `look` would print the room name alone (REQ-POLISH-17) and
+        // make the length assertion below vacuous.
+        const TurnResult r = runTurn(db, "go north");
         for (const std::string& line : splitOnNewline(r.output)) {
             CHECK(utf8Length(stripSgr(line)) <= 40);
         }
         // The room's canon prose is long enough that this is not vacuous.
+        CHECK(contains(r.output, "overgrown walled garden"));
         CHECK(splitOnNewline(r.output).size() > 4);
         termSetWidthOverride(80);
     }
@@ -10265,6 +10285,88 @@ static void testRoomSeen() {
         db.exec("DELETE FROM meta WHERE key = 'start_room'");
         CHECK(!roomSeen(db, 1, 0));   // the starting room reads as unseen
         CHECK(roomSeen(db, 2, 4));    // and the events still answer
+    }
+}
+
+// Steps 12 + 13 / REQ-POLISH-14, -16, -17, -18: first sight. Spec checks 11
+// (first three clauses), 12 and 13, driven through runTurn over the combat
+// fixture so respawn is reachable.
+static void testFirstSight() {
+    const TempDbFile worldPath("textworld_first_sight_tests.db");
+    Db db = openWorld(worldPath.string(), "tests/combat_fixture.sql").db;
+
+    const std::string cellProse =
+        queryText(db, "SELECT prose FROM description WHERE entity = 1");
+    const std::string corridorProse =
+        queryText(db, "SELECT prose FROM description WHERE entity = 2");
+    CHECK(!cellProse.empty());
+    CHECK(!corridorProse.empty());
+
+    // Spec check 12 / REQ-POLISH-16: at world creation the events table is
+    // empty, so the courtesy render prints the paragraph.
+    CHECK(queryInt(db, "SELECT COUNT(*) FROM events") == 0);
+    CHECK(contains(renderStartup(db), cellProse.substr(0, 30)));
+
+    // REQ-POLISH-17: `look` in the starting room prints its NAME, not the
+    // paragraph — the cell is meta.start_room, so it is seen from turn zero.
+    {
+        const TurnResult r = runTurn(db, "look");
+        CHECK(r.outcome == TurnOutcome::Ticked);
+        CHECK(contains(r.output, "cell"));
+        CHECK(!contains(r.output, cellProse.substr(0, 30)));
+    }
+
+    // REQ-POLISH-14: FIRST sight of the corridor prints its paragraph.
+    {
+        const TurnResult r = runTurn(db, "go north");
+        CHECK(r.outcome == TurnOutcome::Ticked);
+        CHECK(contains(r.output, corridorProse.substr(0, 30)));
+    }
+
+    // A `look` there does not print it again.
+    {
+        const TurnResult r = runTurn(db, "look");
+        CHECK(!contains(r.output, corridorProse.substr(0, 30)));
+        CHECK(contains(r.output, "corridor"));
+    }
+
+    // Move away and back: it does not print on RETURN either.
+    {
+        CHECK(runTurn(db, "go south").outcome == TurnOutcome::Ticked);
+        const TurnResult r = runTurn(db, "go north");
+        CHECK(r.outcome == TurnOutcome::Ticked);
+        CHECK(!contains(r.output, corridorProse.substr(0, 30)));
+        CHECK(contains(r.output, "corridor"));
+    }
+
+    // Spec check 12, the other half: relaunching against the SAME world file —
+    // a non-empty events table — shows the room name and the band, no
+    // paragraph. renderStartup is what a relaunch calls.
+    CHECK(queryInt(db, "SELECT COUNT(*) FROM events") > 0);
+    {
+        const std::string startup = renderStartup(db);
+        CHECK(contains(startup, "corridor"));
+        CHECK(!contains(startup, corridorProse.substr(0, 30)));
+        CHECK(contains(startup, "-- "));  // and the band is still there
+    }
+
+    // Spec check 13 / REQ-POLISH-18: get downed, wake in the cell, NO paragraph.
+    // Respawn writes `downed`, not `moved` (mutations.cpp:429), so this is the
+    // case most likely to expose a wrong derivation — and the case
+    // meta.start_room exists for, since no event would ever mark the cell seen.
+    {
+        db.exec("UPDATE health SET current = 1 WHERE entity = 3");
+        bool downed = false;
+        for (int i = 0; i < 20 && !downed; ++i) {
+            const TurnResult r = runTurn(db, "wait");
+            if (contains(r.output, "The world tips and goes black")) {
+                downed = true;
+                CHECK(!contains(r.output, cellProse.substr(0, 30)));
+                CHECK(contains(r.output, "cell"));
+            }
+        }
+        CHECK(downed);
+        CHECK(queryInt(db, "SELECT COUNT(*) FROM events WHERE verb = 'downed'") > 0);
     }
 }
 
@@ -11036,7 +11138,10 @@ static void testBandProseUnstyled() {
     // site, and it never sees prose. ("lantern" used to be asserted here as the
     // narration's own entity name; REQ-POLISH-5 moved the objects line into the
     // band, so the room's canon prose is what stands in for it.)
-    CHECK(contains(narration, "vaulted hall of grey stone"));
+    // (The room's canon paragraph used to stand in for "narration mentioning an
+    // entity name". REQ-POLISH-17 prints the room NAME on a repeat look, and the
+    // stone hall is meta.start_room, so the name is what appears here.)
+    CHECK(contains(narration, "stone hall"));
     CHECK(narration.find('\x1b') == std::string::npos);
     // The band below it IS styled, so the assertion above is not vacuous.
     CHECK(r.output.substr(bandStart).find('\x1b') != std::string::npos);
@@ -17690,10 +17795,7 @@ static void testStoryWakeTrigger() {
 // Re-capture (only when a verb's template output changes ON PURPOSE):
 //   TW_DUMP_GOLDEN=1 ./build/tests
 // and paste the printed block back into kStoryGoldenSession.
-static const char* const kStoryGoldenSession = R"GOLDEN(  A narrow student's cell under a sloped ceiling: a bed with
-  unfamiliar sheets, a desk, a trunk you have not finished
-  unpacking. Moonlight through the single lancet window finds the
-  door to the north, standing just ajar.
+static const char* const kStoryGoldenSession = R"GOLDEN(  dormitory cell
 -- dormitory cell --------------------------------------------------------------
  Exits    north
  Objects  candle, wand
@@ -17737,10 +17839,7 @@ static const char* const kStoryGoldenSession = R"GOLDEN(  A narrow student's cel
  Exits    south
  Objects  key, fire grimoire
  You      HP: 11/12 [#######.]
-  A long panelled corridor, doors shut on either side and the
-  ceiling lost in the dark. Somewhere far off a stair creaks to
-  itself. A lamp in a wall bracket kindles quietly as you
-  approach, and the way south leads back to your cell.
+  corridor
 -- corridor --------------------------------------------------------------------
  Exits    south
  Objects  key, fire grimoire
@@ -17750,10 +17849,7 @@ static const char* const kStoryGoldenSession = R"GOLDEN(  A narrow student's cel
  Exits    south
  Objects  key, fire grimoire
  You      HP: 11/12 [#######.]
-  A narrow student's cell under a sloped ceiling: a bed with
-  unfamiliar sheets, a desk, a trunk you have not finished
-  unpacking. Moonlight through the single lancet window finds the
-  door to the north, standing just ajar.
+  dormitory cell
 -- dormitory cell --------------------------------------------------------------
  Exits    north
  Objects  candle
@@ -18149,6 +18245,7 @@ int main() {
     testBandWiring();
     testWorldStartRoom();
     testRoomSeen();
+    testFirstSight();
     testBandHealthBar();
     testBandBarsInRows();
     testErrorStyling();

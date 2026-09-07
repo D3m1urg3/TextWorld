@@ -302,8 +302,20 @@ TurnResult runTurn(Db& db, const std::string& line) {
 
 std::string renderStartup(Db& db) {
     const int w = detectWidth();
-    return indentProse(wrapProse(renderRoomOf(db, playerId(db)), proseWidth(w)),
-                       kProseIndent) +
+    // REQ-POLISH-16: the courtesy render prints the paragraph ONLY at world
+    // creation. It asks whether the events table is empty rather than asking
+    // roomSeen, because the starting room is always seen by REQ-POLISH-15 and
+    // roomSeen would answer "yes" on the very first launch. An empty events
+    // table means world creation — the one launch where the player has never
+    // seen the room. Every later launch prints the room name and the band.
+    bool seen = true;
+    {
+        Stmt s = db.prepare("SELECT COUNT(*) FROM events");
+        if (s.step()) seen = s.colInt(0) > 0;
+    }
+    return indentProse(
+               wrapProse(renderRoomOf(db, playerId(db), seen), proseWidth(w)),
+               kProseIndent) +
            bandOrEmpty(db, w);
 }
 
