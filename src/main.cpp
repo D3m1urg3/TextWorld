@@ -19,6 +19,7 @@
 #include "pregen.hpp"
 #include "profile.hpp"    // ScopedDwell — how long the player took to answer
 #include "prose.hpp"
+#include "term.hpp"  // currentStyle — the prompt's blank line is terminal-only
 #include "world.hpp"
 
 namespace {
@@ -137,7 +138,16 @@ int main() {
 
         std::string line;
         while (true) {
-            std::fputs("> ", stdout);
+            // REQ-POLISH-4: one blank line before each prompt, so turns are
+            // visually separated. Emitted WITH the prompt rather than appended
+            // to the turn's output, so no turn gains a trailing newline and
+            // nothing downstream of runTurn changes.
+            //
+            // Gated on currentStyle().attrs — already false for a pipe and for
+            // TERM=dumb, and the same flag REQ-POLISH-26 uses for the spinner.
+            // An unconditional "\n> " would put a blank line into every piped
+            // capture, which is the half of spec check 4 that forbids it.
+            std::fputs(currentStyle().attrs ? "\n> " : "> ", stdout);
             std::fflush(stdout);
 
             // The dwell timer (REQ-PREGEN-25) covers exactly the gap between
