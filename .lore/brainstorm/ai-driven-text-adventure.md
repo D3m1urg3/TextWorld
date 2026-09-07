@@ -1,7 +1,7 @@
 ---
 title: AI-driven persistent text adventure
 date: 2026-04-16
-status: open
+status: resolved
 tags: [text-adventure, mud, zork, ai-generation, architecture, multi-agent]
 ---
 

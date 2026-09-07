@@ -1078,10 +1078,16 @@ int64_t bardMetaInt(Db& db, const char* key) {
     return s.colInt(0);
 }
 
-// REQ-BARD-WAKE-10, the spec's query verbatim. The four verbs are exactly the
+// REQ-BARD-WAKE-10, the spec's query. The five verbs are exactly the
 // irreversible ones: a room was generated, an enemy was defeated, a spell was
-// learned, a catalog entry was materialized. Movement, taking, looking, waiting
-// and failing are all reversible or inconsequential and wake nothing.
+// learned, a catalog entry was materialized, a story step advanced. Movement,
+// taking, looking, waiting and failing are all reversible or inconsequential and
+// wake nothing.
+//
+// 'advanced' is the fifth (REQ-ARC-STORE-22), and kBardMinTurnGap is unchanged.
+// Narrowing the list to 'advanced' ALONE — the end state the brainstorm settled
+// on — is a later brick (REQ-ARC-STORE-23): doing it here would stop the cast
+// growing between this brick and that one, for no gain.
 //
 // REQ-BARD-WAKE-12: this is DERIVED from the events log on every evaluation.
 // There is no cache, no flag column, and no "pending triggers" table — the log
@@ -1090,7 +1096,7 @@ bool hasTriggeringEvent(Db& db, int64_t sinceTurn) {
     Stmt s = db.prepare(
         "SELECT 1 FROM events "
         " WHERE turn > ? "
-        "   AND verb IN ('generated','defeated','learned','materialized') "
+        "   AND verb IN ('generated','defeated','learned','materialized','advanced') "
         " LIMIT 1");
     s.bind(1, sinceTurn);
     return s.step();

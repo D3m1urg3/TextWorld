@@ -275,6 +275,60 @@ void writeBardFocus(Db& db, const std::string& text);
 // REQ-BARD-STORE-18: this file is the ONLY unit that may write this row.
 void writeBardWakeTurn(Db& db, int64_t turn);
 
+// --- The story arc store (specs/story-arc-store.md) --------------------------
+
+// Upsert the three arc rows — meta.arc_premise, meta.arc_goal, meta.arc_ending
+// (REQ-ARC-STORE-2, -9). Rows, not a shape: zero DDL, the meta.setting
+// precedent. They are three rows rather than one blob so a consumer can be sent
+// the premise without the ending leaking into it.
+//
+// Free rewrite, like writeBardJournal: a second call REPLACES all three values
+// and never appends. Upsert rather than UPDATE so a world whose seed never wrote
+// the rows still gets them. Event-free — an arc is not something that happened.
+// Never begins/commits.
+void writeArc(Db& db, const std::string& premise, const std::string& goal,
+              const std::string& ending);
+
+// Insert one story step (REQ-ARC-STORE-10), VALIDATED AT ADMISSION. This is
+// writeCatalogEntry's motive gate applied to conditions: a step may not promise
+// a condition the engine cannot check.
+//
+// Throws std::runtime_error on any of: `kind` absent from condition_catalog;
+// that kind's arg_kind is 'int' and `arg` is not a non-negative decimal integer;
+// its arg_kind is 'spell' and `arg` has no spell_catalog row; `prose` empty
+// after trimming; `n` already present. EVERY check runs before ANY write, so a
+// refusal leaves story_step byte-identical — the writeCatalogEntry discipline.
+// All of these are engine faults, so the caller rolls back.
+//
+// The trimmed prose is stored, and `reached_turn` is left NULL. Event-free — a
+// step not yet reached has not happened (the writeCatalogEntry / dropGrimoire
+// precedent). Never begins/commits.
+void writeStoryStep(Db& db, int64_t n, const std::string& kind,
+                    const std::string& arg, const std::string& prose);
+
+// Latch the LOWEST unreached story step and append its event, both in the
+// caller's ambient transaction (REQ-ARC-STORE-11). Returns true IFF it latched
+// exactly one row. This is the SOLE writer of the 'advanced' verb.
+//
+// The latch is the WHERE clause, never a prior read — the
+// materializeCatalogEntry discipline. When every step is already reached, or
+// the table is empty, it matches no row, appends NOTHING, and returns false
+// (REQ-ARC-STORE-19, -19a).
+//
+// The event it appends describes THE ROW IT JUST LATCHED (REQ-ARC-STORE-11a),
+// which is why the UPDATE carries a RETURNING clause rather than being followed
+// by a second SELECT: a query that CHOOSES the row before the UPDATE is
+// forbidden, because two callers in one transaction could then latch and
+// describe different steps.
+//
+// The event (REQ-ARC-STORE-20): actor, verb 'advanced', subject = 0 (there is
+// no entity — the zero-id rule of REQ-PROSE-6), object = the step's `n`,
+// detail = the step's prose. Unlike 'materialized', that detail is a
+// MODEL-FACING fragment, not an engine tag, so it needs no shield in prose.cpp
+// — the verb is withheld from the narrator wholesale instead
+// (REQ-ARC-STORE-21). Never begins/commits.
+bool advanceStoryStep(Db& db, int64_t actor);
+
 // --- The NPC memory store (specs/npc-memory-store.md) ------------------------
 //
 // Two stores with OPPOSITE rules. A character's profile is written once and

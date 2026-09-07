@@ -1,7 +1,7 @@
 ---
 title: TextWorld Vision
 date: 2026-04-18
-status: draft
+status: current
 tags: [vision]
 ---
 

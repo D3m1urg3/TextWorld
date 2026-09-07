@@ -113,6 +113,37 @@ CREATE TABLE npc_memory(
   summary_turn INTEGER NOT NULL DEFAULT 0   -- the turn the summary last covered
 );
 
+-- The story arc's ordered list of steps (specs/story-arc-store.md). A step is
+-- one entry in a short list of how the threat gets closer: a CONDITION the
+-- engine can check, and a line of prose describing the world once that step is
+-- reached. The bard authors them; the engine walks them, lowest unreached first.
+--
+-- condition_kind and condition_arg are two columns rather than one `kind:arg`
+-- token because admission validation and evaluation are then both plain SQL.
+-- The combined form is the WIRE format the bard writes over, not a storage
+-- format.
+--
+-- `reached_turn` is a one-way latch guarded in SQL, like catalog.entity: set
+-- once by advanceStoryStep, never cleared. NULL means not yet reached, and a
+-- freshly created world is at step zero (REQ-ARC-STORE-8).
+CREATE TABLE story_step(
+  n              INTEGER PRIMARY KEY,  -- 1-based; the list is walked in this order
+  condition_kind TEXT NOT NULL,        -- condition_catalog.kind (closed vocabulary)
+  condition_arg  TEXT NOT NULL,        -- what may go here: see condition_catalog.arg_kind
+  prose          TEXT NOT NULL,        -- what the world looks like once reached
+  reached_turn   INTEGER               -- NULL = not yet reached; set once, never cleared
+);
+
+-- The closed condition vocabulary: engine-owned constants, seeded exactly like
+-- motive_catalog and never written at runtime. writeStoryStep throws on a kind
+-- absent from this table — a step may not promise a condition the engine cannot
+-- check. The model sees `blurb`, never the key.
+CREATE TABLE condition_catalog(
+  kind     TEXT PRIMARY KEY,
+  blurb    TEXT NOT NULL,   -- the model-facing description; the overture reads this
+  arg_kind TEXT NOT NULL    -- 'int' | 'spell'
+);
+
 -- the event log (append-only)
 CREATE TABLE events(
   id INTEGER PRIMARY KEY,
@@ -120,7 +151,8 @@ CREATE TABLE events(
   actor INTEGER,            -- who did it (player entity for now)
   verb TEXT NOT NULL,       -- 'moved','took','dropped','looked','waited','failed'; combat: 'attacked','chip',…
                             -- world-gen: 'generated'; story: 'materialized' (REQ-BARD-STORE-7);
-                            -- speech: 'said','spoke' (REQ-NPCSTORE-1)
+                            -- speech: 'said','spoke' (REQ-NPCSTORE-1);
+                            -- story arc: 'advanced' (REQ-ARC-STORE-20)
   subject INTEGER,          -- primary entity acted on
   object INTEGER,           -- secondary entity (destination room, container…)
   detail TEXT               -- human-readable fragment or NULL

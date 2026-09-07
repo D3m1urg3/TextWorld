@@ -45,6 +45,9 @@ templates and fixed verbs.
   room yet. They are meant to arrive, and arrival is not built.
 - Characters don't move, act, or leave.
 - The setting is still a hand-written file, not something the game evolves.
+- **The story arc is stored and walked, but invisible.** Its steps are written by
+  hand in the seed file rather than by the storyteller, and reaching one changes
+  nothing you can see. Both halves are next.
 
 ## Building
 
@@ -482,6 +485,39 @@ checked against the real resistance table before it's accepted, and refused if
 the claim isn't true. So the world can teach you a weakness through fiction
 without ever lying about the rules.
 
+### The story arc
+
+Underneath the cast sits the arc: three sentences saying what is happening, what
+the invaders want, and what would settle it — plus a short ordered list of steps
+walking toward it.
+
+Each step names a condition the engine can check and a line of prose describing
+the world once that step is reached. There are four kinds of condition: enemies
+defeated, rooms discovered, a spell learned, and how deep from the start you have
+gone. The list of kinds is closed, and a step naming a condition the engine
+cannot check is refused when it is written — a step may not promise something
+nothing can verify.
+
+The engine walks the list; the storyteller never advances anything and is never
+asked to. Once a turn, after everything else that turn has resolved and inside
+the same transaction, the engine looks at the lowest step you have not reached —
+only that one, never the ones after it — and if its condition holds, marks it
+reached. At most one step per turn. The mark is one-way: a step counts as reached
+because its condition was true at least once, so walking back the way you came
+does not undo it.
+
+**There is no clock in any of this.** No condition reads the turn counter, and
+waiting cannot advance the story — fifty turns of `wait` leave the arc exactly
+where it was. Escalation here is distance and what you have done, like everything
+else; a timer would turn the invasion into a flood, which is the one thing the
+setting rules out.
+
+Today this is storage and a rule and nothing more. **Nothing tells you about
+it.** Reaching a step writes a row to the event log and is deliberately invisible
+to both the AI narrator and the template renderer, so the game reads exactly as
+it did before. The parts that would make it visible — new rooms knowing which
+step you are on, the narrator saying the world has shifted — are not built.
+
 ### What gets offered
 
 Eligibility is based on distance, like everything else here. Each entry records
@@ -509,8 +545,9 @@ story existed would be story-less forever. This one call is allowed sixty
 seconds — the only exception to the engine's uniform timeout.
 
 **After that it wakes only on irreversible change**: a room generated, an enemy
-defeated, a spell learned, a beat made real. Never on movement, never on a
-`look`, and never more than once every five turns however fast you play.
+defeated, a spell learned, a beat made real, a story step reached. Never on
+movement, never on a `look`, and never more than once every five turns however
+fast you play.
 
 Each waking runs on a background thread with its own database connection, so the
 turn that triggered it is already on your screen before the call starts. Three
@@ -646,7 +683,7 @@ taller, not quieter.
   the game **refuses to open an older one** rather than migrating it. There are
   no migrations until there's a world worth keeping. It prints what it found,
   what it expected, and what to do — delete `world.db` and relaunch. The current
-  version is 7.
+  version is 8.
 
 ## Testing
 
@@ -690,6 +727,12 @@ Covered:
 - **Memory:** both table shapes, the write-once profile latch and its refusal of
   orphans, the free-rewrite memory, safe caps, and the bounded line read —
   including the case where the cap would return a reply without its question.
+- **The story arc:** both table shapes and the version gate, the closed
+  condition vocabulary in the shipped seed and the test fixture alike, every
+  admission refusal, all four conditions false-then-true through the sanctioned
+  path, the one-way mark, exhaustion, an empty list, one step per turn, the rule
+  refusing to look past the lowest step you have not reached, and a fault on the
+  advance path rolling the whole turn back — the mark with it.
 
 Some claims get sharper treatment than a normal test:
 
@@ -715,6 +758,15 @@ Some claims get sharper treatment than a normal test:
   count is caught too.
 - **`examine` changed nothing else** is pinned by a golden session: a scripted
   playthrough of every other verb, captured byte-exact before `examine` existed.
+- **The story arc changes no narrated byte** is pinned by a second golden
+  session, captured before the feature existed and compared byte-for-byte after
+  — once with the five steps in place, where the run really does reach two of
+  them, and once with the list emptied. The same transcript from both
+  directions, so neither an advance nor its absence can move a character.
+- **Nothing in the arc reads a clock** is asserted twice: against the source
+  text of the condition check alone — not the whole file, where reading the turn
+  counter to stamp a mark is correct — and behaviourally, by waiting fifty turns
+  and finding every step still unreached.
 - **Two guarantees were verified by mutation**, run by hand and reverted: that
   the memory summary is stamped with the previous turn (an off-by-one would
   silently lose the last exchange of every conversation, with nothing failing),
@@ -734,7 +786,8 @@ TEXTWORLD_AI_LIVE_TEST=1 ANTHROPIC_API_KEY=sk-ant-... ./build/tests
 ```
 src/        engine sources, built into the twcore static library
 tests/      test suite (hand-rolled, no framework)
-seed/       starting world, bestiary, setting text, optional major-character profiles
+seed/       starting world, bestiary, setting text, the story arc and its steps,
+            optional major-character profiles
 logs/       one session log per run, 20 kept (runtime, git-ignored)
 vendor/     SQLite and nlohmann/json amalgamations
 .lore/      vision, specs, designs, plans, and retros
@@ -756,6 +809,7 @@ Inside `src/`:
 | `bard.cpp` | Storyteller eligibility, wire format, validation, overture, scheduling |
 | `bardworker.cpp` | The storyteller's background thread (no database access at all) |
 | `npc.cpp` | Conversation — lookup, refusals, prompt, validation, one call per turn |
+| `systems.cpp` | Turn resolution, and the rule that walks the story arc |
 | `mutations.cpp` | The only place world writes happen |
 
 `prose.cpp`, `nlresolve.cpp`, `architect.cpp`, `bard.cpp`, and `npc.cpp` are

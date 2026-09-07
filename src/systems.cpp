@@ -271,6 +271,51 @@ void resolveImpl(Db& db, const Action& action, int64_t player,
 
 }  // namespace
 
+// --- The story arc's advance rule (specs/story-arc-store.md) -----------------
+
+bool stepConditionMet(Db& db, const std::string& kind, const std::string& arg,
+                      int64_t player) {
+    // Both counting conditions are the same query over a different verb.
+    const auto verbCountAtLeast = [&db, &arg](const char* verb) {
+        Stmt s = db.prepare("SELECT COUNT(*) FROM events WHERE verb = ?");
+        s.bind(1, std::string(verb));
+        s.step();
+        return s.colInt(0) >= std::stoll(arg);
+    };
+    if (kind == "enemies_defeated") return verbCountAtLeast("defeated");
+    if (kind == "rooms_built") return verbCountAtLeast("generated");
+    if (kind == "spell_learned") {
+        // combat.hpp's reader, not a second copy of its query: one function
+        // means combat and the story cannot disagree about what is known.
+        return knowsSpell(db, player, arg);
+    }
+    if (kind == "reached_depth") {
+        // The SAME distance measure `tier` is compared against
+        // (combat.cpp's distanceFromSeed, public for exactly this reason):
+        // the threat grows with distance, never against a second measure of
+        // progress. Writing a second BFS here is what REQ-BARD-SEL-3 forbids.
+        return distanceFromSeed(db, roomOf(db, player)) >= std::stoll(arg);
+    }
+    // REQ-ARC-STORE-13. Unreachable through any sanctioned path, so it is an
+    // engine error rather than a `false`.
+    throw std::runtime_error("stepConditionMet: unknown condition kind '" +
+                             kind + "'");
+}
+
+void evaluateStoryAdvance(Db& db, int64_t actor) {
+    std::string kind, arg;
+    {
+        // The LOWEST unreached step, and only that one. No loop, no scan.
+        Stmt s = db.prepare(
+            "SELECT condition_kind, condition_arg FROM story_step "
+            " WHERE reached_turn IS NULL ORDER BY n LIMIT 1");
+        if (!s.step()) return;  // every step reached, or the list is empty
+        kind = s.colText(0);
+        arg = s.colText(1);
+    }
+    if (stepConditionMet(db, kind, arg, actor)) advanceStoryStep(db, actor);
+}
+
 void resolve(Db& db, const Action& action, int64_t player) {
     resolveImpl(db, action, player, /*transport=*/nullptr);
 }

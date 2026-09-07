@@ -4,7 +4,7 @@ date: 2026-07-10
 status: resolved
 tags: [combat, enemies, spells, puzzle, determinism, architect, bestiary, grimoires]
 modules: [architect, systems, mutations, seed]
-related: [.lore/work/brainstorm/mage-school-setting.md, .lore/reference/vision.md, .lore/work/design/story-seed-architect.md]
+related: [.lore/work/brainstorm/mage-school-setting.md, .lore/vision.md, .lore/work/design/story-seed-architect.md]
 ---
 
 # Combat system and enemies
@@ -24,7 +24,7 @@ and lay a foundation for later complexity.
 
 ## The core reframe: combat is a puzzle, not a race
 
-The vision bans **stochastic mechanics** outright (`.lore/reference/vision.md`
+The vision bans **stochastic mechanics** outright (`.lore/vision.md`
 anti-goals; combat is literally its example of "must be deterministic"). No hit
 rolls, no damage ranges. Following that constraint to its end changes what
 combat *is*:

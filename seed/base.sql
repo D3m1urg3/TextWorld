@@ -145,3 +145,64 @@ INSERT INTO motive_catalog(motive, blurb) VALUES
   ('appetite',     'wants to take and carry off'),
   ('pride',        'would rather be wrong than corrected'),
   ('homesickness', 'does not belong here yet, and feels it');
+
+-- The closed condition vocabulary (REQ-ARC-STORE-5), engine-owned constants
+-- like spell_catalog, bestiary and motive_catalog: seeded here, never written at
+-- runtime. writeStoryStep throws on a kind absent from this table, so a story
+-- step cannot promise a condition the engine has no way to check. The model
+-- sees `blurb`, never the key; `arg_kind` says what condition_arg may hold.
+--
+-- AUTHORED CONTENT, PROVISIONAL pending author approval. Changing the
+-- vocabulary is this one edit plus a world-file delete.
+INSERT INTO condition_catalog(kind, blurb, arg_kind) VALUES
+  ('enemies_defeated', 'when this many enemies have been put down', 'int'),
+  ('rooms_built',      'when this many new rooms have been discovered', 'int'),
+  ('spell_learned',    'when the player has learned this spell', 'spell'),
+  ('reached_depth',    'when the player has gone this many rooms deep from where they started', 'int');
+
+-- The story arc (REQ-ARC-STORE-2, -6): three meta ROWS, not a table — zero DDL,
+-- the meta.setting precedent. Safe here because initialize() runs this seed
+-- BEFORE it inserts schema_version and turn. They are three rows rather than one
+-- blob so a later consumer can send the architect the premise without the ending
+-- leaking into every room build.
+--
+-- AUTHORED CONTENT, PROVISIONAL pending author approval. Coherent with
+-- seed/setting.txt; the overture replaces it at world creation in a later brick.
+INSERT INTO meta(key, value) VALUES
+  ('arc_premise',
+   'A goblin warband has come up through a breach in Thornmere''s foundations and is hunting the old grimoires shelved in the deep stacks. The school sleeps through it, and a first-night student is out of bed.'),
+  ('arc_goal',
+   'The warband means to strip the deep stacks and carry the grimoires down through the breach before Thornmere wakes.'),
+  ('arc_ending',
+   'It would be settled if the breach were sealed with the deep stacks still on their shelves, or if the school woke in time to seal it itself.');
+
+-- The story arc's ordered list of steps (REQ-ARC-STORE-7, -8), hand-written and
+-- seeded in the SHIPPED world only — tests/combat_fixture.sql deliberately gets
+-- none, so every fixture-based test runs against the empty-list world of
+-- REQ-ARC-STORE-19a. Plain INSERTs, not helper calls, exactly as motive_catalog
+-- and bestiary are: the seed is SQL.
+--
+-- Hand authorship is the point of this brick. It makes the whole advance rule
+-- testable with SQL and no API key; the overture replaces this content in a
+-- later brick without touching the schema.
+--
+-- Step 1's condition is enemies_defeated and step 2's is spell_learned because
+-- those are the only two reachable with AI disabled (a latent exit is a wall,
+-- so no room is ever generated and neither rooms_built nor reached_depth can
+-- become true) — which is what lets the golden-session gate reach a real
+-- advance offline.
+--
+-- No reached_turn values: a fresh world is at step zero (REQ-ARC-STORE-8).
+--
+-- AUTHORED CONTENT, PROVISIONAL pending author approval.
+INSERT INTO story_step(n, condition_kind, condition_arg, prose) VALUES
+  (1, 'enemies_defeated', '1',
+   'Word of the fight runs ahead of you. Below the stair, the warband knows the school is awake.'),
+  (2, 'spell_learned', 'fire',
+   'They have set watchfires in the lower halls, and the deep stacks smell of smoke.'),
+  (3, 'rooms_built', '4',
+   'The Vigil Lamps no longer kindle in the inner corridors. Something has been at them.'),
+  (4, 'reached_depth', '3',
+   'They have found the index, and are reading it. The old grimoires are being counted.'),
+  (5, 'enemies_defeated', '5',
+   'The breach stands open to the lower halls, and the warband is carrying the deep stacks out through it.');
