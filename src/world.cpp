@@ -291,6 +291,24 @@ void initialize(Db& db, const std::string& seedPath,
             "INSERT INTO meta(key, value) VALUES ('setting', ?)");
         settingStmt.bind(1, setting);
         settingStmt.step();
+        // meta.start_room (REQ-POLISH-15): the room the player begins in, which
+        // is the one room no `moved` event will ever name — the seed places the
+        // player there and initialize() writes no events at all, so under a
+        // literal reading of "derived from the transcript" the starting room
+        // would be unseen forever.
+        //
+        // DERIVED from the seed's own location row, so it is right for
+        // seed/base.sql and for every fixture without any of them naming a
+        // number. A creation-time constant, not a cache of something that
+        // changes, so it cannot drift from the transcript — which is what
+        // REQ-POLISH-15's "not stored" clause protects.
+        //
+        // A row, not a shape: zero DDL, no SCHEMA_VERSION bump (REQ-POLISH-32),
+        // exactly as meta.setting above.
+        db.exec(
+            "INSERT INTO meta(key, value) "
+            "SELECT 'start_room', container FROM location "
+            "WHERE entity = (SELECT entity FROM player LIMIT 1)");
         // The bard's three meta rows (REQ-BARD-STORE-6): rows, not shapes. Written
         // at init so every helper can UPDATE rather than branch on absence.
         db.exec(

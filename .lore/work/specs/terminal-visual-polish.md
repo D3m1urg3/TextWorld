@@ -177,10 +177,31 @@ thing.
 
 **REQ-POLISH-15** — "Has this room been seen" is **derived from the `events`
 transcript**, not stored in a new column or table: room R is unseen at turn T if
-no event with `verb='moved'` and `object=R` exists at a turn earlier than T. This
-follows REQ-UI-46's precedent, where discovered resistances are computed from the
-event log with no cache and no shadow table, so the fact cannot drift from the
-transcript or be lost across a restart.
+no event with `verb='moved'` and `object=R` exists at a turn earlier than T,
+**and R is not the room named by `meta.start_room`**. This follows REQ-UI-46's
+precedent, where discovered resistances are computed from the event log with no
+cache and no shadow table, so the fact cannot drift from the transcript or be
+lost across a restart.
+
+`meta.start_room` is written by `initialize()`, inside the same transaction as
+the seed, and is **derived from the seed's own `location` row** rather than
+naming a number — so it is right for `seed/base.sql` and for every fixture
+alike. It is a row, not a shape: zero DDL, no `SCHEMA_VERSION` bump, exactly the
+move `meta.setting` already makes, so REQ-POLISH-32 holds.
+
+*Amended during implementation, 2026-09-07.* As first written this derived
+"seen" from `moved` events alone. The starting room never gets one — the seed
+places the player there and `initialize()` writes no events at all — so under a
+literal reading the starting room is unseen forever and the spec's own checks 11
+and 13 both fail. REQ-POLISH-16's startup rule closes only the launch case, not
+the `look`-and-`downed` cases. The row is a creation-time constant rather than a
+cache of something that changes, so it cannot drift from the transcript, which
+is what this requirement's "not stored" clause is protecting.
+
+A world file created before this change has no such row: the derivation falls
+back to `moved` events alone and such a world reprints its starting paragraph
+once. `world.db` is gitignored and rebuilt from the seed, so the cost is one
+line of output to a developer.
 
 **REQ-POLISH-16** — `renderStartup` (`loop.cpp:198`) prints the description
 paragraph **only when the `events` table is empty** — that is, only at world

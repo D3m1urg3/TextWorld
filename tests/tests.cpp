@@ -10206,6 +10206,48 @@ static void testBandWiring() {
 // check 8, driven through runTurn so the assertion is on what the player sees.
 // Step 8 / REQ-POLISH-9, -10, -10a, -12: the bar as a pure function. Spec
 // checks 9 and 10, at the level where the arithmetic lives.
+// Step 10 / REQ-POLISH-15's anchor: meta.start_room, the row the derivation in
+// step 11 needs because the starting room never gets a `moved` event.
+static void testWorldStartRoom() {
+    // Derived from the seed's own location row, so it is right for every seed
+    // and fixture without any of them naming a number.
+    for (const char* seed : {"seed/base.sql", "tests/fixture.sql",
+                             "tests/combat_fixture.sql"}) {
+        const TempDbFile worldPath("textworld_start_room_tests.db");
+        Db db = openWorld(worldPath.string(), seed).db;
+        CHECK(queryInt(db, "SELECT COUNT(*) FROM meta WHERE key = 'start_room'") == 1);
+        CHECK(queryInt(db, "SELECT value FROM meta WHERE key = 'start_room'") ==
+              queryInt(db, "SELECT container FROM location WHERE entity = "
+                           "(SELECT entity FROM player LIMIT 1)"));
+        // All three happen to start the player in room 1 today. Asserted as the
+        // derivation above, not as the number, so a fixture that moves the
+        // player elsewhere still passes.
+        CHECK(queryInt(db, "SELECT value FROM meta WHERE key = 'start_room'") == 1);
+
+        // REQ-POLISH-32: a ROW, not a shape. No DDL, no version bump.
+        CHECK(queryInt(db, "SELECT value FROM meta WHERE key = 'schema_version'") == 8);
+    }
+
+    // Written INSIDE initialize()'s transaction: a seed that throws leaves no
+    // half-seeded world, and therefore no orphan start_room row either.
+    {
+        const TempDbFile worldPath("textworld_start_room_rollback_tests.db");
+        bool threw = false;
+        try {
+            Db db = openWorld(worldPath.string(), "tests/combat_fixture.sql",
+                              "seed/setting.txt",
+                              {{"broken.txt", "handle: h\nname n\n\nbody\n"}})
+                        .db;
+        } catch (const std::runtime_error&) {
+            threw = true;
+        }
+        CHECK(threw);
+        Db raw(worldPath.string());
+        CHECK(queryInt(raw, "SELECT COUNT(*) FROM sqlite_master "
+                            "WHERE type = 'table'") == 0);
+    }
+}
+
 static void testBandHealthBar() {
     const TermStyle colored{true, true};
     const TermStyle plain{false, false};
@@ -18045,6 +18087,7 @@ int main() {
     testBandGoldens();
     testBandColor();
     testBandWiring();
+    testWorldStartRoom();
     testBandHealthBar();
     testBandBarsInRows();
     testErrorStyling();
