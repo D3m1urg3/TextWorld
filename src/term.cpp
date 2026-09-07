@@ -221,6 +221,13 @@ int widthFrom(bool ioctlOk, int ioctlCols, const char* columns) {
     return kDefaultWidth;
 }
 
+int proseWidth(int detected) {
+    const int capped = detected < kProseMaxWidth ? detected : kProseMaxWidth;
+    const int wrapped = capped - kProseIndent;
+    const int floored = kMinWidth - kProseIndent;
+    return wrapped < floored ? floored : wrapped;
+}
+
 int detectWidth() {
     // The test-suite pin, checked before the chain so a suite run lays out the
     // same under a pipe as under a tty. Never set by the game binary.

@@ -2157,7 +2157,8 @@ Time passes.
  Objects  wand
  You      HP: 12/12
 Spells you know:
-stun — element: none, cooldown: 3, interrupts a winding-up strike
+stun — element: none, cooldown: 3, interrupts a winding-up
+strike
 ward — element: none, cooldown: 2, blocks one telegraphed strike
 -- cell ------------------------------------------------------------------------
  Exits    down, north
@@ -2182,7 +2183,8 @@ You see: key.
  Enemy    goblin grunt  HP: 8/8
  You      HP: 12/12  Stun: ready  Ward: ready
 You strike the goblin grunt for 4 damage.
-The goblin grunt winds up a heavy blow — strike it down or brace!
+The goblin grunt winds up a heavy blow — strike it down or
+brace!
 The goblin grunt wounds you for 1 damage.
 -- corridor --------------------------------------------------------------------
  Exits    east, south, up
@@ -4790,7 +4792,8 @@ static void testProseAiRender() {
         const TurnResult r = runTurn(db, "look");  // turn 5
         CHECK(r.outcome == TurnOutcome::Ticked);
         CHECK(queryInt(db, "SELECT value FROM meta WHERE key = 'turn'") == 5);
-        CHECK(r.output == wrapProse(render(db, 5), width) + composeBand(db, width));
+        CHECK(r.output ==
+              wrapProse(render(db, 5), proseWidth(width)) + composeBand(db, width));
 
         // Kill switch through the production path: key present but
         // TEXTWORLD_AI=0 → enabled() is false BEFORE any transport, so this
@@ -4856,8 +4859,8 @@ static void testProseAiRender() {
         CHECK(t.outcome == TurnOutcome::Ticked);
         CHECK(!t.output.empty());
         CHECK(render(ex, 2) == lanternProse + "\n");
-        CHECK(t.output ==
-              wrapProse(render(ex, 2), exWidth) + composeBand(ex, exWidth));
+        CHECK(t.output == wrapProse(render(ex, 2), proseWidth(exWidth)) +
+                              composeBand(ex, exWidth));
     }
 }
 
@@ -9174,6 +9177,38 @@ static void testTermWidth() {
 
 // REQ-UI-30/-31/-32: word-boundary wrapping that counts code points and
 // preserves paragraph structure.
+// --- Terminal visual polish (specs/terminal-visual-polish.md) ---
+
+// Step 2 / REQ-POLISH-1, -2: the prose wrap cap, driven directly so the truth
+// table is exercised without a terminal. The indent is SUBTRACTED, which is
+// what keeps the 20-column floor at 20 columns once indentProse has run.
+static void testTermProseWidth() {
+    CHECK(kProseMaxWidth == 66);
+    CHECK(kProseIndent == 2);
+
+    // Above the cap: the cap wins, minus the indent.
+    CHECK(proseWidth(200) == 64);
+    CHECK(proseWidth(80) == 64);
+    CHECK(proseWidth(66) == 64);
+
+    // Below the cap: the detected width wins, minus the indent.
+    CHECK(proseWidth(40) == 38);
+    CHECK(proseWidth(20) == 18);
+
+    // The floor. detectWidth() never returns these, but proseWidth is pure and
+    // must not answer with a zero or negative wrap width.
+    CHECK(proseWidth(1) == 18);
+    CHECK(proseWidth(0) == 18);
+    CHECK(proseWidth(-5) == 18);
+
+    // The property that matters: wrap width plus indent never exceeds the
+    // terminal, at every width from the floor upward.
+    for (int w = kMinWidth; w <= 120; ++w) {
+        CHECK(proseWidth(w) + kProseIndent <= w);
+        CHECK(proseWidth(w) > 0);
+    }
+}
+
 static void testTermWrap() {
     // utf8Length counts code points, not bytes (REQ-UI-31).
     CHECK(utf8Length("abc") == 3);
@@ -17009,9 +17044,10 @@ static void testStoryWakeTrigger() {
 // Re-capture (only when a verb's template output changes ON PURPOSE):
 //   TW_DUMP_GOLDEN=1 ./build/tests
 // and paste the printed block back into kStoryGoldenSession.
-static const char* const kStoryGoldenSession = R"GOLDEN(A narrow student's cell under a sloped ceiling: a bed with unfamiliar sheets, a
-desk, a trunk you have not finished unpacking. Moonlight through the single
-lancet window finds the door to the north, standing just ajar.
+static const char* const kStoryGoldenSession = R"GOLDEN(A narrow student's cell under a sloped ceiling: a bed with
+unfamiliar sheets, a desk, a trunk you have not finished
+unpacking. Moonlight through the single lancet window finds the
+door to the north, standing just ajar.
 Exits: north.
 You see: candle, wand.
 -- dormitory cell --------------------------------------------------------------
@@ -17023,9 +17059,10 @@ You take the wand.
  Exits    north
  Objects  candle
  You      HP: 12/12
-A long panelled corridor, doors shut on either side and the ceiling lost in the
-dark. Somewhere far off a stair creaks to itself. A lamp in a wall bracket
-kindles quietly as you approach, and the way south leads back to your cell.
+A long panelled corridor, doors shut on either side and the
+ceiling lost in the dark. Somewhere far off a stair creaks to
+itself. A lamp in a wall bracket kindles quietly as you
+approach, and the way south leads back to your cell.
 Exits: south.
 You see: key.
 -- corridor --------------------------------------------------------------------
@@ -17034,7 +17071,8 @@ You see: key.
  Enemy    goblin grunt  HP: 8/8
  You      HP: 12/12  Stun: ready  Ward: ready
 You strike the goblin grunt for 4 damage.
-The goblin grunt winds up a heavy blow — strike it down or brace!
+The goblin grunt winds up a heavy blow — strike it down or
+brace!
 The goblin grunt wounds you for 1 damage.
 -- corridor --------------------------------------------------------------------
  Exits    south
@@ -17057,9 +17095,10 @@ Time passes.
  Exits    south
  Objects  key, fire grimoire
  You      HP: 11/12
-A long panelled corridor, doors shut on either side and the ceiling lost in the
-dark. Somewhere far off a stair creaks to itself. A lamp in a wall bracket
-kindles quietly as you approach, and the way south leads back to your cell.
+A long panelled corridor, doors shut on either side and the
+ceiling lost in the dark. Somewhere far off a stair creaks to
+itself. A lamp in a wall bracket kindles quietly as you
+approach, and the way south leads back to your cell.
 Exits: south.
 You see: key, fire grimoire.
 -- corridor --------------------------------------------------------------------
@@ -17071,9 +17110,10 @@ You can't go that way.
  Exits    south
  Objects  key, fire grimoire
  You      HP: 11/12
-A narrow student's cell under a sloped ceiling: a bed with unfamiliar sheets, a
-desk, a trunk you have not finished unpacking. Moonlight through the single
-lancet window finds the door to the north, standing just ajar.
+A narrow student's cell under a sloped ceiling: a bed with
+unfamiliar sheets, a desk, a trunk you have not finished
+unpacking. Moonlight through the single lancet window finds the
+door to the north, standing just ajar.
 Exits: north.
 You see: candle.
 -- dormitory cell --------------------------------------------------------------
@@ -17460,6 +17500,7 @@ int main() {
     testGeneratedEventInvisible();
     testTermColorGate();
     testTermWidth();
+    testTermProseWidth();
     testTermWrap();
     testBandLayout();
     testBandContent();

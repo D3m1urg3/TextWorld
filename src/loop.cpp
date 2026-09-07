@@ -190,15 +190,20 @@ TurnResult runTurn(Db& db, const std::string& line) {
     // get a band for free, and the AI and template paths get identical bytes
     // because there is only one composition. Width is re-queried per turn
     // (REQ-UI-28); the band goes LAST, below the narration (REQ-UI-4).
+    // Width is re-queried per turn (REQ-UI-28), then SPLIT: narration wraps to
+    // the capped prose width (REQ-POLISH-1) while the band keeps the raw `w`
+    // (REQ-POLISH-2). That one-line difference is the whole of REQ-POLISH-2 —
+    // the band is a table, not prose, and its rules run the full terminal.
     const int w = detectWidth();
-    r.output = wrapProse(r.output, w);
+    r.output = wrapProse(r.output, proseWidth(w));
     r.output += bandOrEmpty(db, w);
     return r;
 }
 
 std::string renderStartup(Db& db) {
     const int w = detectWidth();
-    return wrapProse(renderRoomOf(db, playerId(db)), w) + bandOrEmpty(db, w);
+    return wrapProse(renderRoomOf(db, playerId(db)), proseWidth(w)) +
+           bandOrEmpty(db, w);
 }
 
 // See loop.hpp: exists so main() can name the room the pre-generation scheduler

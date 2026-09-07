@@ -109,6 +109,24 @@ inline constexpr int kMinWidth = 20;
 // The last-resort default from REQ-UI-26 when neither ioctl nor COLUMNS answers.
 inline constexpr int kDefaultWidth = 80;
 
+// The cap on PROSE width (REQ-POLISH-1). 66 is the midpoint of Bringhurst's
+// 45-75 and of the Tinker-Paterson eye-movement studies; past ~80 the eye
+// misses the start of the next line. It caps NARRATION only — the status band
+// is a table and keeps the full detected width (REQ-POLISH-2).
+inline constexpr int kProseMaxWidth = 66;
+
+// The narration indent (REQ-POLISH-3), in spaces. Applied by indentProse after
+// the wrap, and SUBTRACTED from the wrap width by proseWidth so the two
+// together never exceed the terminal.
+inline constexpr int kProseIndent = 2;
+
+// The width narration WRAPS to, given the detected terminal width (REQ-POLISH-1).
+// Pure. The indent is subtracted rather than added to the result, which is what
+// keeps a 20-column terminal at 20 columns once indentProse has run: at or below
+// the floor this returns kMinWidth - kProseIndent, so indented lines land at
+// exactly kMinWidth and never over it.
+int proseWidth(int detected);
+
 // Clamp a reported width to the floor (REQ-UI-27).
 int clampWidth(int reported);
 
