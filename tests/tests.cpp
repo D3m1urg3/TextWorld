@@ -2122,102 +2122,101 @@ static void testLoop() {
     }
 }
 
-static const char* const kExamineGoldenSession = R"GOLDEN(A bare stone cell.
-Exits: down, north.
-You see: wand.
+static const char* const kExamineGoldenSession = R"GOLDEN(  A bare stone cell.
+  Exits: down, north.
+  You see: wand.
 -- cell ------------------------------------------------------------------------
  Exits    down, north
  Objects  wand
  You      HP: 12/12
-You are carrying nothing.
+  You are carrying nothing.
 -- cell ------------------------------------------------------------------------
  Exits    down, north
  Objects  wand
  You      HP: 12/12
-You take the wand.
+  You take the wand.
 -- cell ------------------------------------------------------------------------
  Exits    down, north
  You      HP: 12/12
-You are carrying: wand.
+  You are carrying: wand.
 -- cell ------------------------------------------------------------------------
  Exits    down, north
  You      HP: 12/12
-There's nothing to read there.
+  There's nothing to read there.
 -- cell ------------------------------------------------------------------------
  Exits    down, north
  You      HP: 12/12
-You drop the wand.
+  You drop the wand.
 -- cell ------------------------------------------------------------------------
  Exits    down, north
  Objects  wand
  You      HP: 12/12
-Time passes.
+  Time passes.
 -- cell ------------------------------------------------------------------------
  Exits    down, north
  Objects  wand
  You      HP: 12/12
 Spells you know:
-stun — element: none, cooldown: 3, interrupts a winding-up
-strike
+stun — element: none, cooldown: 3, interrupts a winding-up strike
 ward — element: none, cooldown: 2, blocks one telegraphed strike
 -- cell ------------------------------------------------------------------------
  Exits    down, north
  Objects  wand
  You      HP: 12/12
-I don't understand that.
+  I don't understand that.
 -- cell ------------------------------------------------------------------------
  Exits    down, north
  Objects  wand
  You      HP: 12/12
-You don't see that here.
+  You don't see that here.
 -- cell ------------------------------------------------------------------------
  Exits    down, north
  Objects  wand
  You      HP: 12/12
-A long dim corridor.
-Exits: east, south, up.
-You see: key.
+  A long dim corridor.
+  Exits: east, south, up.
+  You see: key.
 -- corridor --------------------------------------------------------------------
  Exits    east, south, up
  Objects  key
  Enemy    goblin grunt  HP: 8/8
  You      HP: 12/12  Stun: ready  Ward: ready
-You strike the goblin grunt for 4 damage.
-The goblin grunt winds up a heavy blow — strike it down or
-brace!
-The goblin grunt wounds you for 1 damage.
+  You strike the goblin grunt for 4 damage.
+  The goblin grunt winds up a heavy blow — strike it down or
+  brace!
+  The goblin grunt wounds you for 1 damage.
 -- corridor --------------------------------------------------------------------
  Exits    east, south, up
  Objects  key
  Enemy    goblin grunt  HP: 4/8  [WINDING UP]
  You      HP: 11/12  Stun: ready  Ward: ready
-You cast ward.
-The goblin grunt's strike breaks against your ward.
-The goblin grunt wounds you for 1 damage.
+  You cast ward.
+  The goblin grunt's strike breaks against your ward.
+  The goblin grunt wounds you for 1 damage.
 -- corridor --------------------------------------------------------------------
  Exits    east, south, up
  Objects  key
  Enemy    goblin grunt  HP: 4/8
  You      HP: 10/12  Stun: ready  Ward: 2
-You strike the goblin grunt for 4 damage.
-The goblin grunt falls. It drops the fire grimoire.
+  You strike the goblin grunt for 4 damage.
+  The goblin grunt falls. It drops the fire grimoire.
 -- corridor --------------------------------------------------------------------
  Exits    east, south, up
  Objects  key, fire grimoire
  You      HP: 10/12
-You study the fire grimoire and learn to cast fire.
+  You study the fire grimoire and learn to cast fire.
 -- corridor --------------------------------------------------------------------
  Exits    east, south, up
  Objects  key, fire grimoire
  You      HP: 10/12
-You study the fire grimoire, but you already know fire.
+  You study the fire grimoire, but you already know fire.
 -- corridor --------------------------------------------------------------------
  Exits    east, south, up
  Objects  key, fire grimoire
  You      HP: 10/12
-A bare stone cell.
-Exits: down, north.
-You see: wand.
+  A bare stone cell.
+  Exits: down, north.
+  You see: wand.
 -- cell ------------------------------------------------------------------------
  Exits    down, north
  Objects  wand
@@ -4793,7 +4792,8 @@ static void testProseAiRender() {
         CHECK(r.outcome == TurnOutcome::Ticked);
         CHECK(queryInt(db, "SELECT value FROM meta WHERE key = 'turn'") == 5);
         CHECK(r.output ==
-              wrapProse(render(db, 5), proseWidth(width)) + composeBand(db, width));
+              indentProse(wrapProse(render(db, 5), proseWidth(width)), kProseIndent) +
+                  composeBand(db, width));
 
         // Kill switch through the production path: key present but
         // TEXTWORLD_AI=0 → enabled() is false BEFORE any transport, so this
@@ -4803,7 +4803,9 @@ static void testProseAiRender() {
         const TurnResult w = runTurn(db, "wait");  // turn 6
         CHECK(w.outcome == TurnOutcome::Ticked);
         CHECK(contains(w.output, "Time passes."));
-        CHECK(w.output == wrapProse(render(db, 6), width) + composeBand(db, width));
+        CHECK(w.output ==
+              indentProse(wrapProse(render(db, 6), proseWidth(width)), kProseIndent) +
+                  composeBand(db, width));
         // REQ-UI-4: the band is LAST — the narration is above it.
         CHECK(w.output.find("Time passes.") < w.output.find("-- "));
         // guards restore both vars here.
@@ -4859,8 +4861,9 @@ static void testProseAiRender() {
         CHECK(t.outcome == TurnOutcome::Ticked);
         CHECK(!t.output.empty());
         CHECK(render(ex, 2) == lanternProse + "\n");
-        CHECK(t.output == wrapProse(render(ex, 2), proseWidth(exWidth)) +
-                              composeBand(ex, exWidth));
+        CHECK(t.output ==
+              indentProse(wrapProse(render(ex, 2), proseWidth(exWidth)), kProseIndent) +
+                  composeBand(ex, exWidth));
     }
 }
 
@@ -9209,6 +9212,47 @@ static void testTermProseWidth() {
     }
 }
 
+// Step 3 / REQ-POLISH-3, -3a: the indent. A normal line, a blank line between
+// paragraphs, the trailing newline wrapProse preserves, and the empty string.
+static void testTermIndent() {
+    CHECK(indentProse("hello", 2) == "  hello");
+
+    // REQ-POLISH-3a: the blank line between paragraphs stays EMPTY. Two stray
+    // spaces there would be a whitespace-only line, which check 3 forbids.
+    CHECK(indentProse("one\n\ntwo", 2) == "  one\n\n  two");
+
+    // A trailing newline survives as a trailing newline, not as a line of pad.
+    CHECK(indentProse("line\n", 2) == "  line\n");
+    CHECK(indentProse("", 2) == "");
+    CHECK(indentProse("\n", 2) == "\n");
+
+    // Zero and negative are the identity, so a caller that computes its indent
+    // cannot accidentally shift text by a negative amount.
+    CHECK(indentProse("hello", 0) == "hello");
+    CHECK(indentProse("hello", -3) == "hello");
+
+    // The combination that matters: wrapped then indented, no line exceeds the
+    // terminal, and no line is whitespace-only.
+    const std::string prose =
+        "The corridor runs on into the dark, and the lamps have all gone "
+        "out.\n\nSomething moves at the far end of it.";
+    for (const int w : {20, 40, 66, 80, 200}) {
+        const std::string laid =
+            indentProse(wrapProse(prose, proseWidth(w)), kProseIndent);
+        size_t pos = 0;
+        while (pos <= laid.size()) {
+            const size_t nl = laid.find('\n', pos);
+            const std::string line =
+                laid.substr(pos, nl == std::string::npos ? std::string::npos : nl - pos);
+            CHECK(static_cast<int>(utf8Length(line)) <= w);
+            // No whitespace-only line anywhere (REQ-POLISH-3a).
+            CHECK(line.empty() || line.find_first_not_of(' ') != std::string::npos);
+            if (nl == std::string::npos) break;
+            pos = nl + 1;
+        }
+    }
+}
+
 static void testTermWrap() {
     // utf8Length counts code points, not bytes (REQ-UI-31).
     CHECK(utf8Length("abc") == 3);
@@ -12088,7 +12132,11 @@ static void testSayRefusals() {
         CHECK(r.outcome == TurnOutcome::Ticked);
         CHECK(queryInt(db, "SELECT value FROM meta WHERE key = 'turn'") ==
               before + 1);
-        CHECK(r.output == std::string(kNoOneToTalkTo) + "\n" + composeBand(db, 80));
+        CHECK(r.output ==
+              indentProse(wrapProse(std::string(kNoOneToTalkTo) + "\n",
+                                    proseWidth(80)),
+                          kProseIndent) +
+                  composeBand(db, 80));
         // Nothing was said: there is nobody to have said it to.
         CHECK(queryInt(db, "SELECT COUNT(*) FROM events WHERE verb = 'said'") == 0);
     }
@@ -12130,7 +12178,11 @@ static void testSayRefusals() {
         CHECK(characterInRoom(db, 1) == 0);
 
         const TurnResult r = runTurn(db, "say hello");
-        CHECK(r.output == std::string(kNoOneToTalkTo) + "\n" + composeBand(db, 80));
+        CHECK(r.output ==
+              indentProse(wrapProse(std::string(kNoOneToTalkTo) + "\n",
+                                    proseWidth(80)),
+                          kProseIndent) +
+                  composeBand(db, 80));
     }
 
     // (d) Item 3a / REQ-NPCTALK-4a: no character but a hostile present → the
@@ -12172,7 +12224,10 @@ static void testSayRefusals() {
         CHECK(queryText(db, "SELECT detail FROM events WHERE verb = 'said'") ==
               "who are you");
         // AI disabled: the authored no-reply line, never fabricated dialogue.
-        CHECK(r.output == std::string(kNoReply) + "\n" + composeBand(db, 80));
+        CHECK(r.output ==
+              indentProse(wrapProse(std::string(kNoReply) + "\n", proseWidth(80)),
+                          kProseIndent) +
+                  composeBand(db, 80));
     }
 }
 
@@ -17044,78 +17099,78 @@ static void testStoryWakeTrigger() {
 // Re-capture (only when a verb's template output changes ON PURPOSE):
 //   TW_DUMP_GOLDEN=1 ./build/tests
 // and paste the printed block back into kStoryGoldenSession.
-static const char* const kStoryGoldenSession = R"GOLDEN(A narrow student's cell under a sloped ceiling: a bed with
-unfamiliar sheets, a desk, a trunk you have not finished
-unpacking. Moonlight through the single lancet window finds the
-door to the north, standing just ajar.
-Exits: north.
-You see: candle, wand.
+static const char* const kStoryGoldenSession = R"GOLDEN(  A narrow student's cell under a sloped ceiling: a bed with
+  unfamiliar sheets, a desk, a trunk you have not finished
+  unpacking. Moonlight through the single lancet window finds the
+  door to the north, standing just ajar.
+  Exits: north.
+  You see: candle, wand.
 -- dormitory cell --------------------------------------------------------------
  Exits    north
  Objects  candle, wand
  You      HP: 12/12
-You take the wand.
+  You take the wand.
 -- dormitory cell --------------------------------------------------------------
  Exits    north
  Objects  candle
  You      HP: 12/12
-A long panelled corridor, doors shut on either side and the
-ceiling lost in the dark. Somewhere far off a stair creaks to
-itself. A lamp in a wall bracket kindles quietly as you
-approach, and the way south leads back to your cell.
-Exits: south.
-You see: key.
+  A long panelled corridor, doors shut on either side and the
+  ceiling lost in the dark. Somewhere far off a stair creaks to
+  itself. A lamp in a wall bracket kindles quietly as you
+  approach, and the way south leads back to your cell.
+  Exits: south.
+  You see: key.
 -- corridor --------------------------------------------------------------------
  Exits    south
  Objects  key
  Enemy    goblin grunt  HP: 8/8
  You      HP: 12/12  Stun: ready  Ward: ready
-You strike the goblin grunt for 4 damage.
-The goblin grunt winds up a heavy blow — strike it down or
-brace!
-The goblin grunt wounds you for 1 damage.
+  You strike the goblin grunt for 4 damage.
+  The goblin grunt winds up a heavy blow — strike it down or
+  brace!
+  The goblin grunt wounds you for 1 damage.
 -- corridor --------------------------------------------------------------------
  Exits    south
  Objects  key
  Enemy    goblin grunt  HP: 4/8  [WINDING UP]
  You      HP: 11/12  Stun: ready  Ward: ready
-You strike the goblin grunt for 4 damage.
-The goblin grunt falls. It drops the fire grimoire.
+  You strike the goblin grunt for 4 damage.
+  The goblin grunt falls. It drops the fire grimoire.
 -- corridor --------------------------------------------------------------------
  Exits    south
  Objects  key, fire grimoire
  You      HP: 11/12
-You study the fire grimoire and learn to cast fire.
+  You study the fire grimoire and learn to cast fire.
 -- corridor --------------------------------------------------------------------
  Exits    south
  Objects  key, fire grimoire
  You      HP: 11/12
-Time passes.
+  Time passes.
 -- corridor --------------------------------------------------------------------
  Exits    south
  Objects  key, fire grimoire
  You      HP: 11/12
-A long panelled corridor, doors shut on either side and the
-ceiling lost in the dark. Somewhere far off a stair creaks to
-itself. A lamp in a wall bracket kindles quietly as you
-approach, and the way south leads back to your cell.
-Exits: south.
-You see: key, fire grimoire.
+  A long panelled corridor, doors shut on either side and the
+  ceiling lost in the dark. Somewhere far off a stair creaks to
+  itself. A lamp in a wall bracket kindles quietly as you
+  approach, and the way south leads back to your cell.
+  Exits: south.
+  You see: key, fire grimoire.
 -- corridor --------------------------------------------------------------------
  Exits    south
  Objects  key, fire grimoire
  You      HP: 11/12
-You can't go that way.
+  You can't go that way.
 -- corridor --------------------------------------------------------------------
  Exits    south
  Objects  key, fire grimoire
  You      HP: 11/12
-A narrow student's cell under a sloped ceiling: a bed with
-unfamiliar sheets, a desk, a trunk you have not finished
-unpacking. Moonlight through the single lancet window finds the
-door to the north, standing just ajar.
-Exits: north.
-You see: candle.
+  A narrow student's cell under a sloped ceiling: a bed with
+  unfamiliar sheets, a desk, a trunk you have not finished
+  unpacking. Moonlight through the single lancet window finds the
+  door to the north, standing just ajar.
+  Exits: north.
+  You see: candle.
 -- dormitory cell --------------------------------------------------------------
  Exits    north
  Objects  candle
@@ -17501,6 +17556,7 @@ int main() {
     testTermColorGate();
     testTermWidth();
     testTermProseWidth();
+    testTermIndent();
     testTermWrap();
     testBandLayout();
     testBandContent();

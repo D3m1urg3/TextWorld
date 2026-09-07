@@ -171,3 +171,10 @@ std::string utf8Truncate(std::string_view s, size_t maxChars);
 //     paragraph break and two source lines are never joined.
 //   - A trailing newline in the input survives in the output.
 std::string wrapProse(const std::string& text, int width);
+
+// Prefix every line of `text` with `spaces` spaces, EXCEPT an empty one
+// (REQ-POLISH-3a) — a blank paragraph break and the trailing newline wrapProse
+// preserves both stay empty rather than becoming a line of stray whitespace.
+// Applied AFTER wrapping, so the width arithmetic never sees the indent;
+// proseWidth has already subtracted it.
+std::string indentProse(const std::string& text, int spaces);

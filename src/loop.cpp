@@ -93,7 +93,11 @@ TurnResult runTurnCore(Db& db, const std::string& line) {
     // authority; a future addition wanting the same treatment requires its own
     // decision, not an appeal to this one.
     if (action->verb == Verb::Spells) {
-        return {TurnOutcome::NoTick, renderSpellRules(db, playerId(db), currentStyle())};
+        // REQ-POLISH-3b: a reference table, not narration. It reads at column 0
+        // with the band rather than in the narration column.
+        return {TurnOutcome::NoTick,
+                renderSpellRules(db, playerId(db), currentStyle()),
+                TurnPresentation::Reference};
     }
 
     // Cast availability gate (REQ-COMBAT-7/-13): an unknown or still-recharging
@@ -188,21 +192,28 @@ TurnResult runTurn(Db& db, const std::string& line) {
     // every runTurnCore return path, is what gives those requirements by
     // construction rather than by discipline: no-tick refusals and engine errors
     // get a band for free, and the AI and template paths get identical bytes
-    // because there is only one composition. Width is re-queried per turn
-    // (REQ-UI-28); the band goes LAST, below the narration (REQ-UI-4).
+    // because there is only one composition. The band goes LAST, below the
+    // narration (REQ-UI-4).
+    //
     // Width is re-queried per turn (REQ-UI-28), then SPLIT: narration wraps to
-    // the capped prose width (REQ-POLISH-1) while the band keeps the raw `w`
-    // (REQ-POLISH-2). That one-line difference is the whole of REQ-POLISH-2 —
-    // the band is a table, not prose, and its rules run the full terminal.
+    // the capped prose width and is indented (REQ-POLISH-1, -3), while the band
+    // keeps the raw `w` (REQ-POLISH-2) — it is a table, not prose, and its rules
+    // run the full terminal. A Reference presentation (`spells`) takes the
+    // band's side of that split: full width, column 0 (REQ-POLISH-3b).
     const int w = detectWidth();
-    r.output = wrapProse(r.output, proseWidth(w));
+    if (r.presentation == TurnPresentation::Reference) {
+        r.output = wrapProse(r.output, w);
+    } else {
+        r.output = indentProse(wrapProse(r.output, proseWidth(w)), kProseIndent);
+    }
     r.output += bandOrEmpty(db, w);
     return r;
 }
 
 std::string renderStartup(Db& db) {
     const int w = detectWidth();
-    return wrapProse(renderRoomOf(db, playerId(db)), proseWidth(w)) +
+    return indentProse(wrapProse(renderRoomOf(db, playerId(db)), proseWidth(w)),
+                       kProseIndent) +
            bandOrEmpty(db, w);
 }
 

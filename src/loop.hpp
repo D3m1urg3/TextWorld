@@ -13,9 +13,21 @@ enum class TurnOutcome {
     Quit,         // quit verb — handled pre-transaction, no tick
 };
 
+// How runTurn should PRESENT the text, which the outcome cannot say: `spells`
+// and a tier-a refusal are both TurnOutcome::NoTick, yet REQ-POLISH-3b exempts
+// the first from the indent and REQ-POLISH-7a requires it on the second. A
+// defaulted third member on TurnResult carries the distinction instead.
+enum class TurnPresentation {
+    Prose,      // the world talking: wrapped to proseWidth, indented
+    Reference,  // a reference table (`spells`): full width, column 0, like the band
+};
+
 struct TurnResult {
     TurnOutcome outcome;
     std::string output;
+    // Defaulted, so aggregate initialisation of the first two members still
+    // compiles everywhere it already did.
+    TurnPresentation presentation = TurnPresentation::Prose;
 };
 
 // Dispatch one input line:

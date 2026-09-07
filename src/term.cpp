@@ -221,6 +221,22 @@ int widthFrom(bool ioctlOk, int ioctlCols, const char* columns) {
     return kDefaultWidth;
 }
 
+std::string indentProse(const std::string& text, int spaces) {
+    if (spaces <= 0) return text;
+    const std::string pad(static_cast<size_t>(spaces), ' ');
+    std::string out;
+    bool first = true;
+    for (const std::string& line : splitLines(text)) {
+        if (!first) out += "\n";
+        // REQ-POLISH-3a: an empty line stays empty. splitLines yields a trailing
+        // empty piece for a trailing newline, so this covers that too.
+        if (!line.empty()) out += pad;
+        out += line;
+        first = false;
+    }
+    return out;
+}
+
 int proseWidth(int detected) {
     const int capped = detected < kProseMaxWidth ? detected : kProseMaxWidth;
     const int wrapped = capped - kProseIndent;
