@@ -29,6 +29,11 @@ struct BandSpan {
     Color color = Color::None;
     bool bold = false;
     std::string pad = "  ";
+    // Emit `color` as a BACKGROUND rather than a foreground (REQ-POLISH-11).
+    // Only the health bar sets this: its text is spaces, which carry no
+    // foreground. Styling still happens at EMISSION, so the width arithmetic
+    // measures the spaces and never an escape byte.
+    bool background = false;
 };
 
 // One labelled row. A row whose spans are all empty renders NOTHING at all,
@@ -44,6 +49,42 @@ struct BandRow {
 // (1-based) and the hanging indent of REQ-UI-33 is uniform.
 inline constexpr int kBandLabelWidth = 8;
 inline constexpr int kBandIndent = 1 + kBandLabelWidth + 1;  // 10 leading columns
+
+// The bar's width, in columns, in BOTH modes (REQ-POLISH-10, REQ-POLISH-10a) —
+// ten plus the one separating space is the 11 columns a bar may add to a row.
+inline constexpr int kHealthBarWidth = 10;
+
+// Cells inside the bar, per mode. Under colour every one of the ten columns is
+// a cell. Without colour two of them are spent on the `[` and `]` REQ-POLISH-12
+// asks for, leaving eight — which is what keeps REQ-POLISH-10a's budget intact
+// in the degraded mode too. The fill fraction is the same in both; only the
+// resolution differs.
+inline constexpr int kHealthBarCellsColor = kHealthBarWidth;       // 10
+inline constexpr int kHealthBarCellsAscii = kHealthBarWidth - 2;   // 8
+
+// A health bar as spans, ready to drop into a row beside the numbers it
+// illustrates (REQ-POLISH-8, -9, -10, -12). PURE — no db, no environment.
+// `fill` is the colour of the row it belongs to, so the bar and the number it
+// illustrates read as one fact (REQ-UI-24) rather than as two.
+//
+// Under colour: kHealthBarCellsColor columns of SPACES, never a block
+// character — `█` and `░` are East Asian Ambiguous width and would let the
+// TERMINAL decide the column count, the defect REQ-UI-29 already rules out for
+// `─` and `·`. Filled cells carry `fill` as a background; empty cells carry
+// BrightBlack, the colour the band already gives something out of reach.
+//
+// Without colour: `[` + kHealthBarCellsAscii cells + `]`, `#` filled and `.`
+// empty. Same ten columns, so a row's width never moves between modes either.
+//
+// Filled = round(cells * current / max), with a floor of ONE filled cell while
+// current > 0, so a living enemy never shows an empty bar. `max <= 0` yields no
+// spans at all, so a row with no health simply has no bar rather than a
+// division by zero.
+//
+// TWO steps of degradation and no third: there is no reverse-video step
+// (REQ-POLISH-12).
+std::vector<BandSpan> healthBarSpans(int64_t current, int64_t max, Color fill,
+                                     TermStyle style);
 
 // Compose the frame: header rule, labelled rows, continuation lines indented to
 // the content column. PURE — no db, no environment. All framing bytes are ASCII

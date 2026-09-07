@@ -87,7 +87,11 @@ std::string rtrim(const std::string& s) {
 // Apply one role's treatment to one word. Bold and color compose into a single
 // SGR sequence; either may be suppressed independently (REQ-UI-21/-23).
 std::string styleWord(std::string_view text, Color color, bool bold,
-                      TermStyle style) {
+                      bool background, TermStyle style) {
+    // REQ-POLISH-11: a health bar's text is spaces, which carry no foreground —
+    // it is the BACKGROUND that draws the bar. Still applied at emission, so
+    // the arithmetic above measures the spaces and never an escape byte.
+    if (background) return bgColorize(text, color, style);
     return bold ? boldColor(text, color, style) : colorize(text, color, style);
 }
 
@@ -108,6 +112,7 @@ struct Token {
     bool bold;
     std::string glue;  // visible, stays with `word`
     std::string gap;   // whitespace, dropped at a line break
+    bool background = false;
 };
 
 std::vector<Token> tokenize(const std::vector<BandSpan>& spans) {
@@ -125,6 +130,11 @@ std::vector<Token> tokenize(const std::vector<BandSpan>& spans) {
             }
         }
         if (!cur.empty()) words.push_back(cur);
+        // A span whose text is nothing BUT spaces — a health bar (REQ-POLISH-9).
+        // Splitting it on its own spaces would erase it entirely, so it becomes
+        // ONE atomic token instead. That is also the behaviour a bar wants: a
+        // bar broken across two lines is not a bar.
+        if (words.empty()) words.push_back(span.text);
 
         const std::string glue = rtrim(span.pad);
         const std::string gap = span.pad.substr(glue.size());
@@ -132,7 +142,7 @@ std::vector<Token> tokenize(const std::vector<BandSpan>& spans) {
             const bool last = i + 1 == words.size();
             tokens.push_back({words[i], span.color, span.bold,
                               last ? glue : std::string(),
-                              last ? gap : std::string(" ")});
+                              last ? gap : std::string(" "), span.background});
         }
     }
     return tokens;
@@ -167,7 +177,7 @@ std::vector<std::string> wrapSpans(const std::vector<BandSpan>& spans,
             cur += pendingGap;
             curLen += pendingGapLen;
         }
-        cur += styleWord(t.word, t.color, t.bold, style) + t.glue;
+        cur += styleWord(t.word, t.color, t.bold, t.background, style) + t.glue;
         curLen += need;
         pendingGap = t.gap;
         pendingGapLen = utf8Length(t.gap);
@@ -205,12 +215,65 @@ std::string headerLines(std::string_view roomName, int width, TermStyle style) {
     // No room for the rule: keep every byte of the name (REQ-UI-33a), wrapped.
     std::string out;
     for (const std::string& line :
-         wrapSpans({BandSpan{std::string(roomName), Color::None, true, ""}},
+         wrapSpans({BandSpan{std::string(roomName), Color::None, true, "", false}},
                    width, style)) {
         out += line + "\n";
     }
     return out;
 }
+
+// --- health bars (REQ-POLISH-8..-12) ----------------------------------------
+
+// round(cells * current / max) in integer arithmetic — (2*cells*current + max)
+// / (2*max) — with a floor of ONE while current > 0, so a living enemy never
+// shows an empty bar, and a ceiling of `cells` so an over-full health row
+// (current > max) cannot overrun the bar's width.
+int filledCells(int64_t current, int64_t max, int cells) {
+    if (current <= 0) return 0;
+    if (current >= max) return cells;
+    const int64_t n = (2 * cells * current + max) / (2 * max);
+    return n < 1 ? 1 : static_cast<int>(n);
+}
+
+}  // namespace
+
+std::vector<BandSpan> healthBarSpans(int64_t current, int64_t max, Color fill,
+                                     TermStyle style) {
+    if (max <= 0) return {};  // no health, no bar — and no division by zero
+
+    if (!style.color) {
+        // The degraded form: `[` + eight cells + `]`, ten columns like the
+        // coloured one, so REQ-POLISH-10a's budget holds in both modes. Two of
+        // the ten columns buy the delimiters REQ-POLISH-12 asks for; the
+        // fraction is the same, only its resolution is coarser.
+        const int n = filledCells(current, max, kHealthBarCellsAscii);
+        std::string bar = "[";
+        bar.append(static_cast<size_t>(n), '#');
+        bar.append(static_cast<size_t>(kHealthBarCellsAscii - n), '.');
+        bar += "]";
+        // No spaces in it, so it is one word and cannot be wrapped apart.
+        return {BandSpan{bar, Color::None, false, "  ", false}};
+    }
+
+    // The coloured form: ten columns of SPACES carrying a background. Filled
+    // cells take the row's own colour, so the bar and the number beside it read
+    // as one fact; empty cells take BrightBlack, which the band already uses for
+    // something out of reach.
+    const int n = filledCells(current, max, kHealthBarCellsColor);
+    std::vector<BandSpan> spans;
+    if (n > 0) {
+        spans.push_back({std::string(static_cast<size_t>(n), ' '), fill, false,
+                         "", true});
+    }
+    if (n < kHealthBarCellsColor) {
+        spans.push_back({std::string(static_cast<size_t>(kHealthBarCellsColor - n), ' '),
+                         kSpellCoolColor, false, "", true});
+    }
+    if (!spans.empty()) spans.back().pad = "  ";
+    return spans;
+}
+
+namespace {
 
 // --- row builders -----------------------------------------------------------
 

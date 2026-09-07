@@ -10180,6 +10180,125 @@ static void testBandWiring() {
 
 // Step 6 / REQ-POLISH-7, -7a: a refusal is dimmed, and still indented. Spec
 // check 8, driven through runTurn so the assertion is on what the player sees.
+// Step 8 / REQ-POLISH-9, -10, -10a, -12: the bar as a pure function. Spec
+// checks 9 and 10, at the level where the arithmetic lives.
+static void testBandHealthBar() {
+    const TermStyle colored{true, true};
+    const TermStyle plain{false, false};
+
+    // The width of a bar's TEXT, in code points, once the escape bytes are gone.
+    const auto barWidth = [](const std::vector<BandSpan>& spans) {
+        size_t n = 0;
+        for (const BandSpan& span : spans) n += utf8Length(span.text);
+        return n;
+    };
+    const auto barText = [](const std::vector<BandSpan>& spans) {
+        std::string out;
+        for (const BandSpan& span : spans) out += span.text;
+        return out;
+    };
+
+    const struct {
+        int64_t current;
+        int64_t max;
+    } living[] = {{12, 12}, {6, 12}, {1, 12}, {1, 10}, {3, 4}, {11, 12}, {1, 100}};
+
+    for (const auto& c : living) {
+        const std::vector<BandSpan> lit = healthBarSpans(c.current, c.max,
+                                                         Color::Red, colored);
+        const std::vector<BandSpan> ascii = healthBarSpans(c.current, c.max,
+                                                           Color::Red, plain);
+
+        // REQ-POLISH-10 / -10a: exactly ten columns, in BOTH modes, whatever the
+        // value shown — so a row's width never moves as health drops, and a bar
+        // costs a row at most eleven columns including its separator.
+        CHECK(barWidth(lit) == static_cast<size_t>(kHealthBarWidth));
+        CHECK(barWidth(ascii) == static_cast<size_t>(kHealthBarWidth));
+
+        // REQ-POLISH-9: spaces, never a block character, and every byte ASCII.
+        for (const std::string& text : {barText(lit), barText(ascii)}) {
+            for (const char ch : text) {
+                CHECK(static_cast<unsigned char>(ch) < 0x80);
+            }
+        }
+        CHECK(barText(lit) == std::string(kHealthBarWidth, ' '));
+
+        // REQ-POLISH-12: the degraded form carries the delimiters and the fill
+        // characters, and neither form ever emits reverse video.
+        CHECK(barText(ascii).front() == '[');
+        CHECK(barText(ascii).back() == ']');
+        CHECK(contains(barText(ascii), "#"));
+
+        // REQ-POLISH-10's floor: a LIVING body never shows an empty bar.
+        for (const BandSpan& span : lit) {
+            if (span.color == Color::Red) CHECK(!span.text.empty());
+        }
+    }
+
+    // 1/10 is the floor case in both modes: one filled cell, not zero.
+    {
+        const std::vector<BandSpan> lit = healthBarSpans(1, 10, Color::Red, colored);
+        CHECK(lit.size() == 2);
+        CHECK(lit[0].text == " ");          // one filled column
+        CHECK(lit[0].color == Color::Red);  // the row's own colour
+        CHECK(lit[0].background);
+        CHECK(utf8Length(lit[1].text) == 9);
+        CHECK(lit[1].color == Color::BrightBlack);
+        CHECK(barText(healthBarSpans(1, 10, Color::Red, plain)) == "[#.......]");
+        // round(8 * 1/10) is 1 by the floor, not 1 by the rounding.
+        CHECK(barText(healthBarSpans(1, 100, Color::Red, plain)) == "[#.......]");
+    }
+
+    // Full and empty.
+    CHECK(barText(healthBarSpans(12, 12, Color::Red, plain)) == "[########]");
+    CHECK(barText(healthBarSpans(0, 12, Color::Red, plain)) == "[........]");
+    {
+        // A dead body shows no filled column at all — the floor is for the
+        // LIVING, which is the whole point of it.
+        const std::vector<BandSpan> lit = healthBarSpans(0, 12, Color::Red, colored);
+        CHECK(lit.size() == 1);
+        CHECK(lit[0].color == Color::BrightBlack);
+        CHECK(barWidth(lit) == static_cast<size_t>(kHealthBarWidth));
+    }
+
+    // Rounding, at the resolution each mode has.
+    CHECK(barText(healthBarSpans(6, 12, Color::Red, plain)) == "[####....]");
+    CHECK(utf8Length(healthBarSpans(6, 12, Color::Red, colored)[0].text) == 5);
+    CHECK(utf8Length(healthBarSpans(3, 4, Color::Red, colored)[0].text) == 8);
+
+    // max <= 0: no bar at all, and no division by zero.
+    CHECK(healthBarSpans(0, 0, Color::Red, colored).empty());
+    CHECK(healthBarSpans(0, 0, Color::Red, plain).empty());
+    CHECK(healthBarSpans(5, -1, Color::Red, colored).empty());
+
+    // current > max cannot overrun the width.
+    CHECK(barWidth(healthBarSpans(20, 12, Color::Red, colored)) ==
+          static_cast<size_t>(kHealthBarWidth));
+    CHECK(barText(healthBarSpans(20, 12, Color::Red, plain)) == "[########]");
+
+    // REQ-POLISH-12: no reverse-video step, anywhere in the module.
+    CHECK(!contains(readFileBytes("src/band.cpp"), "\x1b[7m"));
+    CHECK(!contains(readFileBytes("src/band.cpp"), "[7m"));
+
+    // The spans survive the layout: a spans-only-spaces span used to be erased
+    // by the tokenizer, which splits span text on spaces. It is now one atomic
+    // token, so the bar reaches the line intact and measures ten columns there.
+    {
+        const BandRow row{"Enemy", healthBarSpans(6, 12, Color::Red, colored)};
+        const std::string laid = layoutBand("cell", {row}, 60, colored);
+        bool found = false;
+        for (const std::string& line : splitOnNewline(laid)) {
+            const std::string bare = stripSgr(line);
+            if (bare.rfind(" Enemy", 0) == 0) {
+                found = true;
+                CHECK(utf8Length(bare) == static_cast<size_t>(kBandIndent) +
+                                              kHealthBarWidth);
+            }
+        }
+        CHECK(found);
+    }
+}
+
 static void testErrorStyling() {
     const TempDbFile worldPath("textworld_error_style_tests.db");
     Db db = openWorld(worldPath.string(), "tests/fixture.sql").db;
@@ -17748,6 +17867,7 @@ int main() {
     testBandGoldens();
     testBandColor();
     testBandWiring();
+    testBandHealthBar();
     testErrorStyling();
     testBandStartup();
     testSpellsVerb();
