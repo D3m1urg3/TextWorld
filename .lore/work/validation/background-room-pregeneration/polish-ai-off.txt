@@ -1,0 +1,45 @@
+##### ##### #   # ##### #   #  ###  ####  #     ####
+  #   #      # #    #   #   # #   # #   # #     #   #
+  #   ####    #     #   # # # #   # ####  #     #   #
+  #   #      # #    #   ## ## #   # #  #  #     #   #
+  #   ##### #   #   #   #   #  ###  #   # ##### ####
+AI narration off — template mode
+  A narrow student's cell under a sloped ceiling: a bed with
+  unfamiliar sheets, a desk, a trunk you have not finished
+  unpacking. Moonlight through the single lancet window finds the
+  door to the north, standing just ajar.
+-- dormitory cell --------------------------------------------------------------
+ Exits    north
+ Objects  candle, wand
+ You      HP: 12/12 [########]
+>   dormitory cell
+-- dormitory cell --------------------------------------------------------------
+ Exits    north
+ Objects  candle, wand
+ You      HP: 12/12 [########]
+>   I don't understand that.
+-- dormitory cell --------------------------------------------------------------
+ Exits    north
+ Objects  candle, wand
+ You      HP: 12/12 [########]
+>   You don't see that here.
+-- dormitory cell --------------------------------------------------------------
+ Exits    north
+ Objects  candle, wand
+ You      HP: 12/12 [########]
+>   You are carrying nothing.
+-- dormitory cell --------------------------------------------------------------
+ Exits    north
+ Objects  candle, wand
+ You      HP: 12/12 [########]
+>   I don't understand that.
+-- dormitory cell --------------------------------------------------------------
+ Exits    north
+ Objects  candle, wand
+ You      HP: 12/12 [########]
+>   Time passes.
+-- dormitory cell --------------------------------------------------------------
+ Exits    north
+ Objects  candle, wand
+ You      HP: 12/12 [########]
+> 

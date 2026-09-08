@@ -168,3 +168,26 @@ no network calls, so no `kind=call` record exists to compare. The `kind=call`
 format is pinned by the in-suite formatter tests, which are unchanged by this
 work, and the item 2 run above does produce real `kind=call` records (with
 `failed=1`) in the expected shape.
+
+## Re-captured for terminal-visual-polish, 2026-09-07
+
+`.lore/work/specs/terminal-visual-polish.md` deliberately changes what this
+directory's captures look like: prose is capped at 66 columns and indented two
+spaces, the `Exits:` and `You see:` lines are gone (the band states both), health
+bars sit beside the numbers, a repeat `look` prints the room name instead of the
+paragraph, and a title screen prints first. Diffing the new captures against the
+old ones would therefore show this spec's work and prove nothing.
+
+Per REQ-POLISH-22 and spec check 14, **three properties** were asserted instead,
+against a binary built from `859451d` — the commit before this spec began:
+
+1. no escape byte anywhere in the piped output (`grep -c $'\x1b'` is 0);
+2. the same sequence of turn outcomes;
+3. the same `events` rows — `turn, verb, subject, object, detail`, in id order.
+
+All three hold for every offline script here. Any difference in the events rows
+would have been a bug in this spec's work, not a baseline to accept.
+
+Re-run with `.lore/work/validation/revalidate.py <baseline-binary>`. The new
+captures are the `polish-*.txt` files in this directory; the old ones are kept
+as the record of what the game looked like before.

@@ -1,0 +1,72 @@
+##### ##### #   # ##### #   #  ###  ####  #     ####
+  #   #      # #    #   #   # #   # #   # #     #   #
+  #   ####    #     #   # # # #   # ####  #     #   #
+  #   #      # #    #   ## ## #   # #  #  #     #   #
+  #   ##### #   #   #   #   #  ###  #   # ##### ####
+AI narration off — template mode
+  A narrow student's cell under a sloped ceiling: a bed with
+  unfamiliar sheets, a desk, a trunk you have not finished
+  unpacking. Moonlight through the single lancet window finds the
+  door to the north, standing just ajar.
+-- dormitory cell --------------------------------------------------------------
+ Exits    north
+ Objects  candle, wand
+ You      HP: 12/12 [########]
+>   dormitory cell
+-- dormitory cell --------------------------------------------------------------
+ Exits    north
+ Objects  candle, wand
+ You      HP: 12/12 [########]
+>   You take the candle.
+-- dormitory cell --------------------------------------------------------------
+ Exits    north
+ Objects  wand
+ You      HP: 12/12 [########]
+>   A long panelled corridor, doors shut on either side and the
+  ceiling lost in the dark. Somewhere far off a stair creaks to
+  itself. A lamp in a wall bracket kindles quietly as you
+  approach, and the way south leads back to your cell.
+-- corridor --------------------------------------------------------------------
+ Exits    south
+ Objects  key
+ Enemy    goblin grunt  HP: 8/8 [########]
+ You      HP: 12/12 [########]  Stun: ready  Ward: ready
+>   corridor
+  The goblin grunt winds up a heavy blow — strike it down or
+  brace!
+  The goblin grunt wounds you for 1 damage.
+-- corridor --------------------------------------------------------------------
+ Exits    south
+ Objects  key
+ Enemy    goblin grunt  HP: 8/8 [########]  [WINDING UP]
+ You      HP: 11/12 [#######.]  Stun: ready  Ward: ready
+>   You can't flee into the unknown with an enemy at your back.
+  The goblin grunt lands its blow, hitting you for 5 damage.
+  The goblin grunt wounds you for 1 damage.
+-- corridor --------------------------------------------------------------------
+ Exits    south
+ Objects  key
+ Enemy    goblin grunt  HP: 8/8 [########]
+ You      HP: 5/12 [###.....]  Stun: ready  Ward: ready
+>   You are carrying: candle.
+  The goblin grunt winds up a heavy blow — strike it down or
+  brace!
+  The goblin grunt wounds you for 1 damage.
+-- corridor --------------------------------------------------------------------
+ Exits    south
+ Objects  key
+ Enemy    goblin grunt  HP: 8/8 [########]  [WINDING UP]
+ You      HP: 4/12 [###.....]  Stun: ready  Ward: ready
+>   I don't understand that.
+-- corridor --------------------------------------------------------------------
+ Exits    south
+ Objects  key
+ Enemy    goblin grunt  HP: 8/8 [########]  [WINDING UP]
+ You      HP: 4/12 [###.....]  Stun: ready  Ward: ready
+>   I don't understand that.
+-- corridor --------------------------------------------------------------------
+ Exits    south
+ Objects  key
+ Enemy    goblin grunt  HP: 8/8 [########]  [WINDING UP]
+ You      HP: 4/12 [###.....]  Stun: ready  Ward: ready
+> 
