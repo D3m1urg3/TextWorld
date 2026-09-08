@@ -194,6 +194,11 @@ int main() {
         // escape byte and no length limit on that path.
         const bool interactive = isatty(STDIN_FILENO) != 0;
 
+        // REQ-POLISH-24: NO tab completion, stated here because it is
+        // implemented as an absence. linenoiseSetCompletionCallback exists and
+        // is easy; completing the nouns present in a room would tell the player
+        // what is there before they look.
+
         std::string line;
         while (true) {
             // REQ-POLISH-4: one blank line before each prompt, so turns are

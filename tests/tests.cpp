@@ -10442,6 +10442,42 @@ static void testFirstSight() {
     }
 }
 
+// REQ-POLISH-33: every new byte of styling passes through TermStyle. Asserted as
+// a SOURCE property, because it is the one requirement here that a single wrong
+// line anywhere could break without another test noticing — the suite runs with
+// styling suppressed, so an ungated escape sequence would be invisible to it.
+static void testPolishStylingThroughTermStyle() {
+    // No raw SGR sequence is emitted anywhere outside term.cpp, which is the one
+    // unit allowed to build them. term.hpp names one in a COMMENT explaining why
+    // reverse video is not offered, so it is matched on the emitting form.
+    for (const char* file : {"src/band.cpp", "src/loop.cpp", "src/render.cpp",
+                             "src/main.cpp", "src/world.cpp", "src/spinner.cpp",
+                             "src/prose.cpp", "src/systems.cpp"}) {
+        const std::string src = readFileBytes(file);
+        CHECK(!contains(src, "\x1b["));
+        CHECK(!contains(src, "\033["));
+        CHECK(!contains(src, "\u001b["));
+    }
+
+    // REQ-POLISH-12: no reverse video anywhere in the binary, in any spelling.
+    for (const char* file : {"src/band.cpp", "src/term.cpp", "src/loop.cpp",
+                             "src/spinner.cpp"}) {
+        CHECK(!contains(readFileBytes(file), "[7m"));
+    }
+
+    // And the two gates every styled byte actually passes through still take a
+    // TermStyle, so none of the above can be bypassed by a new caller.
+    const std::string termHdr = readFileBytes("src/term.hpp");
+    CHECK(contains(termHdr, "std::string colorize(std::string_view text, Color color, TermStyle style)"));
+    CHECK(contains(termHdr, "std::string bgColorize(std::string_view text, Color color, TermStyle style)"));
+    CHECK(contains(termHdr, "std::string boldColor(std::string_view text, Color color, TermStyle style)"));
+
+    // The spinner is the one new writer that is not a TermStyle call, so its
+    // gate is asserted directly: it takes a TermStyle and checks attrs.
+    CHECK(contains(readFileBytes("src/spinner.hpp"), "Spinner(TermStyle style, bool aiEnabled)"));
+    CHECK(contains(readFileBytes("src/spinner.cpp"), "if (!style.attrs || !aiEnabled) return;"));
+}
+
 // Step 15 / REQ-POLISH-29, -30, -31: the title screen. Spec check 19.
 // Step 17 / REQ-POLISH-21, -21a, -21b: the history file. The guard itself lives
 // in main.cpp and is not linkable from here, so what this asserts is the
@@ -10604,6 +10640,13 @@ static void testHistoryFile() {
         CHECK(loop != std::string::npos);
         CHECK(guard < loop);
     }
+
+    // REQ-POLISH-24: no tab completion. Implemented as an absence, so the
+    // assertion is that the callback is never REGISTERED — matched on the call
+    // form, since main.cpp names the function in the comment that explains why
+    // it is not used.
+    CHECK(!contains(mainSrc, "linenoiseSetCompletionCallback("));
+    CHECK(!contains(mainSrc, "linenoiseSetHintsCallback("));
 
     // REQ-POLISH-21b: an unusable path is not an error. The API reports failure
     // by return code, which is what the guard logs rather than throws on.
@@ -18583,6 +18626,7 @@ int main() {
     testBandWiring();
     testSpinner();
     testHistoryFile();
+    testPolishStylingThroughTermStyle();
     testTitleScreen();
     testWorldStartRoom();
     testRoomSeen();

@@ -1,7 +1,7 @@
 ---
 title: "Implementation plan: terminal visual polish"
 date: 2026-09-07
-status: approved
+status: executed
 tags: [plan, ui, terminal, ansi-color, typography, linenoise, line-editing, spinner, ascii-art, readability]
 modules: [term, band, render, loop, main, world, systems]
 related: [.lore/work/specs/terminal-visual-polish.md, .lore/work/research/terminal-visual-polish-implementation.md, .lore/work/brainstorm/terminal-visual-polish.md, .lore/work/specs/terminal-status-band-ui.md, .lore/work/specs/blocked-directions-exit-display.md]

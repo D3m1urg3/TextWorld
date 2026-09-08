@@ -1,7 +1,7 @@
 ---
 title: Terminal visual polish
 date: 2026-09-07
-status: draft
+status: implemented
 tags: [ui, terminal, ansi-color, typography, linenoise, line-editing, spinner, ascii-art, readability]
 modules: [term, band, render, loop, main]
 related: [.lore/work/brainstorm/terminal-visual-polish.md, .lore/work/research/terminal-visual-polish-implementation.md, .lore/work/specs/terminal-status-band-ui.md, .lore/work/specs/blocked-directions-exit-display.md, .lore/work/specs/ai-prose-renderer.md]
