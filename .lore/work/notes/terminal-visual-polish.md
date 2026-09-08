@@ -26,19 +26,19 @@ Baseline before step 1: `./build/tests` green, 9608 checks, 0 failures.
 - [x] 7 — background colour in `term`
 - [x] 8 — the bar itself, as a pure function
 - [x] 9 — bars in the band rows
-- [ ] 10 — record the starting room
-- [ ] 11 — `roomSeen`, derived from the transcript
-- [ ] 12 — first sight at the three render sites
-- [ ] 13 — the startup render prints the paragraph only at world creation
-- [ ] 14 — `examine <room>` is the full reread
-- [ ] 15 — the title screen
-- [ ] 16 — linenoise replaces `getline`
-- [ ] 17 — the history file
-- [ ] 18 — re-capture the validation baselines
+- [x] 10 — record the starting room
+- [x] 11 — `roomSeen`, derived from the transcript
+- [x] 12 — first sight at the three render sites
+- [x] 13 — the startup render prints the paragraph only at world creation
+- [x] 14 — `examine <room>` is the full reread
+- [x] 15 — the title screen
+- [x] 16 — linenoise replaces `getline`
+- [x] 17 — the history file
+- [x] 18 — re-capture the validation baselines
 - [ ] 19 — the spinner, deterministic half (MED)
 - [ ] 20 — the spinner, live observation (HIGH)
 - [ ] 21 — walk the spec's twenty checks
-- [ ] spec amendments folded back (REQ-POLISH-15, REQ-EXAMINE-7)
+- [x] spec amendments folded back (REQ-POLISH-15, REQ-EXAMINE-7, plus REQ-POLISH-10/-10a/-12 and open question 1)
 
 ## Log
 
@@ -169,3 +169,72 @@ stripped. The test maps the plain band's bars back to spaces first.
 Golden re-capture is scripted: `scratchpad/recapture_bands.py` for
 `testBandGoldens`' seven inline literals, `scratchpad/recapture.py` for the two
 session literals.
+
+### Steps 10, 11 — meta.start_room and roomSeen (done)
+
+Both clean. `meta.start_room` is derived from the seed's own `location` row, so
+no seed or fixture names a number. REQ-POLISH-15 amended in the spec.
+
+One coupling recorded, not fixed: `combat.hpp:22` hardcodes `kDormitoryCell = 1`
+as the respawn destination whatever fixture is loaded, while `meta.start_room` is
+derived. They agree in all three seeds today. A future fixture starting the
+player elsewhere would send a downed player to room 1 while `start_room` named
+another — a `kDormitoryCell` problem for the day a fixture breaks it.
+
+### Steps 12 + 13 — first sight (done, as ONE commit)
+
+**Merged the plan's two steps.** `renderRoomOf` takes the `seen` flag as a
+parameter, so step 12's signature change breaks step 13's call site in the same
+compile. There is no revision between them that builds. Not a scope change —
+the same work, one commit instead of two.
+
+Two test repairs beyond the obvious:
+
+- `testBandWrap` drove a repeat `look`, which now yields one short line and made
+  its "more than four lines" assertion vacuous. It drives a first arrival now.
+- The **live** architect walkability test (`TEXTWORLD_AI_LIVE_TEST=1`, so the
+  default suite never runs it) parsed its displayed-exit set out of
+  `renderRoomOf`, which step 5 had already emptied. It reads the band now. Left
+  alone it would have failed the first time anyone ran it live — worth noting as
+  a general risk: gated tests do not fail when you break them.
+
+### Step 14 — examine a room (done)
+
+REQ-EXAMINE-7 amended in `.lore/work/specs/examine-perception-verb.md`, and its
+"Out of scope" bullet — which named this as explicitly refused — struck through.
+`render.cpp`'s `examined` branch left exactly as it was; the assertion that it is
+byte-identical to `roomBlock`'s unseen output is what lets it stay.
+
+### Step 15 — title screen (done)
+
+**Neither `figlet` nor `toilet` is installed here** and the plan's fallbacks
+(`brew install figlet`, an online generator) were not available. The nine glyphs
+were hand-authored on a 5x5 grid and assembled by a script, which is what makes
+the letterforms consistent. `#` and spaces only. Natural width 53.
+
+Open question 2 — an env switch to suppress it — **not built**, as instructed.
+
+### Steps 16, 17 — linenoise and history (done)
+
+Verified interactively through a **pty harness**
+(`scratchpad/pty_test.py`), which had to answer linenoise's TWO `ESC[6n` cursor
+queries per prompt — one for the cursor column and one after `ESC[999C` for the
+terminal width. Answering only the first hangs the harness, which cost a
+detour worth recording for whoever drives a terminal program from a test next.
+
+Confirmed: typing, backspace, ctrl-a, cross-session up-arrow recall, a chmod-000
+history file that still lets the game run and logs both failures, and — the case
+the destructor exists for — a session killed mid-loop by a real fatal error
+still writing both its lines to the file.
+
+**`tests` needed an explicit `linenoise` link.** `twcore` links it `PRIVATE`, so
+CMake carries the OBJECTS through but not the PUBLIC include directory: the test
+could not `#include "linenoise.h"` at all. The step-1 note predicted this might
+be needed; it is.
+
+### Step 18 — validation baselines (done)
+
+Compared against a binary built from `859451d` in a throwaway worktree. All five
+offline scripts: zero escape bytes, identical outcome sequences, identical
+`events` rows. New captures committed as `polish-*.txt`; the harness is committed
+as `.lore/work/validation/revalidate.py`.
