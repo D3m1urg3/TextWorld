@@ -1,7 +1,7 @@
 ---
 title: "Implementation notes: terminal visual polish"
 date: 2026-09-07
-status: in_progress
+status: complete
 tags: [notes, ui, terminal, ansi-color, typography, linenoise, line-editing, spinner, ascii-art, readability]
 modules: [term, band, render, loop, main, world, systems]
 related: [.lore/work/plans/terminal-visual-polish.md, .lore/work/specs/terminal-visual-polish.md, .lore/work/research/terminal-visual-polish-implementation.md]
@@ -35,9 +35,9 @@ Baseline before step 1: `./build/tests` green, 9608 checks, 0 failures.
 - [x] 16 — linenoise replaces `getline`
 - [x] 17 — the history file
 - [x] 18 — re-capture the validation baselines
-- [ ] 19 — the spinner, deterministic half (MED)
-- [ ] 20 — the spinner, live observation (HIGH)
-- [ ] 21 — walk the spec's twenty checks
+- [x] 19 — the spinner, deterministic half (MED)
+- [x] 20 — the spinner, live observation (HIGH)
+- [x] 21 — walk the spec's twenty checks
 - [x] spec amendments folded back (REQ-POLISH-15, REQ-EXAMINE-7, plus REQ-POLISH-10/-10a/-12 and open question 1)
 
 ## Log
@@ -238,3 +238,73 @@ Compared against a binary built from `859451d` in a throwaway worktree. All five
 offline scripts: zero escape bytes, identical outcome sequences, identical
 `events` rows. New captures committed as `polish-*.txt`; the harness is committed
 as `.lore/work/validation/revalidate.py`.
+
+### Step 19 — the spinner, deterministic half (done, MED)
+
+**Divergence from the plan's mechanism.** The plan says to use
+`linenoiseHide` / `linenoiseShow`. Both take a `struct linenoiseState*` and
+belong to linenoise's **non-blocking** API (`linenoiseEditStart`/`Feed`/`Stop`).
+Step 16 uses the blocking `linenoise()`, which owns its state internally and has
+already **returned** by the time `aiRender` runs — there is no line being edited
+during the spinner, so there is nothing to hide. The research's "line editing and
+the spinner are one job" assumed the async API. Erasure is a carriage return, one
+space, a carriage return. No requirement changes: REQ-POLISH-25 through -28 say
+nothing about `linenoiseHide`.
+
+Three design points worth keeping:
+
+- The frame wait is a **condition variable**, not a sleep, so a turn that returns
+  in microseconds is not delayed a frame interval by its own spinner. Asserted.
+- The erase runs **after the join**, so nothing can be written between the last
+  frame and the clear.
+- A spinner destroyed **before its first frame writes nothing at all** — not even
+  the clear. An unconditional erase would move the cursor on an instant turn.
+
+Ran the whole suite under `-fsanitize=thread`: 11061 checks, 0 failures, **zero**
+ThreadSanitizer warnings.
+
+### Step 20 — the spinner, live observation (done, HIGH)
+
+Three turns, as budgeted. Piped: zero escape bytes, zero carriage returns.
+Terminal: 21 frames during the wait, one erase, no residue. Invalid key
+(~162 ms, from `prof-invalid-key.log` — long enough for exactly one frame, which
+is what makes it a real test of the failure path): one frame, one erase, no
+residue, and the turn fell back to templates and the game continued.
+
+**Method note worth keeping.** The first analysis of the terminal turn reported
+zero frames and was wrong: it read the pty capture in **text mode**, where
+Python's universal-newline handling destroys exactly the carriage returns the
+frames are made of. Read terminal captures in binary.
+
+### Step 21 — the sweep (done)
+
+All twenty checks pass. The runnable half is committed as
+`.lore/work/validation/sweep-terminal-visual-polish.sh`.
+
+- **REQ-POLISH-32.** `combat.cpp`, `combat.hpp` and `mutations.cpp` are
+  **untouched** by the whole branch. No `CREATE`/`ALTER`/`DROP TABLE` added.
+  `SCHEMA_VERSION` still 8. The one `appendEvent` line added uses `examined`, an
+  existing verb. Every combat number in the golden literals is unchanged: the
+  only differences are two **additions** (`HP: 1/10`, `HP: 1/12`) from the new
+  bar tests' deliberate low-health states.
+- **REQ-POLISH-33.** A piped run emits zero escape sequences. The only new
+  `\x1b[` literal anywhere in `src/` is inside a **comment** in `term.hpp`
+  explaining why reverse video is not offered.
+- **Check 20.** Fifteen existing test functions were edited, every one of them
+  asserting on layout this spec deliberately changes. No combat, turn-count or
+  schema test was touched — verified by name and by diffing the numbers.
+
+**One check narrowed, deliberately.** Check 19 says the title screen "contains
+only ASCII". Asserted over the ART, not over the whole capture: the em-dash on
+`AI narration off — template mode` is `main.cpp:126`'s pre-existing notice, not
+the title screen. Same line already flagged at step 3 for exceeding 20 columns.
+
+## Left undone, deliberately
+
+- **The mode notice at `main.cpp:126`** is 32 columns and unwrapped, so at
+  `COLUMNS=20` it is the one line that exceeds the terminal. It predates this
+  spec, it is not narration, and REQ-POLISH-1 governs "narration and template
+  prose". Raised rather than silently widened into scope.
+- **`kDormitoryCell`** (`combat.hpp:22`) still hardcodes room 1 as the respawn
+  destination while `meta.start_room` is derived. They agree in all three seeds.
+- **The title screen's env switch** — open question 2 — not built, as instructed.
