@@ -206,3 +206,21 @@ INSERT INTO story_step(n, condition_kind, condition_arg, prose) VALUES
    'They have found the index, and are reading it. The old grimoires are being counted.'),
   (5, 'enemies_defeated', '5',
    'The breach stands open to the lower halls, and the warband is carrying the deep stacks out through it.');
+
+-- The title screen (REQ-POLISH-29, -30). Static text, rendered once while
+-- authoring and pasted in — no FIGlet renderer, no font files, no runtime
+-- dependency, and the art is reviewable in a diff.
+--
+-- A ROW, not a shape: zero DDL, no SCHEMA_VERSION bump (REQ-POLISH-32), the
+-- same move meta.setting and meta.start_room make.
+--
+-- Plain ASCII only (REQ-UI-29, REQ-POLISH-30): '#' and spaces and nothing else.
+-- No box drawing and no ambiguous-width character, so it cannot misalign on any
+-- terminal. Its natural width is 53 columns; below that main.cpp prints the
+-- game's name as plain text instead (REQ-POLISH-31).
+INSERT INTO meta(key, value) VALUES ('title_art',
+'##### ##### #   # ##### #   #  ###  ####  #     ####
+  #   #      # #    #   #   # #   # #   # #     #   #
+  #   ####    #     #   # # # #   # ####  #     #   #
+  #   #      # #    #   ## ## #   # #  #  #     #   #
+  #   ##### #   #   #   #   #  ###  #   # ##### ####');

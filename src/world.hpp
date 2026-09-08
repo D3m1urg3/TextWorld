@@ -88,6 +88,16 @@ struct MajorProfile {
 //
 // Returns "" on success, else the reason — WITHOUT the file name, which the
 // caller prefixes. Pure: no database, no I/O, no logging.
+// The title screen for `db`, laid out for a terminal `width` columns wide
+// (REQ-POLISH-29, -30, -31). Read-only.
+//
+// Returns `meta.title_art` when it fits, and the game's NAME as plain text when
+// it does not — which is also what a world file created before that row existed
+// gets, on the same path. Never wraps the art: below its natural width it
+// degrades to the name rather than breaking into rubble. The result ends in a
+// newline, or is "" if there is nothing to show.
+std::string titleScreen(Db& db, int width);
+
 std::string parseMajorProfile(const std::string& text, MajorProfile& out);
 
 // Open (or create) the world, optionally seeding it with hand-authored major

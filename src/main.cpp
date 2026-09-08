@@ -121,6 +121,13 @@ int main() {
         const PregenGuard pregenGuard;
         const BardGuard bardGuard;
 
+        // The title screen (REQ-POLISH-29): the FIRST thing on screen, before
+        // the template-mode notice and before the first room. Static text from
+        // the seed, so there is no renderer and no runtime dependency; below its
+        // natural width it degrades to the game's name (REQ-POLISH-31), which is
+        // also what a world file created before the row existed gets.
+        std::fputs(titleScreen(db, detectWidth()).c_str(), stdout);
+
         // One-line mode notice (REQ-PROSE-2): told once, before the first
         // prompt, when AI narration is off. Silence means AI mode.
         if (!aiNarrationEnabled()) {

@@ -10438,6 +10438,75 @@ static void testFirstSight() {
     }
 }
 
+// Step 15 / REQ-POLISH-29, -30, -31: the title screen. Spec check 19.
+static void testTitleScreen() {
+    const TempDbFile worldPath("textworld_title_tests.db");
+    Db db = openWorld(worldPath.string(), "seed/base.sql").db;
+
+    // The seed row exists, and it is a ROW — no DDL, no version bump.
+    CHECK(queryInt(db, "SELECT COUNT(*) FROM meta WHERE key = 'title_art'") == 1);
+    CHECK(queryInt(db, "SELECT value FROM meta WHERE key = 'schema_version'") == 8);
+
+    const std::string art = queryText(db, "SELECT value FROM meta WHERE key = 'title_art'");
+    CHECK(!art.empty());
+
+    // REQ-POLISH-30: plain ASCII only. No box drawing, no ambiguous-width
+    // character, nothing that lets the terminal decide the column count.
+    for (const char ch : art) {
+        CHECK(static_cast<unsigned char>(ch) < 0x80);
+        CHECK(ch == '\n' || (ch >= 0x20 && ch < 0x7f));
+    }
+
+    // Its natural width, measured rather than assumed.
+    size_t widest = 0;
+    for (const std::string& line : splitOnNewline(art)) {
+        widest = std::max(widest, utf8Length(line));
+    }
+    CHECK(widest > 0);
+
+    // At and above its natural width the art prints, and no line overflows.
+    for (const int w : {static_cast<int>(widest), 80, 200}) {
+        const std::string screen = titleScreen(db, w);
+        CHECK(contains(screen, "#"));
+        CHECK(screen.back() == '\n');
+        for (const std::string& line : splitOnNewline(screen)) {
+            CHECK(utf8Length(line) <= static_cast<size_t>(w));
+        }
+    }
+
+    // REQ-POLISH-31: one column short of its natural width, and at REQ-UI-27's
+    // 20-column floor, it degrades to the bare name — never wrapped into rubble.
+    for (const int w : {static_cast<int>(widest) - 1, 20, 1}) {
+        const std::string screen = titleScreen(db, w);
+        CHECK(screen == "TextWorld\n");
+        CHECK(!contains(screen, "#"));
+    }
+
+    // A world file created BEFORE this row existed takes the same path.
+    {
+        db.exec("DELETE FROM meta WHERE key = 'title_art'");
+        CHECK(titleScreen(db, 200) == "TextWorld\n");
+    }
+
+    // REQ-POLISH-29: printed FIRST, before the template-mode notice and before
+    // the startup render. Source order is what makes that structural.
+    {
+        const std::string src = readFileBytes("src/main.cpp");
+        const size_t title = src.find("titleScreen(db");
+        const size_t notice = src.find("AI narration off");
+        const size_t startup = src.find("renderStartup(db)");
+        CHECK(title != std::string::npos);
+        CHECK(notice != std::string::npos);
+        CHECK(startup != std::string::npos);
+        CHECK(title < notice);
+        CHECK(title < startup);
+    }
+
+    // No renderer, no font files, no runtime dependency (REQ-POLISH-29).
+    CHECK(!contains(readFileBytes("CMakeLists.txt"), "figlet"));
+    CHECK(!contains(readFileBytes("src/world.cpp"), "figlet"));
+}
+
 static void testWorldStartRoom() {
     // Derived from the seed's own location row, so it is right for every seed
     // and fixture without any of them naming a number.
@@ -18311,6 +18380,7 @@ int main() {
     testBandGoldens();
     testBandColor();
     testBandWiring();
+    testTitleScreen();
     testWorldStartRoom();
     testRoomSeen();
     testFirstSight();

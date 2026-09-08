@@ -1,5 +1,6 @@
 #include "world.hpp"
 
+#include <algorithm>
 #include <cstdio>
 #include <fstream>
 #include <set>
@@ -9,6 +10,7 @@
 #include <utility>
 
 #include "log.hpp"  // logToTerminal — the REQ-LOG-2 schema-refusal exemption
+#include "term.hpp"  // utf8Length — the title screen measures its own width
 #include "mutations.hpp"  // writeCatalogEntry / writeCatalogProfile — the loader
                           // writes majors through the SANCTIONED path, never raw
                           // SQL, which is what keeps REQ-NPCSTORE-37 true of
@@ -329,6 +331,38 @@ void initialize(Db& db, const std::string& seedPath,
 }
 
 }  // namespace
+
+std::string titleScreen(Db& db, int width) {
+    // The game's name, which is what a too-narrow terminal and a world file
+    // predating meta.title_art both get. Not read from the world: it is the
+    // program's name, not the setting's.
+    static constexpr const char* kGameName = "TextWorld";
+
+    std::string art;
+    {
+        Stmt s = db.prepare("SELECT value FROM meta WHERE key = 'title_art'");
+        if (s.step()) art = s.colText(0);
+    }
+    if (art.empty()) return std::string(kGameName) + "\n";
+
+    // REQ-POLISH-31: measured against the WIDEST line, and never wrapped. The
+    // art is ASCII by construction (REQ-POLISH-30), so bytes are columns, but
+    // utf8Length is used anyway so a future edit that sneaks in a multi-byte
+    // character is measured rather than mismeasured.
+    size_t widest = 0;
+    size_t pos = 0;
+    while (pos <= art.size()) {
+        const size_t nl = art.find('\n', pos);
+        const size_t end = nl == std::string::npos ? art.size() : nl;
+        widest = std::max(widest, utf8Length(std::string_view(art).substr(pos, end - pos)));
+        if (nl == std::string::npos) break;
+        pos = nl + 1;
+    }
+    if (widest > static_cast<size_t>(width)) return std::string(kGameName) + "\n";
+
+    if (art.back() != '\n') art += "\n";
+    return art;
+}
 
 std::string parseMajorProfile(const std::string& text, MajorProfile& out) {
     // The header ends at the FIRST blank line and never resumes
