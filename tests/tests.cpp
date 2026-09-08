@@ -40,6 +40,8 @@
 #include "term.hpp"
 #include "world.hpp"
 
+#include "spinner.hpp"
+
 #include "linenoise.h"  // REQ-POLISH-21: the history API this asserts against
 
 // vendor/ is a PRIVATE include dir of twcore, so the tests reach the vendored
@@ -10445,6 +10447,140 @@ static void testFirstSight() {
 // in main.cpp and is not linkable from here, so what this asserts is the
 // vendored history API's own contract plus main.cpp's structure — the two
 // things that decide whether history survives a bad exit.
+// Step 19 / REQ-POLISH-26, -28, and the mechanism half of -25. Spec check 18.
+// Everything here is OFFLINE: no network, no live call, no token.
+static void testSpinner() {
+    // Frames are captured rather than written to the terminal.
+    std::mutex sinkMutex;
+    std::string captured;
+    Spinner::setSink([&](std::string_view text) {
+        const std::lock_guard<std::mutex> lock(sinkMutex);
+        captured += text;
+    });
+    const auto drain = [&] {
+        const std::lock_guard<std::mutex> lock(sinkMutex);
+        return captured;
+    };
+    const auto reset = [&] {
+        const std::lock_guard<std::mutex> lock(sinkMutex);
+        captured.clear();
+    };
+
+    const auto sleepFrames = [](int n) {
+        std::this_thread::sleep_for(
+            std::chrono::milliseconds(Spinner::frameIntervalMs() * n));
+    };
+
+    // REQ-POLISH-26: no terminal, no thread and no byte. The counter is what
+    // makes "no thread starts" checkable rather than merely likely.
+    {
+        const int64_t before = Spinner::threadsStarted();
+        {
+            const Spinner spinner(TermStyle{false, false}, true);
+            sleepFrames(4);
+        }
+        CHECK(Spinner::threadsStarted() == before);
+        CHECK(drain().empty());
+    }
+
+    // NO_COLOR on a terminal keeps attrs, so the spinner still runs — it is not
+    // a colour effect. TERM=dumb clears attrs and suppresses it.
+    {
+        const int64_t before = Spinner::threadsStarted();
+        {
+            const Spinner spinner(TermStyle{false, true}, true);
+            sleepFrames(3);
+        }
+        CHECK(Spinner::threadsStarted() == before + 1);
+        CHECK(!drain().empty());
+        reset();
+    }
+
+    // REQ-POLISH-28: template mode starts no thread at all. There is no network
+    // call there and nothing to wait for.
+    {
+        const int64_t before = Spinner::threadsStarted();
+        {
+            const Spinner spinner(TermStyle{true, true}, false);
+            sleepFrames(4);
+        }
+        CHECK(Spinner::threadsStarted() == before);
+        CHECK(drain().empty());
+    }
+
+    // REQ-POLISH-27: it erases itself completely. The destructor's clear is the
+    // LAST thing written, and every byte it ever wrote is ASCII.
+    {
+        {
+            const Spinner spinner(TermStyle{true, true}, true);
+            sleepFrames(3);
+        }
+        const std::string out = drain();
+        CHECK(!out.empty());
+        CHECK(out.size() >= 3);
+        CHECK(out.substr(out.size() - 3) == "\r \r");
+        for (const char ch : out) {
+            CHECK(static_cast<unsigned char>(ch) < 0x80);
+        }
+        // Frames are ASCII spinner characters, never braille or block drawing —
+        // those are the widths a terminal is allowed to disagree about
+        // (REQ-UI-29), and a half-erased column is what REQ-POLISH-27 forbids.
+        for (const char ch : out) {
+            CHECK(ch == '\r' || ch == ' ' || ch == '|' || ch == '/' ||
+                  ch == '-' || ch == '\\');
+        }
+        reset();
+    }
+
+    // A spinner destroyed before its first frame writes NOTHING — not even the
+    // clear. An unconditional erase would move the cursor on a turn that
+    // returned instantly.
+    {
+        {
+            const Spinner spinner(TermStyle{true, true}, true);
+        }
+        CHECK(drain().empty());
+    }
+
+    // The destructor does not sit through a whole frame interval: a turn that
+    // returns in microseconds must not be delayed 100 ms by its own spinner.
+    {
+        const auto start = std::chrono::steady_clock::now();
+        {
+            const Spinner spinner(TermStyle{true, true}, true);
+        }
+        const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                 std::chrono::steady_clock::now() - start)
+                                 .count();
+        CHECK(elapsed < Spinner::frameIntervalMs());
+        reset();
+    }
+
+    // Two at once do not interfere: the state is per-object, not a file-static.
+    {
+        const int64_t before = Spinner::threadsStarted();
+        {
+            const Spinner a(TermStyle{true, true}, true);
+            const Spinner b(TermStyle{true, true}, true);
+            sleepFrames(3);
+        }
+        CHECK(Spinner::threadsStarted() == before + 2);
+        reset();
+    }
+
+    Spinner::setSink({});
+
+    // REQ-POLISH-25's mechanism is scoped to exactly the blocking call, and its
+    // gates are checked in the CONSTRUCTOR, so there is no call site that can
+    // forget one.
+    {
+        const std::string src = readFileBytes("src/loop.cpp");
+        CHECK(contains(src, "const Spinner spinner(currentStyle(), aiNarrationEnabled())"));
+        const std::string spin = readFileBytes("src/spinner.cpp");
+        CHECK(contains(spin, "if (!style.attrs || !aiEnabled) return;"));
+    }
+}
+
 static void testHistoryFile() {
     // REQ-POLISH-21: bounded, beside world.db, and gitignored.
     const std::string mainSrc = readFileBytes("src/main.cpp");
@@ -18445,6 +18581,7 @@ int main() {
     testBandGoldens();
     testBandColor();
     testBandWiring();
+    testSpinner();
     testHistoryFile();
     testTitleScreen();
     testWorldStartRoom();

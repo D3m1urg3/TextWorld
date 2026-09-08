@@ -21,7 +21,7 @@ add_library(linenoise STATIC vendor/linenoise.c)
 target_include_directories(linenoise PUBLIC vendor)
 
 # --- twcore: engine sources shared by game and tests ---
-add_library(twcore STATIC src/log.cpp src/db.cpp src/world.cpp src/parser.cpp src/mutations.cpp src/npc.cpp src/systems.cpp src/combat.cpp src/render.cpp src/term.cpp src/band.cpp src/profile.cpp src/aihttp.cpp src/prose.cpp src/nlresolve.cpp src/architect.cpp src/pregen.cpp src/loop.cpp src/bard.cpp src/bardworker.cpp)
+add_library(twcore STATIC src/log.cpp src/db.cpp src/world.cpp src/parser.cpp src/mutations.cpp src/npc.cpp src/systems.cpp src/combat.cpp src/render.cpp src/term.cpp src/band.cpp src/spinner.cpp src/profile.cpp src/aihttp.cpp src/prose.cpp src/nlresolve.cpp src/architect.cpp src/pregen.cpp src/loop.cpp src/bard.cpp src/bardworker.cpp)
 target_include_directories(twcore PUBLIC src)
 target_include_directories(twcore PRIVATE vendor)
 target_link_libraries(twcore PRIVATE sqlite3 linenoise CURL::libcurl)

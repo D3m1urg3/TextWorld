@@ -16,6 +16,7 @@
 #include "profile.hpp"
 #include "prose.hpp"
 #include "render.hpp"
+#include "spinner.hpp"
 #include "systems.hpp"
 #include "term.hpp"
 
@@ -237,7 +238,19 @@ TurnResult runTurnCore(Db& db, const std::string& line) {
     // structural rather than something a test has to count.
     const ScopedStage narrateStage("narrate");
     if (action->verb != Verb::Say && aiNarrationEnabled()) {
-        if (auto prose = aiRender(db, currentTurn(db))) {
+        // REQ-POLISH-25: a turn is ~3.4 s today and ~7.3 s when a room is
+        // generated, and the terminal is otherwise frozen and silent for all of
+        // it. The Spinner is scoped to exactly the blocking call, and its
+        // destructor erases it on the success path, the failure path and the
+        // timeout path alike (REQ-POLISH-27). Both of its gates are checked
+        // inside the constructor: no terminal, no thread (REQ-POLISH-26); no AI,
+        // no thread (REQ-POLISH-28).
+        std::optional<std::string> prose;
+        {
+            const Spinner spinner(currentStyle(), aiNarrationEnabled());
+            prose = aiRender(db, currentTurn(db));
+        }
+        if (prose) {
             return {TurnOutcome::Ticked, *prose};
         }
     }
