@@ -35,4 +35,8 @@ target_link_libraries(textworld PRIVATE twcore linenoise)
 # can make its single bounded coherence-judge call. The default offline run never
 # touches it.
 add_executable(tests tests/tests.cpp)
-target_link_libraries(tests PRIVATE twcore CURL::libcurl)
+# linenoise is named explicitly, not left to twcore. twcore links it PRIVATE, so
+# CMake carries the OBJECTS through to this target but not the PUBLIC include
+# directory — which is what the history and spinner tests need in order to
+# #include "linenoise.h" at all.
+target_link_libraries(tests PRIVATE twcore linenoise CURL::libcurl)

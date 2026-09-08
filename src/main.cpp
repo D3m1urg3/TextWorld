@@ -75,6 +75,38 @@ std::vector<MajorProfileFile> readMajorProfiles(const std::filesystem::path& dir
     return files;
 }
 
+// REQ-POLISH-21/-21a/-21b: the history file, as an RAII guard.
+//
+// Declared beside SessionLogGuard and for the same reason: a destructor is
+// reached by normal return, the quit verb, EOF, SchemaMismatch and the generic
+// catch alike, so history is saved on EVERY exit path (REQ-POLISH-21a). A
+// session that ends badly does not cost the player their history.
+//
+// A path that cannot be read or written is NOT an error (REQ-POLISH-21b). The
+// game plays on with in-session history only and the failure goes to the
+// session log — the best-effort posture logging already has.
+struct HistoryGuard {
+    // Beside world.db, the same placement rule logs/ follows.
+    static constexpr const char* kPath = ".textworld_history";
+    // Bounded, so a long-lived session cannot grow the file without limit.
+    static constexpr int kMaxLen = 500;
+
+    HistoryGuard() {
+        linenoiseHistorySetMaxLen(kMaxLen);
+        if (linenoiseHistoryLoad(kPath) != 0) {
+            logEmitf(LogLevel::Info, "history",
+                     "no history loaded from %s (absent or unreadable)", kPath);
+        }
+    }
+
+    ~HistoryGuard() {
+        if (linenoiseHistorySave(kPath) != 0) {
+            logEmitf(LogLevel::Warn, "history", "could not save history to %s",
+                     kPath);
+        }
+    }
+};
+
 }  // namespace
 
 int main() {
@@ -125,6 +157,12 @@ int main() {
         // two things to keep in step.
         const PregenGuard pregenGuard;
         const BardGuard bardGuard;
+
+        // History, loaded before the first prompt and saved by the destructor
+        // on every way out of this scope (REQ-POLISH-21a). Declared here rather
+        // than at the top of main() so it is inside the try — a SchemaMismatch
+        // exits before there is a session to remember.
+        const HistoryGuard historyGuard;
 
         // The title screen (REQ-POLISH-29): the FIRST thing on screen, before
         // the template-mode notice and before the first room. Static text from
@@ -190,6 +228,9 @@ int main() {
                         linenoise(prompt), linenoiseFree);
                     eof = input == nullptr;
                     if (!eof) line = input.get();
+                    // REQ-POLISH-21: every accepted line, and only on the
+                    // interactive path — a piped run has no history to build.
+                    if (!eof && !line.empty()) linenoiseHistoryAdd(line.c_str());
                 } else {
                     std::fputs(prompt, stdout);
                     std::fflush(stdout);

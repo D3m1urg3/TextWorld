@@ -40,6 +40,8 @@
 #include "term.hpp"
 #include "world.hpp"
 
+#include "linenoise.h"  // REQ-POLISH-21: the history API this asserts against
+
 // vendor/ is a PRIVATE include dir of twcore, so the tests reach the vendored
 // nlohmann/json by relative path.
 #include "../vendor/json.hpp"
@@ -10439,6 +10441,65 @@ static void testFirstSight() {
 }
 
 // Step 15 / REQ-POLISH-29, -30, -31: the title screen. Spec check 19.
+// Step 17 / REQ-POLISH-21, -21a, -21b: the history file. The guard itself lives
+// in main.cpp and is not linkable from here, so what this asserts is the
+// vendored history API's own contract plus main.cpp's structure — the two
+// things that decide whether history survives a bad exit.
+static void testHistoryFile() {
+    // REQ-POLISH-21: bounded, beside world.db, and gitignored.
+    const std::string mainSrc = readFileBytes("src/main.cpp");
+    CHECK(contains(mainSrc, ".textworld_history"));
+    CHECK(contains(mainSrc, "linenoiseHistorySetMaxLen"));
+    CHECK(contains(mainSrc, "linenoiseHistoryLoad"));
+    CHECK(contains(mainSrc, "linenoiseHistoryAdd"));
+    CHECK(contains(readFileBytes(".gitignore"), ".textworld_history"));
+
+    // REQ-POLISH-21a: saved from a DESTRUCTOR, which is what reaches the quit
+    // verb, EOF, and the fatal-error path alike. A save called at the bottom of
+    // the loop would miss two of the three.
+    CHECK(contains(mainSrc, "~HistoryGuard"));
+    CHECK(contains(mainSrc, "linenoiseHistorySave"));
+    {
+        // And the guard is declared BEFORE the turn loop, so an exception
+        // thrown inside the loop unwinds through it.
+        const size_t guard = mainSrc.find("const HistoryGuard historyGuard");
+        const size_t loop = mainSrc.find("while (true)");
+        CHECK(guard != std::string::npos);
+        CHECK(loop != std::string::npos);
+        CHECK(guard < loop);
+    }
+
+    // REQ-POLISH-21b: an unusable path is not an error. The API reports failure
+    // by return code, which is what the guard logs rather than throws on.
+    {
+        const std::filesystem::path dir =
+            std::filesystem::temp_directory_path() / "textworld_history_tests";
+        std::error_code ec;
+        std::filesystem::remove_all(dir, ec);
+        std::filesystem::create_directories(dir, ec);
+
+        const std::string missing = (dir / "absent").string();
+        CHECK(linenoiseHistoryLoad(missing.c_str()) != 0);  // reported, not thrown
+
+        // A round trip through a usable path: what a second session loads.
+        const std::string path = (dir / "history").string();
+        linenoiseHistorySetMaxLen(500);
+        CHECK(linenoiseHistoryAdd("look") == 1);
+        CHECK(linenoiseHistoryAdd("go north") == 1);
+        CHECK(linenoiseHistorySave(path.c_str()) == 0);
+        const std::string saved = readFileBytes(path);
+        CHECK(contains(saved, "look"));
+        CHECK(contains(saved, "go north"));
+        CHECK(linenoiseHistoryLoad(path.c_str()) == 0);
+
+        // An UNWRITABLE path reports failure rather than throwing or aborting.
+        const std::string unwritable = (dir / "nosuchdir" / "history").string();
+        CHECK(linenoiseHistorySave(unwritable.c_str()) != 0);
+
+        std::filesystem::remove_all(dir, ec);
+    }
+}
+
 static void testTitleScreen() {
     const TempDbFile worldPath("textworld_title_tests.db");
     Db db = openWorld(worldPath.string(), "seed/base.sql").db;
@@ -18384,6 +18445,7 @@ int main() {
     testBandGoldens();
     testBandColor();
     testBandWiring();
+    testHistoryFile();
     testTitleScreen();
     testWorldStartRoom();
     testRoomSeen();

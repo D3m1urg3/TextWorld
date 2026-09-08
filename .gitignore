@@ -1,6 +1,7 @@
 build/
 .cache/
 world.db
+.textworld_history
 compile_commands.json
 logs/
 # Validation baselines are locally built binaries, not artifacts to track;
