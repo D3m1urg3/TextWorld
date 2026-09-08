@@ -11302,7 +11302,11 @@ static void testBandNonGoals() {
     CHECK(!contains(src, "?1049"));    // no alternate screen
     CHECK(!contains(src, "DECSTBM"));
     CHECK(!contains(src, "\x1b[r"));   // no scroll region
-    CHECK(!contains(src, "readline"));  // no line editing / history
+    // REQ-POLISH-20 REVERSES the "no line editing / history" non-goal
+    // deliberately: input is read through vendored linenoise on a terminal. The
+    // readline scan itself stays and still passes — it was always about GPL,
+    // which is exactly why linenoise (BSD-2) is the one that was vendored.
+    CHECK(!contains(src, "readline"));
     CHECK(!contains(src, "SIGWINCH"));
     // No third-party UI dependency was added.
     const std::string cmake = readFileBytes("CMakeLists.txt");

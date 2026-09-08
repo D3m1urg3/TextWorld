@@ -6,9 +6,12 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <memory>
 #include <sstream>
 #include <string>
 #include <vector>
+
+#include <unistd.h>  // isatty — REQ-POLISH-22's explicit branch
 
 #include "aihttp.hpp"
 #include "architect.hpp"   // architectQueuePregen — the pre-generation scheduler
@@ -21,6 +24,8 @@
 #include "prose.hpp"
 #include "term.hpp"  // currentStyle — the prompt's blank line is terminal-only
 #include "world.hpp"
+
+#include "linenoise.h"  // REQ-POLISH-20: line editing and history
 
 namespace {
 
@@ -143,6 +148,14 @@ int main() {
         // anything, a candidate for its latent exits may already be waiting.
         architectQueuePregen(db, playerRoom(db));
 
+        // REQ-POLISH-22: line editing is for a TERMINAL, and the branch is on
+        // isatty EXPLICITLY rather than on linenoise's own non-tty path. That is
+        // what makes "piped behaviour is unchanged" structural: a piped run
+        // executes the same std::getline it always did, so the captures under
+        // .lore/work/validation/ cannot drift, and there is no editing, no
+        // escape byte and no length limit on that path.
+        const bool interactive = isatty(STDIN_FILENO) != 0;
+
         std::string line;
         while (true) {
             // REQ-POLISH-4: one blank line before each prompt, so turns are
@@ -154,20 +167,34 @@ int main() {
             // TERM=dumb, and the same flag REQ-POLISH-26 uses for the spinner.
             // An unconditional "\n> " would put a blank line into every piped
             // capture, which is the half of spec check 4 that forbids it.
-            std::fputs(currentStyle().attrs ? "\n> " : "> ", stdout);
-            std::fflush(stdout);
+            const char* prompt = currentStyle().attrs ? "\n> " : "> ";
 
             // The dwell timer (REQ-PREGEN-25) covers exactly the gap between
             // the prompt reaching the terminal and the player's line coming
             // back — the number that says whether one serial worker can keep
-            // up with a reader. The getline is wrapped in its own block so the
+            // up with a reader. The read is wrapped in its own block so the
             // timer destructs (and emits) BEFORE the break decision; the record
             // is emitted on the EOF path too, which is right, because that was
-            // a real wait.
+            // a real wait. On the interactive path the prompt is linenoise's
+            // to print, so it is INSIDE the timed block, which keeps the timer
+            // covering exactly the same span as before.
             bool eof = false;
             {
                 const ScopedDwell dwell;
-                eof = !std::getline(std::cin, line);
+                if (interactive) {
+                    // linenoise returns malloc'd memory; the unique_ptr is what
+                    // keeps the free off every return path (REQ-POLISH-20).
+                    // NULL means EOF, which maps straight onto the existing
+                    // break below (REQ-POLISH-23).
+                    const std::unique_ptr<char, void (*)(void*)> input(
+                        linenoise(prompt), linenoiseFree);
+                    eof = input == nullptr;
+                    if (!eof) line = input.get();
+                } else {
+                    std::fputs(prompt, stdout);
+                    std::fflush(stdout);
+                    eof = !std::getline(std::cin, line);
+                }
             }
             if (eof) break;  // EOF behaves as quit, unchanged
 
